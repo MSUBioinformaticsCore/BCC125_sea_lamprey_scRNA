@@ -1,0 +1,56 @@
+---
+title: "BCC125_sea_lamprey_scRNA"
+author: "Stephanie Hickey"
+date: "2024-11-25"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+# Summary
+
+# Set up
+
+Install and load libraries
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE))
+install.packages("BiocManager")
+
+BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
+                       'limma', 'lme4', 'S4Vectors', 'SingleCellExperiment',
+                       'SummarizedExperiment', 'batchelor', 'HDF5Array',
+                       'terra', 'ggrastr'))
+
+install.packages("devtools")
+devtools::install_github('cole-trapnell-lab/monocle3')
+
+
+library(SingleCellExperiment)
+library(monocle3)
+library(DropletUtils)
+```
+
+Set Paths
+```{r}
+results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results"
+data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
+```
+
+Load data
+```{r}
+
+```
+
+Create `SingleCellExperiment` objects
+```{r}
+
+```
+
+# empty droplets for 20k
+# qc no mt genes
+# clustering 
+# doublet detection
+# re-clustering 
+# annotate clusters
+# get rid of high mito cells that are not of interest
