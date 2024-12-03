@@ -1,55 +1,229 @@
 ---
 title: "BCC125_sea_lamprey_scRNA"
 author: "Stephanie Hickey"
-date: "2024-11-25"
+date: "`r Sys.Date()`"
 output: html_document
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    sampleID: TF_C00004337
+    expected_cells: 20000
 ---
-
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
-# Summary
+
+```{r, echo=FALSE, results="asis"}
+## parameterized text
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+cat("#### Sample:", params$sampleID, " \n")
+```
 
 # Set up
 
-Install and load libraries
+Load libraries
 ```{r}
-if (!requireNamespace("BiocManager", quietly = TRUE))
-install.packages("BiocManager")
-
-BiocManager::install(c('BiocGenerics', 'DelayedArray', 'DelayedMatrixStats',
-                       'limma', 'lme4', 'S4Vectors', 'SingleCellExperiment',
-                       'SummarizedExperiment', 'batchelor', 'HDF5Array',
-                       'terra', 'ggrastr'))
-
-install.packages("devtools")
-devtools::install_github('cole-trapnell-lab/monocle3')
-
-
+library(tidyverse)
+library(Matrix)
 library(SingleCellExperiment)
 library(monocle3)
 library(DropletUtils)
+library(scater)
+library(ape)
 ```
 
 Set Paths
 ```{r}
-results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results"
-data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
+results_dir = paste0(params$project_dir, "/results")
+# results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results"
+data_dir = paste0(params$project_dir, "/data")
+# data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
 ```
+
+# Sample quality control
 
 Load data
 ```{r}
+sampleID = params$sampleID
+mat = readMM(paste0(data_dir, "/", sampleID, "/raw_matrix/matrix.mtx.gz"))
+barcodes = read.delim(paste0(data_dir, "/", sampleID, "/raw_matrix/barcodes.tsv.gz"), header=F)
+barcodes$V1 = paste0(sampleID, "_", barcodes$V1)
 
+genes = read.delim(paste0(data_dir,"/", sampleID, "/raw_matrix/features.tsv.gz"), header=F)  
+
+rownames(mat) = genes$V1
+colnames(mat) = barcodes$V1
 ```
 
-Create `SingleCellExperiment` objects
+Create `SingleCellExperiment` object
 ```{r}
+sce <- SingleCellExperiment(assays = list(counts = mat))
+```
+
+## Detect empty droplets with `DropletUtils`
+
+Empty droplets often contain RNA from the ambient solution, resulting in non-zero counts after debarcoding. The `emptyDrops` function is designed to distinguish between empty droplets and cells. It does so by testing each barcode’s expression profile for significant deviation from the ambient profile.
+
+```{r}
+# Set a seed. This can be any number. Using the same number every time ensures that a sequence of random numbers generated is the same every time you run your code.
+set.seed(100) 
+
+# set `by.rank` to the max number of cells you expect
+e.out <- emptyDrops(counts(sce), 
+                    by.rank = as.numeric(params$expected_cells)) 
+e.out
+
+# add barcodes to a column
+e.out$barcode = rownames(e.out)
+
+# make a vector of significant barcodes
+# use a false discovery rate (FDR) of 0.1%,
+# meaning that no more than 0.1% of our called 
+# barcodes should be empty droplets on average.
+sig_barcodes <- 
+  as_tibble(e.out) %>%
+  filter(FDR < .001) %>% 
+  pull(barcode)
+
+# how many cells?
+length(sig_barcodes)
+
+sce <- sce[,sig_barcodes]
+```
+
+A useful diagnostic for droplet-based data is the barcode rank plot, which shows the (log-)total UMI count for each barcode on the y-axis and the (log-)rank on the x-axis. This is effectively a transposed empirical cumulative density plot with log-transformed axes. It is useful as it allows users to examine the distribution of total counts across barcodes, focusing on those with the largest counts. 
+
+```{r}
+br.out <- barcodeRanks(counts(sce))
+head(br.out)
+
+# make the rownames a column
+br.out$barcodes <- rownames(br.out)
+head(br.out)
+
+br.df =
+  as.data.frame(br.out) %>%
+  mutate(keep_cells = case_when(
+   barcodes %in% sig_barcodes ~ "TRUE",
+   !barcodes %in% sig_barcodes ~ "FALSE"
+  ))
+
+# Making the knee plot.
+ggplot(br.df, aes(x=rank, y=total)) +
+  geom_point(aes(color = keep_cells)) +
+  scale_colour_manual(values = c("black","red")) +
+  geom_hline(aes(yintercept=metadata(br.out)$knee,
+             linetype="knee"),
+             color = "dodgerblue") +
+  geom_hline(aes(yintercept=metadata(br.out)$inflection,
+             linetype="inflection"),
+             color = "forestgreen") +
+  scale_linetype_manual(name = "legend", 
+                        values = c(2, 2), 
+                        guide = guide_legend(override.aes = list(color = c("forestgreen", "dodgerblue")))) +
+  scale_x_continuous(trans='log10') +
+  scale_y_continuous(trans='log10') +
+  xlab("Rank") +
+  ylab("Total Counts")
+
+ggsave(file = paste0(results_dir,"/", samp, "/kneeplot.png"))
+```
+
+## Identifying low quality cells
+
+Common metrics include for identifying low quality cells include:
+
+  * Total counts    
+  * Number of expressed features (genes)   
+  * Proportion of reads mapped to genes in the mitochondrial genome    
+  
+For each cell, we calculate these QC metrics using the `perCellQCMetrics()` function from the `scater` package.
+```{r}
+# Identifying the mitochondrial transcripts in our SingleCellExperiment.
+
+# mouse mito genes start with "mt"
+# human is "MT"
+# change for different species
+# this is a numeric vector of row numbers
+# corresponding to mito genes
+# NC_001626.1
+all_genes = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_genes.txt", header=F)
+
+mito_genes = 
+  all_genes %>% 
+  filter(V1 == "NC_001626.1") %>%
+  pull(V6)
+
+mito_genes = gsub("gene ", "", mito_genes)
+
+is.mito = which(rownames(sce) %in% mito_genes)
+
+# show the gene names
+rownames(sce)[is.mito]
+
+# get the per cell stats
+stats <- perCellQCMetrics(sce,
+                          subsets=list(Mito=is.mito))
+
+head(stats)
+```
+
+'sum' is the the sum of counts for each cell. 'detected' is the number of genes with at least one count in each cell. 'subsets_Mito_percent' is the percent of the total counts ('sum') that come from mitochrondria genes: 'subsets_Mito_sum'.
+
+### Summarize the stats
+
+```{r}
+summary(stats$sum)
+
+summary(stats$detected)
+
+summary(stats$subsets_Mito_percent)
+```
+
+Normally, I would filter out cells with high percent mitochondria, but female germ cells likely have biologically high percent mitochondria. So I will cluster first and attempt to identify female germ cells before performing any QC filtering.
+
+# Normalization and transformation
+
+```{r}
+counts = counts(sce)
+cds <- new_cell_data_set(counts,
+                         cell_metadata = stats)
+
+cds <- preprocess_cds(cds, num_dim = 100)
+plot_pc_variance_explained(cds)
+```
+# Clustering with UMAP
+```{r}
+cds <- reduce_dimension(cds)
+```
+
+## Plot percent mitochodria reads
+```{r}
+plot_cells(cds, color_cells_by="subsets_Mito_percent")
+```
+```{r}
+cds <- cluster_cells(cds, resolution=1e-5)
+plot_cells(cds)
+```
+
+## Check for enrichment of genes of interest in each cluster
+
+```{r}
+marker_test_res <- top_markers(cds, 
+                               genes_to_test_per_group = 100,
+                               group_cells_by="cluster", cores=8)
+
+# load known marker genes
+library(readr)
+chung_davidson_cell_type_markers <- read_csv(paste0(data_dir, "/chung_davidson_cell_type_markers.csv"))
+
 
 ```
 
-# empty droplets for 20k
-# qc no mt genes
-# clustering 
+
 # doublet detection
 # re-clustering 
 # annotate clusters
