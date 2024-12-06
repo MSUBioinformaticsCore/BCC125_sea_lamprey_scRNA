@@ -33,6 +33,7 @@ library(monocle3)
 library(DropletUtils)
 library(scater)
 library(ape)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 Set Paths
@@ -207,6 +208,7 @@ plot_cells(cds, color_cells_by="subsets_Mito_percent")
 ```{r}
 cds <- cluster_cells(cds, resolution=1e-5)
 plot_cells(cds)
+ggsave(file = paste0(results_dir, "/", sampleID, "_cluster_UMAP.png"))
 ```
 
 ## Check for enrichment of genes of interest in each cluster
@@ -216,15 +218,78 @@ marker_test_res <- top_markers(cds,
                                genes_to_test_per_group = 100,
                                group_cells_by="cluster", cores=8)
 
+write.csv(marker_test_res, file = paste0(results_dir, "/", sampleID, "_cluster_marker_genes.csv"), row.names = FALSE) 
+
 # load known marker genes
 library(readr)
 chung_davidson_cell_type_markers <- read_csv(paste0(data_dir, "/chung_davidson_cell_type_markers.csv"))
+chung_davidson_cell_type_markers = 
+  chung_davidson_cell_type_markers %>%
+  select(-GeneName)
 
+marker_test_genes = 
+  marker_test_res %>%
+  select(gene_id, cell_group)
+
+cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
+                                marker_test_genes, nrow(genes))
+
+write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/", sampleID, "_marker_gene_overlaps.csv"), row.names = FALSE) 
+
+scores = cluster_ol$pval.scores
+
+scores = 
+  scores %>%
+  rename(Group1 = "CellTypes",
+         Group2 = "Clusters") %>%
+  group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+scores$FDR[scores$FDR > .01] = 1
+
+plot1 =
+    ggplot(scores,
+           aes(Clusters, CellTypes)) + 
+           geom_tile(aes(fill = -log10(FDR)), 
+                     color = "light gray") +
+        #Creating legend
+        guides(fill=guide_colorbar(title = "-log10(FDR)",
+                                   barheight = 10,
+                                   barwidth = 2,
+                                   default.unit = "mm")) +
+        #Creating color range
+        scale_fill_gradientn(colors=c("white",
+                                      "#fd9668",
+                                      "#f1605d",
+                                      "#de4968",
+                                      "#9e2f7f"),
+                             guide="colorbar",
+                             limits = c(0, 23)) +
+        #Rotating labels
+        theme(axis.text.x = element_text(angle = 30, 
+                                         hjust = 0,vjust=-0.05),
+              ) +
+        theme(text = element_text(size = 7),
+              axis.text = element_text(size = 7)) +
+        geom_text(aes(label = nSharedGenes), size = 1) +
+        coord_fixed()
+
+plot1
+
+ggsave(plot1, file = paste0(results_dir, "/", sampleID, "_overlap_heatmap.png"))
 
 ```
 
+## Plot Mitochondira gene percent per cluster
+```{r}
 
-# doublet detection
-# re-clustering 
-# annotate clusters
+colData(cds)$cluster = clusters(cds)
+
+mito_vln = 
+  ggplot(colData(cds), aes(y = subsets_Mito_percent, x = cluster)) +
+  geom_violin()
+
+mito_vln
+ggsave(mito_vln, file = paste0(results_dir, "/", sampleID, "_percent_mito_vln.png"))
+```
 # get rid of high mito cells that are not of interest
