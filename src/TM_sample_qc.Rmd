@@ -1,0 +1,307 @@
+---
+title: "BCC125_sea_lamprey_scRNA"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    sampleID: TM_C00004374
+    expected_cells: 20000
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+## parameterized text
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+cat("#### Sample:", params$sampleID, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(Matrix)
+library(SingleCellExperiment)
+library(monocle3)
+library(DropletUtils)
+library(scater)
+library(ape)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir = paste0(params$project_dir, "/results" )
+# results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results"
+data_dir = paste0(params$project_dir, "/data")
+# data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
+```
+
+```{r}
+sampleID = params$sampleID
+mat = readMM(paste0(data_dir, "/", sampleID, "/raw_matrix/matrix.mtx.gz"))
+barcodes = read.delim(paste0(data_dir, "/", sampleID, "/raw_matrix/barcodes.tsv.gz"), header=F)
+barcodes$V1 = paste0(sampleID, "_", barcodes$V1)
+
+genes = read.delim(paste0(data_dir,"/", sampleID, "/raw_matrix/features.tsv.gz"), header=F)  
+
+rownames(mat) = genes$V1
+colnames(mat) = barcodes$V1
+```
+
+```{r}
+sce <- SingleCellExperiment(assays = list(counts = mat))
+```
+
+## Detect empty droplets with `DropletUtils`
+
+```{r}
+# Set a seed. This can be any number. Using the same number every time ensures that a sequence of random numbers generated is the same every time you run your code.
+set.seed(100) 
+
+# set `by.rank` to the max number of cells you expect
+e.out <- emptyDrops(counts(sce), 
+                    by.rank = as.numeric(params$expected_cells)) 
+
+# add barcodes to a column
+e.out$barcode = rownames(e.out)
+
+# make a vector of significant barcodes
+# use a false discovery rate (FDR) of 0.1%,
+# meaning that no more than 0.1% of our called 
+# barcodes should be empty droplets on average.
+sig_barcodes <- 
+  as_tibble(e.out) %>%
+  filter(FDR < .001) %>% 
+  pull(barcode)
+
+```
+Empty droplets often contain RNA from the ambient solution, resulting in non-zero counts after debarcoding. The `emptyDrops` function is designed to distinguish between empty droplets and cells. It does so by testing each barcode’s expression profile for significant deviation from the ambient profile. Using this method, `r length(sig_barcodes)` barcodes represent cells.
+
+Below is a barcode rank plot, or knee plot, which shows the (log-)total UMI count for each barcode on the y-axis and the (log-)rank on the x-axis. The plot resembles a curve with a sharp "knee" or "elbow." Cells with high RNA content (likely real biological cells), are on the left side of the plot. Low-RNA-content cells (likely empty droplets or low-quality cells) are on the right side. The "knee" or transition point marks the threshold between high-quality cells and low-quality or empty droplets.
+
+```{r}
+br.out <- barcodeRanks(counts(sce))
+
+# make the rownames a column
+br.out$barcodes <- rownames(br.out)
+
+br.df =
+  as.data.frame(br.out) %>%
+  mutate(keep_cells = case_when(
+   barcodes %in% sig_barcodes ~ "TRUE",
+   !barcodes %in% sig_barcodes ~ "FALSE"
+  ))
+
+# Making the knee plot.
+ggplot(br.df, aes(x=rank, y=total)) +
+  geom_point(aes(color = keep_cells)) +
+  scale_colour_manual(values = c("black","red")) +
+  geom_hline(aes(yintercept=metadata(br.out)$knee,
+             linetype="knee"),
+             color = "dodgerblue") +
+  geom_hline(aes(yintercept=metadata(br.out)$inflection,
+             linetype="inflection"),
+             color = "forestgreen") +
+  scale_linetype_manual(name = "legend", 
+                        values = c(2, 2), 
+                        guide = guide_legend(override.aes = list(color = c("forestgreen", "dodgerblue")))) +
+  scale_x_continuous(trans='log10') +
+  scale_y_continuous(trans='log10') +
+  xlab("Rank") +
+  ylab("Total Counts")
+
+ggsave(file = paste0(results_dir,"/", sampleID, "_kneeplot.png"))
+ sce <- sce[,sig_barcodes]
+```
+
+## Identifying low quality cells
+
+Common metrics include for identifying low quality cells include:
+
+  * Total counts    
+  * Number of expressed features (genes)   
+  * Proportion of reads mapped to genes in the mitochondrial genome    
+  
+For each cell, we calculate these QC metrics using the `perCellQCMetrics()` function from the `scater` package.
+
+```{r}
+# Identifying the mitochondrial transcripts in our SingleCellExperiment.
+
+# mouse mito genes start with "mt"
+# human is "MT"
+# change for different species
+# this is a numeric vector of row numbers
+# corresponding to mito genes
+# NC_001626.1
+all_genes = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_genes.txt", header=F)
+
+mito_genes = 
+  all_genes %>% 
+  filter(V1 == "NC_001626.1") %>%
+  pull(V6)
+
+mito_genes = gsub("gene ", "", mito_genes)
+is.mito = which(rownames(sce) %in% mito_genes)
+
+# get the per cell stats
+stats <- perCellQCMetrics(sce,
+                          subsets=list(Mito=is.mito))
+```
+
+### Summarize the stats
+
+The total counts in each cell:
+```{r}
+summary(stats$sum)
+```
+
+The number of genes with at least one count in each cell:
+```{r}
+summary(stats$detected)
+```
+
+These are the genes on the mitochondrial chromosome, NC_001626.1.
+
+```{r}
+mito_genes
+```
+
+The percent of counts that come from mitochondria genes:
+```{r}
+summary(stats$subsets_Mito_percent)
+```
+
+### Filter cells with high mitochondria gene reads
+
+```{r}
+high.mito <- isOutlier(stats$subsets_Mito_percent, type="higher")
+```
+
+I propose removing every cell with percent mito > `r as.numeric(attr(high.mito, "thresholds")[2])`, which is 3 median absolute deviations (MAD) above the median percent mito. This is `r sum(high.mito)` out of `r length(high.mito)` cells.
+
+```{r}
+counts = counts(sce)
+cds <- new_cell_data_set(counts,
+                         cell_metadata = stats)
+colData(cds)$discard = high.mito
+saveRDS(cds, file = paste0(data_dir, "/", sampleID, "_cds.Rds"))
+```
+
+## Cluster cells
+```{r}
+colData(cds)$barcode = rownames(colData(cds))
+colData_df = as.data.frame(colData(cds))
+
+keep_cells = 
+  colData_df %>%
+  filter(discard == FALSE) %>%
+  pull(barcode)
+
+cds = cds[,keep_cells]
+cds <- preprocess_cds(cds, num_dim = 100)
+cds <- reduce_dimension(cds)
+cds <- cluster_cells(cds, resolution=1e-5)
+saveRDS(cds, file = paste0(data_dir, "/", sampleID, "_cds_mito_filter.Rds"))
+
+plot_cells(cds)
+ggsave(file = paste0(results_dir, "/", sampleID, "_cluster_mito_filtered_UMAP.png"))
+```
+
+## Check for enrichment of known cell-type markers 
+
+This table contains the top ~100 cluster enriched genes for each cluster after removing mitochondria genes. It is saved in `r paste0( sampleID, "_cluster_marker_genes_mito_filtered.csv")`. The markers can help us map a cluster to a cell type.
+
+**Column descriptions**
+
+* `gene_id` vector of gene names    
+* `cell_group` character vector of the cell group to which the cell belongs   
+* `marker_score` numeric vector of marker scores as the fraction expressing scaled by the specificity. The value ranges from 0 to 1.    
+* `mean_expression` numeric vector of mean normalized expression of the gene in the cell group    
+* `fraction_expressing` numeric vector of fraction of cells expressing the gene within the cell group   
+* `specificity` numeric vector of a measure of how specific the gene's expression is to the cell group based on the Jensen-Shannon divergence. The value ranges from 0 to 1.   
+* `pseudo_R2` numeric vector of pseudo R-squared values, a measure of how well the gene expression model fits the categorical data relative to the null model. The value ranges from 0 to 1.   
+* `marker_test_p_value` numeric vector of likelihood ratio p-values   
+* `marker_test_q_value` numeric vector of likelihood ratio q-values   
+
+```{r, results='hide'}
+marker_test_res <- top_markers(cds, 
+                               genes_to_test_per_group = 100,
+                               group_cells_by="cluster", cores=8)
+
+write.csv(marker_test_res, file = paste0(results_dir, "/", sampleID, "_cluster_marker_genes_mito_filtered.csv"), row.names = FALSE) 
+```
+
+```{r}
+library(DT)
+datatable(marker_test_res, filter = "top")
+```
+
+We'll check for the significance of the overlap between the top 100 cluster enriched genes and the supplied known cell-type markers. In the plot below, the rows represent cell types with know marker genes, and the columns represent the cell clusters. The number in each box is the number of genes shared between the top 100 cluster enriched genes for the specified clusters and the specified known cell-type markers. Each box is colored by the significance of the overlap ($-log10(FDR)$).
+
+```{r}
+# load known marker genes
+library(readr)
+chung_davidson_cell_type_markers <- read_csv(paste0(data_dir, "/chung_davidson_cell_type_markers.csv"))
+chung_davidson_cell_type_markers = 
+  chung_davidson_cell_type_markers %>%
+  select(-GeneName)
+
+marker_test_genes = 
+  marker_test_res %>%
+  select(gene_id, cell_group)
+
+cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
+                                marker_test_genes, nrow(genes))
+
+write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/", sampleID, "_marker_gene_overlaps_mito_filtered.csv"), row.names = FALSE) 
+
+scores = cluster_ol$pval.scores
+
+scores = 
+  scores %>%
+  rename(Group1 = "CellTypes",
+         Group2 = "Clusters") %>%
+  group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+scores$FDR[scores$FDR > .01] = 1
+
+plot1 =
+    ggplot(scores,
+           aes(Clusters, CellTypes)) + 
+           geom_tile(aes(fill = -log10(FDR)), 
+                     color = "light gray") +
+        #Creating legend
+        guides(fill=guide_colorbar(title = "-log10(FDR)",
+                                   barheight = 10,
+                                   barwidth = 2,
+                                   default.unit = "mm")) +
+        #Creating color range
+        scale_fill_gradientn(colors=c("white",
+                                      "#fd9668",
+                                      "#f1605d",
+                                      "#de4968",
+                                      "#9e2f7f"),
+                             guide="colorbar",
+                             limits = c(0, 23)) +
+        #Rotating labels
+        theme(axis.text.x = element_text(angle = 30, 
+                                         hjust = 0,vjust=-0.05),
+              ) +
+        theme(text = element_text(size = 7),
+              axis.text = element_text(size = 7)) +
+        geom_text(aes(label = nSharedGenes), size = 1) +
+        coord_fixed()
+
+plot1
+
+ggsave(plot1, file = paste0(results_dir, "/", sampleID, "_overlap_heatmap_mito_filtered.png"))
+```
+A table with the overlapping genes is shown below. Filtering for `Group1` = "Male Germ Cells" and `Group2` = "1" will show the genes shared between those groups.
+```{r}
+datatable(cluster_ol$intersecting.genes, filter = "top", rownames = FALSE)
+```
