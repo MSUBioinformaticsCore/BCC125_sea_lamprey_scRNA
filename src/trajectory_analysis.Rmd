@@ -1,0 +1,785 @@
+---
+title: "Single cell trajectory analysis"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output: html_document
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+## parameterized text
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+# Set up
+library(tidyverse)
+library(Matrix)
+library(monocle3)
+library(DT)
+library(patchwork)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+set.seed(1)
+```
+
+```{r}
+# Set Paths
+results_dir = paste0(params$project_dir, "/results")
+# results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results"
+data_dir = paste0(params$project_dir, "/data")
+# data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
+```
+
+```{r}
+# Load QC'd data
+sample_dirs = list.dirs(data_dir, full.names = TRUE, recursive = FALSE)
+sample_names = basename(sample_dirs)
+
+cds_list = list()
+
+for(i in 1:length(sample_dirs)){
+  
+  cds_list[[i]] = readRDS(paste0(sample_dirs[i], 
+                                 "/", 
+                                 sample_names[i],
+                                 "_cds_mito_filter.Rds"))
+}
+
+names(cds_list) = sample_names
+
+cds = combine_cds(cds_list, cell_names_unique = TRUE)
+```
+
+# QC info
+
+Cells with high counts from mitochrondria genes were filtered out before the samples were comnined.
+
+## Number of cells per sample
+```{r}
+meta_df = as.data.frame(colData(cds))
+
+knitr::kable(meta_df %>%
+               group_by(sample) %>%
+               tally(name = "nCells"))
+```
+
+## QC plots
+```{r, fig.height=8}
+mito_vln = 
+  ggplot(meta_df, aes(y = subsets_Mito_percent,
+                      x = sample)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  ggtitle("Percent reads from Mitochondria genes")
+
+counts_vln = 
+  ggplot(meta_df, aes(y = total,
+                      x = sample)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  ggtitle("Total Counts") +
+  scale_y_continuous(trans='log10')
+
+genes_vln = 
+  ggplot(meta_df, aes(y = detected,
+                      x = sample)) +
+  geom_violin() +
+  geom_boxplot(width=0.1) +
+  ggtitle("Genes detected") +
+  scale_y_continuous(trans='log10')
+
+mito_vln / counts_vln / genes_vln
+
+```
+
+# Normalize, reduce dimentionality and check for batch effects
+
+Data is normalized by log and size factor to address depth differences. The UMAP below shows all cells colored by sample.
+```{r}
+cds <- preprocess_cds(cds, num_dim = 100)
+# plot_pc_variance_explained(cds)
+cds <- reduce_dimension(cds)
+plot_cells(cds, color_cells_by="sample", label_cell_groups =FALSE)
+```
+
+UMAP plot of cells split by sample. 
+
+```{r, fig.height=7}
+plot_cells(cds, color_cells_by="sample", label_cell_groups =FALSE) + facet_wrap(~sample, nrow = 2, ncol=2)
+```
+
+There are definitely specific male, female, and UND clusters, but this could be biological given that the UND samples overlap well.
+
+# Cluster cells
+```{r}
+cds <- cluster_cells(cds, resolution=1e-5)
+plot_cells(cds)
+```
+
+The plot below shows the proportion of cells from each cluster belonging to each sample.
+
+```{r}
+colData(cds)$cluster = clusters(cds)
+meta_df = as.data.frame(colData(cds))
+
+sample_tally = 
+  meta_df %>%
+  group_by(cluster, sample) %>%
+  tally()
+
+ggplot(sample_tally, aes(fill=sample, y=cluster, x=n)) + 
+    geom_bar(position="fill", stat="identity") +
+    xlab("Proportion of cells")
+
+ggsave(file = paste0(results_dir, "/proportion_of_cells_from_each_sample.png"))
+```
+
+# Plot known cell-type markers
+
+In each cell, the expression of genes within each group are summed. In the plots, higher expression is a brighter color. Expression is scaled to percent of maximum expression.
+
+Use known markers unique to each cell type:
+
+```{r}
+# load known marker genes
+library(readr)
+chung_davidson_cell_type_markers <- read_csv(paste0(data_dir, "/chung_davidson_cell_type_markers.csv"))
+chung_davidson_cell_type_markers = 
+  chung_davidson_cell_type_markers %>%
+  select(-GeneName)
+
+chung_davidson_unique = 
+  chung_davidson_cell_type_markers %>%
+  group_by(Gene) %>%
+  tally() %>%
+  filter(n == 1) %>%
+  select(Gene) %>%
+  left_join(chung_davidson_cell_type_markers)
+
+datatable(chung_davidson_unique, filter = "top", rownames = FALSE)
+```
+
+
+Plot for early cell markers.
+
+```{r, fig.width=12, fig.height=8}
+rowData(cds)$gene_short_name = row.names(cds)
+plot_cells(cds, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Germline cells during epigenetic reprogramming", 
+                                 "Germline stem cells",
+                                 "Embryonic stem cells",
+                                 "Germline progenitor and amnionic cells",
+                                 "Primordial Germ Cells (PGC",
+                                 "Migrating germ cells",
+                                 "Late PGC (meiotic entry genes")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+Female cell markers.
+
+```{r, fig.height=4, fig.width=12}
+plot_cells(cds, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Female Germ cell", 
+                                 "Mitotic oocyte",
+                                 "Granulosa cell",
+                                 "Oocyte")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+Male cell markers.
+
+```{r, fig.width=12, fig.height=8}
+plot_cells(cds, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Male germ cells", 
+                                 "Sertoli cell",
+                                 "Mitotic Spermatogonia",
+                                 "Meiotic Spermatogonia",
+                                 "Spermatogonia",
+                                 "Primary spermatocyte")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+# Annotate clusters according to type
+
+## Cluster markers
+
+This table contains the top ~100 cluster enriched genes for each cluster. It is saved in `combined_samples_cluster_marker_genes.csv`. The markers can help us map a cluster to a cell type.
+
+**Column descriptions**
+
+* `gene_id` vector of gene names    
+* `cell_group` character vector of the cell group to which the cell belongs   
+* `marker_score` numeric vector of marker scores as the fraction expressing scaled by the specificity. The value ranges from 0 to 1.    
+* `mean_expression` numeric vector of mean normalized expression of the gene in the cell group    
+* `fraction_expressing` numeric vector of fraction of cells expressing the gene within the cell group   
+* `specificity` numeric vector of a measure of how specific the gene's expression is to the cell group based on the Jensen-Shannon divergence. The value ranges from 0 to 1.   
+* `pseudo_R2` numeric vector of pseudo R-squared values, a measure of how well the gene expression model fits the categorical data relative to the null model. The value ranges from 0 to 1.   
+* `marker_test_p_value` numeric vector of likelihood ratio p-values   
+* `marker_test_q_value` numeric vector of likelihood ratio q-values   
+
+```{r, results='hide'}
+cluster_marker_res <- top_markers(cds, 
+                               genes_to_test_per_group = 100,
+                               group_cells_by="cluster", cores=8)
+
+write.csv(cluster_marker_res, file = paste0(results_dir, "/combined_samples_cluster_marker_genes.csv"), row.names = FALSE) 
+```
+
+```{r}
+datatable(cluster_marker_res, filter = "top", rownames = FALSE)
+```
+
+## Cluster annotations
+
+We'll check for the significance of the overlap between the top 100 cluster enriched genes and the supplied known cell-type markers. In the plot below, the rows represent cell types with know marker genes, and the columns represent the cell clusters. The number in each box is the number of genes shared between the top 100 cluster enriched genes for the specified clusters and the specified known cell-type markers. Each box is colored by the significance of the overlap ($-log10(FDR)$). Significant overlaps may signify that the cells in the cluster belong to the specified cell type. 
+
+```{r, fig.width=8}
+marker_test_genes =
+  cluster_marker_res %>%
+  select(gene_id, cell_group)
+
+cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
+                                marker_test_genes, length(cds))
+
+write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/combined_sample_cluster_marker_gene_overlaps.csv"), row.names = FALSE) 
+
+scores = cluster_ol$pval.scores
+
+scores = 
+  scores %>%
+  rename(Group1 = "CellTypes",
+         Group2 = "Clusters") %>%
+  group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+scores$FDR[scores$FDR > .01] = 1
+
+plot1 =
+    ggplot(scores,
+           aes(Clusters, CellTypes)) + 
+           geom_tile(aes(fill = -log10(FDR)), 
+                     color = "light gray") +
+        #Creating legend
+        guides(fill=guide_colorbar(title = "-log10(FDR)",
+                                   barheight = 10,
+                                   barwidth = 2,
+                                   default.unit = "mm")) +
+        #Creating color range
+        scale_fill_gradientn(colors=c("white",
+                                      "#fd9668",
+                                      "#f1605d",
+                                      "#de4968",
+                                      "#9e2f7f"),
+                             guide="colorbar",
+                             limits = c(0, 23)) +
+        #Rotating labels
+        # theme(axis.text.x = element_text(angle = 30, 
+        #                                  hjust = 0,vjust=-0.05),
+        #       ) +
+        theme(text = element_text(size = 7),
+              axis.text = element_text(size = 7)) +
+        geom_text(aes(label = nSharedGenes), size = 1) +
+        coord_fixed()
+
+plot1
+
+ggsave(plot1, file = paste0(results_dir, "/combine_samples_cluster_overlap_heatmap.png"))
+
+```
+
+# Gene ontology enrichment of cluster enriched genes
+
+To help annotate cell type clusters, we can check for enriched gene ontology categories among cell-type enriched genes.
+
+*Columns*
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Clusters`: Cluster   
+* `nClusterEnrichedGenes`: Number of cluster enriched genes      
+* `nSharedGenes`: Number of shared genes between the GO term and cluster enriched genes   
+* `Pval`: p-value          
+* `FDR`: p-value corrected for multiple comparisons            
+
+``
+```{r}
+gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf", header=F, comment = "!")
+
+gaf <- 
+  gaf %>%
+  filter(!grepl("NOT", V4)) %>%  
+  dplyr::select(V3, V5) %>%      
+  dplyr::rename(GOID = "V5",            
+                Gene = "V3") %>%
+  distinct() 
+
+keep_go = 
+  gaf %>%
+  group_by(GOID) %>%
+  tally() %>%
+  filter(n > 10,
+         n < 200) %>%
+  pull(GOID)
+
+gaf = 
+  gaf %>%
+  filter(GOID %in% keep_go)
+
+go_names = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GOs_names.txt", header = F)
+colnames(go_names) = c("GOID", "GOName")
+  
+go_ol =  phyperOverlapSets(gaf, 
+                           marker_test_genes, length(cds))
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/combined_sample_cluster_marker_gene_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores) %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .01)
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+# Construct single-cell trajectories
+
+The black line shows the trajectory graph. It connects cell clusters or individual cells in the reduced space, ensuring smooth paths through the data structure. The graph models how cells progress through different states or fates based on gene expression similarity.
+
+```{r, results='hide'}
+cds <- learn_graph(cds, use_partition = FALSE)
+plot_cells(cds,
+           color_cells_by = "cluster",
+           show_trajectory_graph = TRUE, 
+           label_groups_by_cluster=TRUE,
+           label_principal_points = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE)
+```
+
+The plot below shows the principal points in the trajectory graph. Principal points approximate key positions along the inferred trajectory and serve as summarized representations of the cells' progression through pseudotime. We need to choose 1 or more principal points that to represent the start of the trajectory. 
+
+```{r, results='hide'}
+plot_cells(cds,
+           color_cells_by = "cluster",
+           label_groups_by_cluster=FALSE,
+           label_principal_points = TRUE,
+           show_trajectory_graph = TRUE)
+```
+
+To help, here is a plot of the trajectory graph along with the expression of genes from early cell states.
+
+```{r, fig.width=9}
+plot_cells(cds, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Germline cells during epigenetic reprogramming", 
+                                 "Germline stem cells",
+                                 "Embryonic stem cells",
+                                 "Germline progenitor and amnionic cells",
+                                 "Primordial Germ Cells (PGC",
+                                 "Migrating germ cells",
+                                 "Late PGC (meiotic entry genes")),
+           show_trajectory_graph=TRUE,
+           label_groups_by_cluster=TRUE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+
+```{r, results='hide', eval=FALSE}
+# Order the cells in pseudotime
+cds <- order_cells(cds, reduction_method = "UMAP", root_pr_nodes = "Y_154")
+
+plot_cells(cds,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5)
+```
+
+```{r, results='hide', eval=FALSE}
+# Finding genes that change as a function of pseudotime
+
+cds_pr_test_res <- graph_test(cds, neighbor_graph="principal_graph", cores=10)
+
+cds_pr_test_res$Gene = rownames(cds_pr_test_res)
+
+marker_pr = 
+  left_join(chung_davidson_cell_type_markers, cds_pr_test_res) %>%
+  arrange(desc(morans_test_statistic))
+
+```
+
+# Remove the batch effect
+
+Check to see if including sample as a batch effect leads to more biologically relevant clusters/trajectories
+
+```{r}
+cds_nb <- align_cds(cds, alignment_group = "sample")
+cds_nb <- reduce_dimension(cds_nb)
+plot_cells(cds_nb, color_cells_by="sample", label_cell_groups =FALSE)
+plot_cells(cds_nb, color_cells_by="sample", label_cell_groups =FALSE) + facet_wrap(~sample, nrow = 2, ncol=2)
+```
+
+# Group cells into clusters
+
+Divide the cells into clusters. 
+
+```{r}
+cds_nb <- cluster_cells(cds_nb, resolution=1e-5)
+```
+
+## Plot clusters
+
+UMAP plot labeled by cluster.
+
+```{r}
+plot_cells(cds_nb)
+ggsave(file = paste0(results_dir, "/combine_samples_batch_removed_UMAP_nobatch.png"))
+```
+
+Proportion of cells from each cluster belonging to each sample.
+
+```{r}
+colData(cds_nb)$cluster = clusters(cds_nb)
+colData(cds_nb)$partitions = partitions(cds_nb)
+
+meta_df = as.data.frame(colData(cds_nb))
+
+sample_tally = 
+  meta_df %>%
+  group_by(cluster, sample) %>%
+  tally()
+
+ggplot(sample_tally, aes(fill=sample, y=cluster, x=n)) + 
+    geom_bar(position="fill", stat="identity") +
+    xlab("Proportion of cells")
+
+ggsave(file = paste0(results_dir, "/proportion_of_cells_from_each_sample_nobatch.png"))
+```
+
+# Plot known cell-type markers
+
+In each cell, the expression of known markers unique to each cell type within each group are summed. In the plots, higher expression is a brighter color. Expression is scaled to percent of maximum expression.
+
+Plot early cell types
+
+```{r, fig.width=12, fig.height=8}
+rowData(cds_nb)$gene_short_name = row.names(cds_nb)
+plot_cells(cds_nb, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Germline cells during epigenetic reprogramming", 
+                                 "Germline stem cells",
+                                 "Embryonic stem cells",
+                                 "Germline progenitor and amnionic cells",
+                                 "Primordial Germ Cells (PGC",
+                                 "Migrating germ cells",
+                                 "Late PGC (meiotic entry genes")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+Plot female cell types
+
+```{r, fig.width=12, fig.height=4}
+plot_cells(cds_nb, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Female Germ cell", 
+                                 "Mitotic oocyte",
+                                 "Granulosa cell",
+                                 "Oocyte")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+Plot male cell types
+
+```{r, fig.width=12, fig.height=8}
+plot_cells(cds_nb, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Male germ cells", 
+                                 "Sertoli cell",
+                                 "Mitotic Spermatogonia",
+                                 "Meiotic Spermatogonia",
+                                 "Spermatogonia",
+                                 "Primary spermatocyte")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+# Annotate clusters according to type
+
+## Cluster markers
+
+This table contains the top ~100 cluster enriched genes for each cluster. It is saved in `combined_samples_cluster_marker_genes.csv`. The markers can help us map a cluster to a cell type.
+
+**Column descriptions**
+
+* `gene_id` vector of gene names    
+* `cell_group` character vector of the cell group to which the cell belongs   
+* `marker_score` numeric vector of marker scores as the fraction expressing scaled by the specificity. The value ranges from 0 to 1.    
+* `mean_expression` numeric vector of mean normalized expression of the gene in the cell group    
+* `fraction_expressing` numeric vector of fraction of cells expressing the gene within the cell group   
+* `specificity` numeric vector of a measure of how specific the gene's expression is to the cell group based on the Jensen-Shannon divergence. The value ranges from 0 to 1.   
+* `pseudo_R2` numeric vector of pseudo R-squared values, a measure of how well the gene expression model fits the categorical data relative to the null model. The value ranges from 0 to 1.   
+* `marker_test_p_value` numeric vector of likelihood ratio p-values   
+* `marker_test_q_value` numeric vector of likelihood ratio q-values   
+
+```{r, results='hide'}
+cluster_marker_res <- top_markers(cds_nb, 
+                               genes_to_test_per_group = 100,
+                               group_cells_by="cluster", cores=8)
+
+write.csv(cluster_marker_res, file = paste0(results_dir, "/combined_samples_cluster_marker_genes_no_batch.csv"), row.names = FALSE) 
+```
+
+```{r}
+library(DT)
+datatable(cluster_marker_res, filter = "top", rownames = FALSE)
+```
+
+## Cluster annotations
+
+We'll check for the significance of the overlap between the top 100 cluster enriched genes and the supplied known cell-type markers. In the plot below, the rows represent cell types with know marker genes, and the columns represent the cell clusters. The number in each box is the number of genes shared between the top 100 cluster enriched genes for the specified clusters and the specified known cell-type markers. Each box is colored by the significance of the overlap ($-log10(FDR)$). Significant overlaps may signify that the cells in the cluster belong to the specified cell type. 
+
+```{r, fig.width=8}
+# load known marker genes
+library(readr)
+chung_davidson_cell_type_markers <- read_csv(paste0(data_dir, "/chung_davidson_cell_type_markers.csv"))
+chung_davidson_cell_type_markers = 
+  chung_davidson_cell_type_markers %>%
+  select(-GeneName)
+
+marker_test_genes =
+  cluster_marker_res %>%
+  select(gene_id, cell_group)
+
+cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
+                                marker_test_genes, length(cds))
+
+write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/combined_sample_cluster_marker_gene_overlaps_nobatch.csv"), row.names = FALSE) 
+
+scores = cluster_ol$pval.scores
+
+scores = 
+  scores %>%
+  rename(Group1 = "CellTypes",
+         Group2 = "Clusters") %>%
+  group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+scores$FDR[scores$FDR > .01] = 1
+
+plot1 =
+    ggplot(scores,
+           aes(Clusters, CellTypes)) + 
+           geom_tile(aes(fill = -log10(FDR)), 
+                     color = "light gray") +
+        #Creating legend
+        guides(fill=guide_colorbar(title = "-log10(FDR)",
+                                   barheight = 10,
+                                   barwidth = 2,
+                                   default.unit = "mm")) +
+        #Creating color range
+        scale_fill_gradientn(colors=c("white",
+                                      "#fd9668",
+                                      "#f1605d",
+                                      "#de4968",
+                                      "#9e2f7f"),
+                             guide="colorbar",
+                             limits = c(0, 23)) +
+        #Rotating labels
+        # theme(axis.text.x = element_text(angle = 30, 
+        #                                  hjust = 0,vjust=-0.05),
+        #       ) +
+        theme(text = element_text(size = 7),
+              axis.text = element_text(size = 7)) +
+        geom_text(aes(label = nSharedGenes), size = 1) +
+        coord_fixed()
+
+plot1
+
+ggsave(plot1, file = paste0(results_dir, "/combine_samples_cluster_overlap_heatmap.png"))
+
+```
+
+A table with the overlapping genes is shown below. Filtering for `Group1` = "Female Germ Cell" and `Group2` = "19" will show the genes shared between those groups.
+```{r}
+datatable(cluster_ol$intersecting.genes, filter = "top", rownames = FALSE)
+```
+
+# Gene ontology enrichment of cluster enriched genes
+
+To help annotate cell type clusters, we can check for enriched gene ontology categories among cell-type enriched genes.
+
+*Columns*
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Clusters`: Cluster   
+* `nClusterEnrichedGenes`: Number of cluster enriched genes      
+* `nSharedGenes`: Number of shared genes between the GO term and cluster enriched genes   
+* `Pval`: p-value          
+* `FDR`: p-value corrected for multiple comparisons            
+
+```{r}
+gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf", header=F, comment = "!")
+
+gaf <- 
+  gaf %>%
+  filter(!grepl("NOT", V4)) %>%  
+  dplyr::select(V3, V5) %>%      
+  dplyr::rename(GOID = "V5",            
+                Gene = "V3") %>%
+  distinct() 
+
+keep_go = 
+  gaf %>%
+  group_by(GOID) %>%
+  tally() %>%
+  filter(n > 10,
+         n < 200) %>%
+  pull(GOID)
+
+gaf = 
+  gaf %>%
+  filter(GOID %in% keep_go)
+
+go_names = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GOs_names.txt", header = F)
+colnames(go_names) = c("GOID", "GOName")
+  
+go_ol =  phyperOverlapSets(gaf, 
+                           marker_test_genes, length(cds))
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/combined_sample_cluster_marker_gene_GO_overlaps_nobatch.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores) %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .01)
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+
+# Construct single-cell trajectories
+
+The black line shows the trajectory graph. It connects cell clusters or individual cells in the reduced space, ensuring smooth paths through the data structure. The graph models how cells progress through different states or fates based on gene expression similarity.
+
+```{r, results='hide'}
+cds_nb <- learn_graph(cds_nb, use_partition = FALSE)
+plot_cells(cds_nb,
+           color_cells_by = "cluster",
+           label_groups_by_cluster=TRUE,
+           label_principal_points = FALSE,
+           label_branch_points = FALSE,
+           label_roots = FALSE,
+           label_leaves = FALSE,
+           show_trajectory_graph=TRUE)
+```
+
+Principal points approximate key positions along the inferred trajectory and serve as summarized representations of the cells' progression through pseudotime. We need to choose 1 or more principal points that to represent the start of the trajectory. **Note** We'll need to prefrom this analysis for each connected component (section where the line is continuous) of interest in the graph.
+
+```{r}
+plot_cells(cds_nb,
+           color_cells_by = "cluster",
+           label_groups_by_cluster=FALSE,
+           label_principal_points = TRUE,
+           show_trajectory_graph=TRUE)
+```
+
+To help, here is a plot of the trajectory graph along with the expression of genes from early cell states.
+
+```{r, fig.width=12, fig.height=8}
+plot_cells(cds_nb, genes=chung_davidson_unique %>% 
+             filter(Group %in% c("Germline cells during epigenetic reprogramming", 
+                                 "Germline stem cells",
+                                 "Embryonic stem cells",
+                                 "Germline progenitor and amnionic cells",
+                                 "Primordial Germ Cells (PGC",
+                                 "Migrating germ cells",
+                                 "Late PGC (meiotic entry genes")),
+           show_trajectory_graph=TRUE,
+           label_groups_by_cluster=TRUE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+```{r, results='hide', eval=FALSE}
+# Order the cells in pseudotime
+cds_nb <- order_cells(cds_nb, reduction_method = "UMAP", root_pr_nodes = "Y_154")
+
+plot_cells(cds_nb,
+           color_cells_by = "pseudotime",
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points=FALSE,
+           graph_label_size=1.5)
+```
+
+```{r, results='hide', eval=FALSE}
+# Find genes that change as a function of pseudotime
+cds_pr_test_res <- graph_test(cds_nb, neighbor_graph="principal_graph", cores=10)
+
+cds_pr_test_res$Gene = rownames(cds_pr_test_res)
+
+marker_pr = 
+  left_join(chung_davidson_cell_type_markers, cds_pr_test_res) %>%
+  arrange(desc(morans_test_statistic))
+
+```
+
+
+
+
+
+
+
+
+
