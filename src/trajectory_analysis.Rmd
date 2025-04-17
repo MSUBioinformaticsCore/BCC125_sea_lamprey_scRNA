@@ -319,7 +319,6 @@ To help annotate cell type clusters, we can check for enriched gene ontology cat
 * `Pval`: p-value          
 * `FDR`: p-value corrected for multiple comparisons            
 
-``
 ```{r}
 gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf", header=F, comment = "!")
 
