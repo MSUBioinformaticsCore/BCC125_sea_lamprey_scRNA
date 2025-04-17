@@ -104,7 +104,7 @@ for (n in names(all.sce)) {
 
 saveRDS(all.sce, file=paste0(results_dir, "/all.sce.Rds"))
 ```
-```{r, fig.height=10, fig.width=8}
+```{r, fig.height=8, fig.width=8}
 all.sce = readRDS(paste0(results_dir, "/all.sce.Rds"))
 
 all.umap <- list()
@@ -356,15 +356,23 @@ scatter_summary[[i]] =
 
 }
 
+# https://www.ncbi.nlm.nih.gov/gene/?term=txid7757[Organism:noexp]
+gene_description = read.delim(paste0(data_dir, "/ncbi_gene_txid7757.txt"))
+
+gene_description = 
+  gene_description %>%
+  dplyr::rename(Gene = "Symbol") %>%
+  select(Gene, description, other_designations)
+
 scatter_markers_df =
   do.call(rbind, scatter_summary) %>%
-  filter(FDR < .01)
+  left_join(gene_description, by="Gene") %>%
+  filter(FDR < .01) 
 
 write.csv(scatter_markers_df, file = paste0(results_dir, "/scatter_cluster_marker_genes.csv"))
   
 scatter_markers_top100 = 
-  do.call(rbind, scatter_summary) %>%
-  filter(FDR < .01) %>%
+  scatter_markers_df %>%
   group_by(cluster) %>%
   slice_min(FDR, n = 100, with_ties=TRUE)
   
@@ -386,6 +394,14 @@ marker_test_genes =
 
 cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
                                 marker_test_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+cluster_ol$intersecting.genes = 
+  cluster_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/scatter_cluster_marker_gene_overlaps.csv"), row.names = FALSE) 
 
@@ -499,6 +515,14 @@ colnames(go_names) = c("GOID", "GOName")
   
 go_ol =  phyperOverlapSets(gaf, 
                            marker_test_genes, length(merged.cds))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/scatter_cluster_marker_gene_GO_overlaps.csv"), row.names = FALSE) 
 
@@ -632,6 +656,14 @@ monocle_genes =
 
 cluster_ol =  phyperOverlapSets(monocle_genes, 
                                 marker_test_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+cluster_ol$intersecting.genes = 
+  cluster_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/scatter_monocle_cluster_marker_gene_overlaps.csv"), row.names = FALSE) 
 
@@ -786,9 +818,9 @@ group_list = list(erythrocytes = 8,
                   oogonia.oocytes = 5,
                   early.sperm = c(7, 17, 18,19,16))
 
-  plot(pseudo$mst, mark.groups = group_list, size = 20)
+  plot(pseudo$mst, mark.groups = group_list, size = 10)
   legend("topright", 
-         legend=c("U", "UF", "F", "UM", "M"), 
+         legend=smp, 
          col= colr,
          pt.bg =colr,
          pch=21, pt.cex=2, bty="n")
@@ -1121,13 +1153,13 @@ scatter_summary[[i]] =
 
 scatter_markers_df =
   do.call(rbind, scatter_summary) %>%
-  filter(FDR < .01)
+  left_join(gene_description, by="Gene") %>%
+  filter(FDR < .01) 
 
 write.csv(scatter_markers_df, file = paste0(results_dir, "/original_sex_scatter_cluster_marker_genes.csv"))
   
 scatter_markers_top100 = 
-  do.call(rbind, scatter_summary) %>%
-  filter(FDR < .01) %>%
+  scatter_markers_df %>%
   group_by(cluster) %>%
   slice_min(FDR, n = 100, with_ties=TRUE)
   
@@ -1146,6 +1178,15 @@ marker_test_genes =
 
 cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
                                 marker_test_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+cluster_ol$intersecting.genes = 
+  cluster_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
 
 write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/original_sex_scatter_cluster_marker_gene_overlaps.csv"), row.names = FALSE) 
 
@@ -1255,6 +1296,14 @@ colnames(go_names) = c("GOID", "GOName")
   
 go_ol =  phyperOverlapSets(gaf, 
                            marker_test_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/original_sex_scatter_cluster_marker_gene_GO_overlaps.csv"), row.names = FALSE) 
 
@@ -1403,8 +1452,15 @@ for (i in 1:length(test_pseudo)){
   
 }
 
-test_pseudo_filt_df = do.call(rbind, test_pseudo_filt)
-test_pseudo_filt_df = test_pseudo_filt_df[, c("Path", "SYMBOL", "logFC", "p.value", "FDR")]
+symbol_description = 
+  gene_description %>%
+  dplyr::rename(SYMBOL = "Gene")
+
+test_pseudo_filt_df = 
+  do.call(rbind, test_pseudo_filt) %>%
+  left_join(symbol_description, by = "SYMBOL")
+
+test_pseudo_filt_df = test_pseudo_filt_df[, c("Path", "SYMBOL", "description", "other_designations", "logFC", "p.value", "FDR")]
 write.csv(test_pseudo_filt_df, file = paste0(results_dir, "/orig_sex_pseudotime_de_genes.csv"))
 
 test_pseudo100 = 
@@ -1425,7 +1481,7 @@ datatable(test_pseudo100, filter = "top", rownames = FALSE)
 
 A more advanced analysis involves looking for differences in expression between paths of a branched trajectory. This is most interesting for cells close to the branch point between two or more paths where the differential expression analysis may highlight genes responsible for the branching event. The general strategy here is to fit one trend to the unique part of each path immediately following the branch point, followed by a comparison of the fits between paths.
 
-These plots show pseudotime in cells in cluster 1 along paths 2 and 8 which separate male and female trajectories. 
+These plots show pseudotime in cells in cluster 1 along paths 4 and 9 which separate male and female trajectories. 
 
 ### In TSNE space:
 
@@ -1490,7 +1546,7 @@ pseudo_test9$SYMBOL <- rowData(combined.sex.sce1)$SYMBOL
 
 ## Genes that are significantly changing along path 4 and are not significant and/or changing in the opposite direction in path 9. 
 
-Saved in `original_sex_onl4_DEgenes.csv`
+Saved in `original_sex_only4_DEgenes.csv`
 
 ```{r}
 only4 <- pseudo_test4[which(pseudo_test4$FDR <= 0.05 & 
@@ -1498,7 +1554,8 @@ only4 <- pseudo_test4[which(pseudo_test4$FDR <= 0.05 &
 
 only4 = as.data.frame(only4) 
 only4$Gene = rownames(only4) 
-only4 = only4[c(4,1,2,3)]
+only4 = left_join(only4, gene_description, by = "Gene")
+only4 = only4[c(4,5,6,1,2,3)]
 
 write.csv(only4, file = paste0(results_dir, "/original_sex_onl4_DEgenes.csv"), row.names = FALSE) 
 
@@ -1565,6 +1622,14 @@ only4_genes =
 go_ol =  phyperOverlapSets(gaf, 
                            only4_genes, length(merged.sce))
 
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/origsex_only4_gene_GO_overlaps.csv"), row.names = FALSE) 
 
 scores = go_ol$pval.scores
@@ -1596,7 +1661,8 @@ only9 <- pseudo_test9[which(pseudo_test9$FDR <= 0.05 &
 
 only9 = as.data.frame(only9) 
 only9$Gene = rownames(only9) 
-only9 = only9[c(4,1,2,3)]
+only9 = left_join(only9, gene_description, by = "Gene")
+only9 = only9[c(4,5,6,1,2,3)]
 
 write.csv(only9, file = paste0(results_dir, "/original_sex_only9_DEgenes.csv"), row.names = FALSE) 
 
@@ -1658,6 +1724,15 @@ only9_genes =
   
 go_ol =  phyperOverlapSets(gaf, 
                            only9_genes, length(merged.cds))
+
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/origsex_only9_gene_GO_overlaps.csv"), row.names = FALSE) 
 
@@ -2018,15 +2093,14 @@ scatter_summary[[i]] =
 
 scatter_markers_df =
   do.call(rbind, scatter_summary) %>%
+  left_join(gene_description, by="Gene") %>%
   mutate(cluster = paste0("cluster_",cluster)) %>%
   filter(FDR < .01)
 
 write.csv(scatter_markers_df, file = paste0(results_dir, "/filtered_sex_scatter_cluster_marker_genes.csv"))
   
 scatter_markers_top100 = 
-  do.call(rbind, scatter_summary) %>%
-  mutate(cluster = paste0("cluster_",cluster)) %>%
-  filter(FDR < .01) %>%
+  scatter_markers_df %>%
   group_by(cluster) %>%
   slice_min(FDR, n = 100, with_ties=TRUE)
   
@@ -2044,6 +2118,14 @@ marker_test_genes =
 
 cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
                                 marker_test_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+cluster_ol$intersecting.genes = 
+  cluster_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/sex_scatter_cluster_marker_gene_overlaps.csv"), row.names = FALSE) 
 
@@ -2153,6 +2235,14 @@ colnames(go_names) = c("GOID", "GOName")
   
 go_ol =  phyperOverlapSets(gaf, 
                            marker_test_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/sex_scatter_cluster_marker_gene_GO_overlaps.csv"), row.names = FALSE) 
 
@@ -2302,7 +2392,12 @@ for (i in 1:length(test_pseudo)){
 }
 
 test_pseudo_filt_df = do.call(rbind, test_pseudo_filt)
-test_pseudo_filt_df = test_pseudo_filt_df[, c("Path", "SYMBOL", "logFC", "p.value", "FDR")]
+
+test_pseudo_filt_df = 
+  do.call(rbind, test_pseudo_filt) %>%
+  left_join(symbol_description, by = "SYMBOL")
+
+test_pseudo_filt_df = test_pseudo_filt_df[, c("Path", "SYMBOL", "description", "other_designations", "logFC", "p.value", "FDR")]
 write.csv(test_pseudo_filt_df, file = paste0(results_dir, "/filt_sex_pseudotime_de_genes.csv"))
 
 test_pseudo100 = 
@@ -2327,6 +2422,14 @@ test_pseudo100_genes =
 
 go_ol =  phyperOverlapSets(gaf, 
                            test_pseudo100_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/filtered_sex_pseudotime_de_top100_GO_overlaps.csv"), row.names = FALSE) 
 
@@ -2434,7 +2537,8 @@ only2 <- pseudo_test2[which(pseudo_test2$FDR <= 0.05 &
 
 only2 = as.data.frame(only2) 
 only2$Gene = rownames(only2) 
-only2 = only2[c(4,1,2,3)]
+only2 = left_join(only2, gene_description, by = "Gene")
+only2 = only2[c(4,5,6,1,2,3)]
 
 write.csv(only2, file = paste0(results_dir, "/filtered_sex_only2_DEgenes.csv"), row.names = FALSE) 
 
@@ -2523,6 +2627,14 @@ only2_genes =
 go_ol =  phyperOverlapSets(gaf, 
                            only2_genes, length(merged.sce))
 
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/filtered_sex_only2_gene_GO_overlaps.csv"), row.names = FALSE) 
 
 scores = go_ol$pval.scores
@@ -2556,7 +2668,8 @@ only8 <- pseudo_test8[which(pseudo_test8$FDR <= 0.05 &
 
 only8 = as.data.frame(only8) 
 only8$Gene = rownames(only8) 
-only8 = only8[c(4,1,2,3)]
+only8 = left_join(only8, gene_description, by = "Gene")
+only8 = only8[c(4,5,6,1,2,3)]
 
 write.csv(only8, file = paste0(results_dir, "/filtered_sex_only8_DEgenes.csv"), row.names = FALSE) 
 
@@ -2619,6 +2732,15 @@ only8_genes =
   
 go_ol =  phyperOverlapSets(gaf, 
                            only8_genes, length(merged.sce))
+
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
 
 write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/filtered_sex_only8_gene_GO_overlaps.csv"), row.names = FALSE) 
 
