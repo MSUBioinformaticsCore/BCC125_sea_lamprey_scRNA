@@ -173,7 +173,10 @@ wrap_plots(p, ncol = 2)
 This plot shows new clusters identified using the "scatter" package in the batch corrected expresion space.
 
 ```{r, fig.width=6, fig.height=6}
-plotTSNE(merged.sce, colour_by="label", text_by="label", text_colour="red", point_size = .05)
+plotTSNE(merged.sce, colour_by="label", text_by="label", text_colour="red", point_size = .05) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+ggsave(file = paste0(results_dir, "/all_cells_tsne.png"))
 ```
 
 This plot shows the proportion of cells from each sample within each new cluster.
@@ -2345,6 +2348,21 @@ legend("topleft",
        pt.bg=rainbow(length(group_list)), 
        pt.cex=2, bty="n")
 
+# pdf(file = paste0(results_dir, "/filtered_sex_pseudo_plot.pdf"),
+#     width = 7, height=7)
+# plot(pseudo$mst, mark.groups = group_list, size = 20)
+# legend("bottomright", 
+#        legend=smp, 
+#        col= colr,
+#        pt.bg = colr,
+#        pt.cex=2, bty="n", pch=21)
+# legend("bottomleft", 
+#        legend=names(group_list), 
+#        col=rainbow(length(group_list)), 
+#        pch=21, 
+#        pt.bg=rainbow(length(group_list)), 
+#        pt.cex=2, bty="n")
+# dev.off()
 ```
 
 ## Plot pseudotime
@@ -2550,16 +2568,36 @@ datatable(only2[order(only2$p.value),], filter="top", rownames = FALSE)
 ```{r, fig.height=8, fig.width=6}
 on.path2 <- !is.na(combined.sex.sce1$TSCAN.2)
 
+# yu-wens gene names
+gene_names_2 = read.csv(paste0(data_dir, "/filtered_sex_only2_DEgenes_Name.csv"))
+
+names2_df =  
+  data.frame(Gene = rownames(combined.sex.sce1)) %>%
+  left_join(gene_names_2)
+
+rowData(combined.sex.sce1) = names2_df
+
 top50 =
-  only2 %>%
+  names2_df %>%
   slice_min(order_by = FDR, n=50) %>%
-  pull(Gene)
+  pull(Name) %>%
+  unique()
 
 plotHeatmap(combined.sex.sce1[,on.path2], 
             order_columns_by="TSCAN.2", 
             colour_columns_by="TSCAN.2", 
             features=top50,
-            center=TRUE)
+            center=TRUE,
+            swap_rownames = "Name")
+
+pdf(file = paste0(results_dir, "/filtered_sex_only2_DEgenes_heatmap.pdf"), height = 8, width = 6)
+plotHeatmap(combined.sex.sce1[,on.path2], 
+            order_columns_by="TSCAN.2", 
+            colour_columns_by="TSCAN.2", 
+            features=top50,
+            center=TRUE,
+            swap_rownames = "Name")
+dev.off()
 ```
 
 ### Same genes on path 8. 
@@ -2681,16 +2719,35 @@ datatable(only8[order(only8$p.value),], filter="top", rownames = FALSE)
 ```{r, fig.height=8, fig.width=6}
 on.path8 <- !is.na(combined.sex.sce1$TSCAN.8)
 
+gene_names_8 = read.csv(paste0(data_dir, "/filtered_sex_only8_DEgenes_Name.csv"))
+
+names8_df =  
+  data.frame(Gene = rownames(combined.sex.sce1)) %>%
+  left_join(gene_names_8)
+
+rowData(combined.sex.sce1) = names8_df
+
 top50 =
-  only8 %>%
+  names8_df %>%
   slice_min(order_by = FDR, n=50) %>%
-  pull(Gene)
+  pull(Name) %>%
+  unique()
 
 plotHeatmap(combined.sex.sce1[,on.path8], 
             order_columns_by="TSCAN.8", 
             colour_columns_by="TSCAN.8", 
             features=top50,
-            center=TRUE)
+            center=TRUE,
+            swap_rownames = "Name")
+
+pdf(file = paste0(results_dir, "/filtered_sex_only8_DEgenes_heatmap.pdf"), height = 8, width = 6)
+plotHeatmap(combined.sex.sce1[,on.path8], 
+            order_columns_by="TSCAN.8", 
+            colour_columns_by="TSCAN.8", 
+            features=top50,
+            center=TRUE,
+            swap_rownames = "Name")
+dev.off()
 ```
 
 ### Same genes on path 2. 
