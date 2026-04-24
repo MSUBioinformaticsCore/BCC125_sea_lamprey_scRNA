@@ -1,0 +1,2140 @@
+---
+title: "20251209_tscan_trajectories"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+## parameterized text
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+# Load libraries
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(pheatmap)
+library(RColorBrewer)
+library(readxl)
+library(monocle3)
+library(batchelor)
+library(DT)
+library(TSCAN)
+library(rtracklayer)
+library(BiocSingular)
+library(ggnewscale)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+# Set Paths
+results_dir = paste0(params$project_dir, "/results/20260223")
+# results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results/20260223"
+data_dir = paste0(params$project_dir, "/data")
+# data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
+```
+
+```{r, echo=FALSE}
+# load for rendering
+all.sce = readRDS(paste0(results_dir, "/all.sce.Rds"))
+merged.sce = readRDS(paste0(results_dir, "/merged.sce.Rds"))
+merged.cds = readRDS(paste0(results_dir, "/merged.cds.Rds"))
+combined.sce = readRDS(paste0(results_dir, "/combined.sce.Rds"))
+```
+
+# Collect individual samples into one object
+```{r, eval=FALSE}
+# Load QC'd data
+sample_dirs = list.dirs(data_dir, full.names = TRUE, recursive = FALSE)
+sample_names = basename(sample_dirs)
+
+cds_list = list()
+
+for(i in 1:length(sample_dirs)){
+  
+  cds_list[[i]] = readRDS(paste0(sample_dirs[i], 
+                                 "/", 
+                                 sample_names[i],
+                                 "_cds_mito_filter.Rds"))
+}
+
+names(cds_list) = sample_names
+all.sce = list()
+
+# cds to sce
+for (cds in names(cds_list)){
+  
+  raw_counts = counts(cds_list[[cds]])
+  all.sce[[cds]] = 
+    SingleCellExperiment(list(counts=raw_counts), 
+                         colData=cds_list[[cds]]@colData)
+  all.sce[[cds]]@colData$sample = cds
+  
+}
+
+# https://bioconductor.org/books/3.14/OSCA.multisample/human-pbmcs-10x-genomics.html
+# normalization, feature selection, dim reduction
+all.sce <- lapply(all.sce, logNormCounts)
+all.dec <- lapply(all.sce, modelGeneVar)
+all.hvgs <- lapply(all.dec, getTopHVGs, prop=0.1)
+all.sce <- mapply(FUN=runPCA, x=all.sce, subset_row=all.hvgs)
+#all.sce <- lapply(all.sce, scDblFinder, dbr.per1k = 0.0003)
+#all.sce = lapply(all.sce, function(sce) {sce[, sce$scDblFinder.class == "singlet"]})
+saveRDS(all.sce, file=paste0(results_dir, "/all.sce.Rds"))
+```
+
+# Make info per sample table 
+
+```{r}
+df_list = list()
+
+for(samp in names(all.sce)){
+
+  # number of cells
+  ncells = ncol(all.sce[[samp]])
+  # mean counts
+  med_counts = round(median(colData(all.sce[[samp]])$sum))
+  # mean genes detected
+  med_genes = round(median(colData(all.sce[[samp]])$detected))
+  # mean percent mitochondria 
+  med_mito = median(colData(all.sce[[samp]])$subsets_Mito_percent)
+  med_mito = round(med_mito, digits = 2)
+  
+  df_list[[samp]] = 
+    data.frame(Sample = samp,
+              nCells = ncells,
+              medianCounts = med_counts,
+              medianGenesDetected = med_genes,
+              medianPercentMitoReads = med_mito
+              ) 
+}
+
+df_all = do.call(rbind,df_list)
+write.csv(df_all, file = paste0(results_dir, "/median_stats.csv"))
+
+datatable(df_all, rownames = FALSE)
+```
+
+# Merge samples, removing sample batch effect
+
+```{r, eval=FALSE}
+# integration
+# Intersecting the common genes.
+universe <- Reduce(intersect, lapply(all.sce, rownames))
+all.sce2 <- lapply(all.sce, "[", i=universe,)
+all.dec2 <- lapply(all.dec, "[", i=universe,)
+
+# Renormalizing to adjust for differences in depth.
+normed.sce <- do.call(multiBatchNorm, all.sce2)
+
+# Identifying a set of HVGs using stats from all batches.
+combined.dec <- do.call(combineVar, all.dec2)
+combined.hvg <- getTopHVGs(combined.dec, n=5000)
+
+set.seed(1)
+merged.sce <- do.call(fastMNN, c(normed.sce, 
+    list(subset.row=combined.hvg, BSPARAM=RandomParam())))
+
+# clustering in corrected space
+set.seed(1)
+g <- buildSNNGraph(merged.sce, use.dimred="corrected", k=30)
+set.seed(1)
+colLabels(merged.sce) <- factor(igraph::cluster_louvain(g)$membership)
+
+set.seed(1)
+merged.sce <- runUMAP(merged.sce, dimred="corrected")
+set.seed(1)
+merged.sce <- runTSNE(merged.sce, dimred="corrected")
+
+saveRDS(merged.sce, file = paste0(results_dir, "/merged.sce.Rds"))
+```
+
+The plot below shows the merged data in TSNE space separated by sample.
+```{r, fig.width=8, fig.height=8}
+# plot TSNE
+
+p <- lapply(unique(merged.sce$batch), function(f) {
+  sce.f = merged.sce[, which(merged.sce$batch == f)]
+  plotTSNE(sce.f, point_size = .05) + ggtitle(f)
+})
+
+wrap_plots(p, ncol = 2)
+```
+
+This plot shows clusters identified using the "scatter" package in the batch corrected expression space.
+
+```{r, fig.width=6, fig.height=6}
+plotTSNE(merged.sce, colour_by="label", text_by="label", text_colour="red", point_size = .05) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+#ggsave(file = paste0(results_dir, "/all_cells_tsne.png"))
+```
+
+This plot shows the proportion of cells from each sample within each new cluster.
+
+```{r}
+meta_df = as.data.frame(colData(merged.sce))
+
+sample_tally = 
+  meta_df %>%
+  group_by(label, batch) %>%
+  tally()
+
+ggplot(sample_tally, aes(fill=batch, y=label, x=n)) + 
+    geom_bar(position="fill", stat="identity") +
+    xlab("Proportion of cells")
+
+```
+
+```{r, eval=F}
+# make cds for plotting with monocle
+# Intersecting the common genes.
+all.dec <- lapply(all.sce, modelGeneVar)
+universe <- Reduce(intersect, lapply(all.sce, rownames))
+all.sce2 <- lapply(all.sce, "[", i=universe,)
+all.dec2 <- lapply(all.dec, "[", i=universe,)
+
+all.sce2 <- lapply(all.sce2, function(x) {
+  colData(x) <- colData(x)[, "sample", drop = FALSE]
+  reducedDims(x) <- list()
+  rowData(x) <- rowData(x)[, character(0)]
+  x
+})
+
+# uncorrected gene expression
+combined.sce <- do.call(cbind, all.sce2)
+saveRDS(combined.sce, file = paste0(results_dir, "/combined.sce.Rds"))
+
+merged.cds <- new_cell_data_set(counts(combined.sce),
+                                cell_metadata = merged.sce@colData)
+
+reducedDims(merged.cds)$UMAP <- reducedDims(merged.sce)$UMAP
+reducedDims(merged.cds)$tSNE <- reducedDims(merged.sce)$TSNE
+rowData(merged.cds)$gene_short_name = row.names(merged.cds)
+
+saveRDS(merged.cds, file = paste0(results_dir, "/merged.cds.Rds"))
+
+```
+
+## Gene descriptions from Wang et al. and the kPetMar1.pri gtf
+
+Summarized from [Wang et al, 2024](https://www.nature.com/articles/s41467-024-55019-x#Sec16):
+
+The sea lamprey reference genome has over 60% of genes labeled with generic "LOC" numbers, meaning their functions are unknown. To enable proper cell type identification using known retina markers, the researchers re-annotated these genes by finding their human equivalents through the following process:
+Method:
+
+  1. Converted LOC IDs to protein sequences
+  2. Used BLAST to find matching human proteins
+  3. Assigned human gene symbols to lamprey genes with human matches (written in UPPERCASE)
+  4. For genes without human matches, searched other species (written in lowercase)
+  5. Added suffixes to distinguish genes encoding the same protein
+
+```{r}
+library(readxl)
+# https://static-content.springer.com/esm/art%3A10.1038%2Fs41467-024-55019-x/MediaObjects/41467_2024_55019_MOESM3_ESM.xlsx
+gene_description = 
+  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip=1) %>%
+  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
+                Gene = "NCBI_GTF_GENEID",
+                description = "NCBI_GTF_ProteinInfo") %>%
+  dplyr::select(Gene,WangGeneID,description) %>%
+  filter(!is.na(Gene)) %>%
+  filter(!WangGeneID %in% c("LOC116945425.1", "S100A1.1")) # loc has two wang ids
+
+
+gtf = as.data.frame(readGFF("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_genomic.gtf"))
+
+gtf_filt = 
+  gtf %>%
+  filter(gbkey %in% c("mRNA", "misc_RNA", "ncRNA", "tRNA", "rRNA")) %>%
+  mutate(product = gsub(", transcript variant.*", "", product)) %>%
+  select(gene_id, product) %>%
+  distinct() %>%
+  dplyr::rename(Gene = "gene_id",
+                description = "product") %>%
+  mutate(WangGeneID = Gene)
+ 
+
+notWang = gtf_filt$Gene[!gtf_filt$Gene %in% gene_description$Gene]
+
+gtf_add = 
+  gtf_filt %>%
+  filter(Gene %in% notWang)
+
+gene_description = 
+  rbind(gene_description, gtf_add)
+
+write.csv(gene_description, file = paste0(results_dir, "/gene_descritption.csv"), row.names = F)
+
+datatable(gene_description)
+```
+
+## Load known cell-type markers
+
+```{r}
+# load known marker genes
+library(readr)
+markers_wide = read.csv(paste0(data_dir, "/Cell_Type_Marker_Genes_12-12-25.csv"))
+markers_wide = markers_wide[,2:ncol(markers_wide)]
+  
+markers_long <- markers_wide %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "CellType",
+    values_to = "Gene",
+    values_drop_na = TRUE
+  ) %>%  mutate(
+    main_part = str_remove(Gene, "\\s*\\(.*\\)"),  # Remove parentheses and content
+    paren_part = str_extract(Gene, "(?<=\\().*(?=\\))")  # Extract content inside parentheses
+  ) %>%
+  tidyr::separate_rows(main_part, sep = "/") %>%
+  mutate(main_part = trimws(main_part),
+         paren_part = trimws(paren_part)) %>%
+  filter(Gene != "")
+
+chung_davidson_markers = markers_long %>%
+  select(CellType, main_part) %>%
+  dplyr::rename(WangGeneID = "main_part") %>%
+  filter(!WangGeneID == "") %>%
+  left_join(gene_description) %>%
+  filter(!is.na(Gene))
+
+datatable(chung_davidson_markers %>% arrange(CellType), rownames = F)
+```
+
+## Compare scatter cluster enriched genes with known markers
+
+### Cluster enriched genes
+
+This table contains the top ~100 cluster enriched genes for each cluster. All of the cluster enriched genes are saved in `results/scatter_cluster_marker_genes.csv`. The markers can help us map a cluster to a cell type.
+
+In this case, genes in each cluster were compared to genes in every other cluster in a pairwise manner, and the p.values and logFCs of those comparisons have been summarized for ease of interpretation. 
+
+**Column descriptions**
+
+* `cluster`: The cluster corresponding to the enriched genes.      
+* `Gene`: The enriched gene   
+* `p.value`: The combined p-value across all pairwise comparisons.     
+* `FDR`: The BH-adjusted p-value for each gene.   
+* `summary.logFC`: This contains the summary effect size, obtained by combining effect sizes from all pairwise comparison into a single value.    
+
+```{r, eval=TRUE}
+scatter_markers = findMarkers(combined.sce,
+                              merged.sce$label,
+                              test.type="t",
+                              block=combined.sce$sample,
+                              direction="up",
+                              pval.type="some")
+
+saveRDS(scatter_markers, file= paste0(results_dir, "/scatter_markers.Rds"))
+
+scatter_summary = list()
+
+for (i in 1:length(scatter_markers)){
+  
+scatter_markers[[i]]$cluster = i
+scatter_markers[[i]]$Gene = rownames(scatter_markers[[i]])
+scatter_summary[[i]] = 
+  as.data.frame(scatter_markers[[i]]) %>%
+  select(cluster, Gene, p.value, FDR, summary.logFC)
+
+}
+
+scatter_markers_df =
+  do.call(rbind, scatter_summary) %>%
+  left_join(gene_description, by="Gene") %>%
+  filter(FDR < .01) 
+
+write.csv(scatter_markers_df, file = paste0(results_dir, "/scatter_cluster_marker_genes.csv"))
+  
+scatter_markers_top100 = 
+  scatter_markers_df %>%
+  group_by(cluster) %>%
+  slice_min(FDR, n = 100, with_ties=TRUE)
+  
+datatable(scatter_markers_top100, filter = "top", rownames = FALSE)  
+```
+
+### Comparison with known markers
+
+We'll check for the significance of the overlap between the top 100 cluster enriched genes and the supplied known cell-type markers. In the plot below, the rows represent cell types with know marker genes, and the columns represent the cell clusters. The number in each box is the number of genes shared between the top 100 cluster enriched genes for the specified clusters and the specified known cell-type markers. Each box is colored by the significance of the overlap ($-log10(FDR)$). Significant overlaps may signify that the cells in the cluster belong to the specified cell type. 
+
+* Overlap p-values are save in `results/scatter_cluster_marker_overlap_pvalues.csv`.    
+* Overlaps between cluster enriched genes and known marker genes are save in `results/scatter_cluster_marker_gene_overlaps.csv`.    
+
+```{r, fig.width=8}
+marker_test_genes =
+  scatter_markers_top100 %>%
+  select(Gene, cluster) %>%
+  mutate(cluster = paste0("cluster", cluster))
+
+chung_davidson_cell_type_markers = 
+chung_davidson_markers %>%
+  select(Gene, CellType)
+
+cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
+                                marker_test_genes, length(merged.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+cluster_ol$intersecting.genes = 
+  cluster_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/scatter_cluster_marker_gene_overlaps.csv"), row.names = FALSE) 
+
+scores = cluster_ol$pval.scores
+
+scores = 
+  scores %>%
+  rename(Group1 = "CellTypes",
+         Group2 = "Clusters") %>%
+  group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+write.csv(scores, file = paste0(results_dir, "/scatter_cluster_marker_overlap_pvalues.csv"), row.names = FALSE) 
+
+#scores$FDR[scores$FDR > .01] = 1
+
+FDR_wide <- 
+  scores %>%
+  mutate(logFDR = -log10(FDR)) %>%
+  tidyr::pivot_wider(id_cols = CellTypes, 
+                     names_from = Clusters, 
+                     values_from=logFDR)
+
+CellTypes = FDR_wide$CellTypes
+FDR_wide$CellTypes = NULL
+
+FDR_wide = as.matrix(FDR_wide)
+rownames(FDR_wide) = CellTypes
+
+ord_row <- hclust( dist(FDR_wide), method = "ward.D" )$order
+ord_col <- hclust( dist(t(FDR_wide)), method = "ward.D" )$order
+
+scores$CellTypes = factor(scores$CellTypes, levels = rownames(FDR_wide)[ord_row])
+scores$Clusters = factor(scores$Clusters, levels = colnames(FDR_wide)[ord_col])
+
+plot1 =
+    ggplot(scores,
+           aes(Clusters, CellTypes)) + 
+           geom_tile(aes(fill = -log10(FDR)), 
+                     color = "light gray") +
+        #Creating legend
+        guides(fill=guide_colorbar(title = "-log10(FDR)",
+                                   barheight = 10,
+                                   barwidth = 2,
+                                   default.unit = "mm")) +
+        #Creating color range
+        scale_fill_gradientn(colors=c("white",
+                                      "#fd9668",
+                                      "#f1605d",
+                                      "#de4968",
+                                      "#9e2f7f"),
+                             guide="colorbar",
+                             limits = c(0, ceiling(-log10(min(scores$FDR))))
+                             ) +
+        #Rotating labels
+         theme(axis.text.x = element_text(angle = 30, 
+                                          hjust = 1,vjust=1),
+               ) +
+        theme(text = element_text(size = 7),
+              axis.text = element_text(size = 7)) +
+        geom_text(aes(label = nSharedGenes), size = 1) +
+        coord_fixed()
+
+plot1
+
+ggsave(plot1, file = paste0(results_dir, "/scatter_cluster_overlap_heatmap.png"))
+```
+
+```{r, eval=TRUE, fig.show = "hide"}
+
+nested_df <- chung_davidson_markers %>%
+  group_by(CellType) %>%
+  tidyr::nest()
+
+# Then extract as a named list
+list_of_dfs <- nested_df$data
+names(list_of_dfs) <- nested_df$CellType
+names(list_of_dfs) = gsub("\\(", "", names(list_of_dfs))
+
+file_names = gsub(" ", "_", names(list_of_dfs))
+file_names = paste0(file_names, "_all_cell_clusters")
+
+anno = c( 
+"1. Fibroblasts (migrating)",
+"2. Mesonephric cells",
+"3. Granulosa cells (migrating)",
+"4. Granulosa cells",
+"5. Oogonia/Oocytes",
+"6. Endothelial cells",
+"7. Primordial germ cells (migrating)",
+"8. Erythrocytes",
+"9. Pre-granulosa cells (migrating)",
+"10. Leukocytes",
+"11. Hemopoietic stem cells",
+"12. Podocytes",
+"13. Macrophages",
+"14. Pre-granulosa cells (mitotic)",
+"15. Immune cells (migrating, mitotic)",
+"16. Spermatocytes (cytokinetic)",
+"17. Male germ cells (migrating)",
+"18. Spermatocytes (apoptotic)",
+"19. Spermatocytes (GPCR-activated)"
+)
+
+plot.sce = combined.sce
+colData(plot.sce) <- colData(merged.sce)
+
+ct = anno[colData(plot.sce)$label]
+plot.sce$CellType = ct
+plot.sce$CellType = factor(plot.sce$CellType, levels= anno)
+plot.sce$cluster = plot.sce$label
+
+plot_dir = paste0(results_dir, "/all_cell_bubble")
+if(!dir.exists(plot_dir)){dir.create(plot_dir)}
+
+scatter_markers_df = read.csv(file = paste0(results_dir, "/scatter_cluster_marker_genes.csv"), row.names = 1)
+cluster_index = as.numeric(gsub("cluster_","",scatter_markers_df$cluster))
+scatter_markers_df$CellType = anno[cluster_index]
+
+markers = 
+  scatter_markers_df %>%
+  select(WangGeneID, CellType, FDR, summary.logFC) %>%
+  dplyr::rename(Gene = "WangGeneID")
+
+## Known marker bubble plots
+for (i in 1:length(list_of_dfs)) {
+  plot_marker_bubbles(
+    sce = plot.sce,
+    markers = markers,
+    gene_description = gene_description,
+    cell_type_name = names(list_of_dfs)[i],
+    cell_type_genes = list_of_dfs[[i]],
+    anno = anno,
+    results_dir = plot_dir,
+    file_name = file_names[i]
+  )
+}
+```
+
+## Gene ontology of top 100 scatter cluster enriched genes 
+
+To help annotate cell type clusters, we can check for enriched gene ontology categories among cell-type enriched genes.
+
+**Columns**
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Clusters`: Cluster   
+* `nClusterEnrichedGenes`: Number of cluster enriched genes      
+* `nSharedGenes`: Number of shared genes between the GO term and cluster enriched genes   
+* `Pval`: p-value          
+* `FDR`: p-value corrected for multiple comparisons         
+
+Overlap p-values are save in `results/scatter_cluster_marker_gene_GO_overlap_pvalues.csv`. Overlaps between cluster enriched genes and known marker genes are save in `results/scatter_cluster_marker_gene_GO_overlaps.csv`.
+
+```{r}
+gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf", header=F, comment = "!")
+
+gaf <- 
+  gaf %>%
+  filter(!grepl("NOT", V4)) %>%  
+  dplyr::select(V3, V5) %>%      
+  dplyr::rename(GOID = "V5",            
+                Gene = "V3") %>%
+  distinct() 
+
+keep_go = 
+  gaf %>%
+  group_by(GOID) %>%
+  tally() %>%
+  filter(n > 10,
+         n < 200) %>%
+  pull(GOID)
+
+gaf = 
+  gaf %>%
+  filter(GOID %in% keep_go)
+
+go_names = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GOs_names.txt", header = F)
+colnames(go_names) = c("GOID", "GOName")
+  
+go_ol =  phyperOverlapSets(gaf, 
+                           marker_test_genes, length(merged.cds))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/scatter_cluster_marker_gene_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .01)
+
+write.csv(scores, file = paste0(results_dir, "/scatter_cluster_marker_gene_GO_overlap_pvalues.csv"), row.names = FALSE) 
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Plot known cell-type markers
+
+Plot for early cell markers.
+
+```{r, fig.width=8, fig.height=4}
+rowData(merged.cds)$gene_short_name = row.names(merged.cds)
+
+unique_markers = 
+  chung_davidson_markers %>% 
+  group_by(Gene) %>% 
+  tally() %>% 
+  filter(n == 1) %>% 
+  pull(Gene)
+
+genes_for_plot = 
+  chung_davidson_markers %>%
+  select(Gene, CellType) %>%
+  filter(Gene %in% unique_markers)
+
+plot_cells(merged.cds, reduction_method = "tSNE",
+           genes=genes_for_plot %>% 
+             filter(CellType %in% c("Migrating.germ.cells",
+                                 "Primordial.germ.cells")))
+```
+
+Female cell markers
+
+```{r, fig.height=4, fig.width=12}
+plot_cells(merged.cds, reduction_method = "tSNE",
+           genes=genes_for_plot %>% 
+             filter(CellType %in% c("Oogonia", 
+                                 "Oocyte",
+                                 "Granulosa.cells",
+                                 "Pre.granulosa.cells")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+Male cell markers.
+```{r, fig.height=4, fig.width=12}
+plot_cells(merged.cds, reduction_method = "tSNE",
+           genes=genes_for_plot %>% 
+             filter(CellType %in% c("Spermatocytes",
+                                 "Spermatogonia",
+                                 "Spermatogonial.stem.cells")),
+           show_trajectory_graph=FALSE,
+           label_cell_groups=FALSE,
+           label_leaves=FALSE,
+           label_branch_points = FALSE)
+```
+
+## Annotations
+
+1. Fibroblasts (migrating)
+2. Mesonephric cells
+3. Granulosa cells (migrating)
+4. Granulosa cells
+5. Oogonia/Oocytes
+6. Endothelial cells
+7. Primordial germ cells (migrating)
+8. Erythrocytes
+9. Pre-granulosa cells (migrating)
+10. Leukocytes
+11. Hemopoietic stem cells
+12. Podocytes
+13. Macrophages
+14. Pre-granulosa cells (mitotic)
+15. Immune cells (migrating, mitotic)
+16. Spermatocytes (cytokinetic)
+17. Male germ cells (migrating)
+18. Spermatocytes (apoptotic)
+19. Spermatocytes (GPCR-activated)
+
+# Sex cell clusters analysis 
+
+Filter for cells in clusters 16, 17, 18, 19, 7, 5 
+
+```{r, echo=FALSE}
+# load for rendering
+all.sex.sce = readRDS(paste0(results_dir, "/no.support.sex.sce.Rds"))
+merged.sex.sce = readRDS(paste0(results_dir, "/no.support.merged.sex.sce.Rds"))
+merged.sex.cds = readRDS(paste0(results_dir, "/no.support.merged.sex.cds.Rds"))
+```
+
+```{r, eval=F}
+# Load QC'd data
+sample_dirs = list.dirs(data_dir, full.names = TRUE, recursive = FALSE)
+sample_names = basename(sample_dirs)
+
+cds_list = list()
+
+for(i in 1:length(sample_dirs)){
+  
+  cds_list[[i]] = readRDS(paste0(sample_dirs[i], 
+                                 "/", 
+                                 sample_names[i],
+                                 "_cds_mito_filter.Rds"))
+}
+
+names(cds_list) = sample_names
+
+meta_df = as.data.frame(colData(merged.sce))
+meta_df$cells = rownames(meta_df)
+
+all.sex.sce = list()
+
+# cds to sce
+for (cds in names(cds_list)){
+  
+  raw_counts = counts(cds_list[[cds]])
+  
+  all.sce = 
+    SingleCellExperiment(list(counts=raw_counts), 
+                         colData=cds_list[[cds]]@colData)
+  
+  all.sce@colData$sample = cds
+  
+  sex.cells = 
+   meta_df %>%
+   filter(label %in% c(16, 17, 18, 19, 5, 7),
+          batch == cds) %>%
+   pull(cells)
+  
+  all.sex.sce[[cds]] = all.sce[,sex.cells]
+}
+
+# https://bioconductor.org/books/3.14/OSCA.multisample/human-pbmcs-10x-genomics.html
+# normalization, feature selection, dim reduction
+set.seed(1)
+all.sex.sce <- lapply(all.sex.sce, logNormCounts)
+all.sex.dec <- lapply(all.sex.sce, modelGeneVar)
+all.sex.hvgs <- lapply(all.sex.dec, getTopHVGs, prop=0.1)
+all.sex.sce <- mapply(FUN=runPCA, x=all.sex.sce, subset_row=all.sex.hvgs)
+
+saveRDS(all.sex.sce, file = paste0(results_dir, "/no.support.sex.sce.Rds"))
+```
+
+```{r, eval=FALSE}
+all.sex.dec <- lapply(all.sex.sce, modelGeneVar)
+
+# integration
+# Intersecting the common genes.
+universe <- Reduce(intersect, lapply(all.sex.sce, rownames))
+all.sex.sce2 <- lapply(all.sex.sce, "[", i=universe,)
+all.sex.dec2 <- lapply(all.sex.dec, "[", i=universe,)
+
+# Renormalizing to adjust for differences in depth.
+normed.sce <- do.call(multiBatchNorm, all.sex.sce2)
+
+# Identifying a set of HVGs using stats from all batches.
+combined.dec <- do.call(combineVar, all.sex.dec2)
+combined.hvg <- getTopHVGs(combined.dec, n=5000)
+```
+
+```{r, eval=FALSE}
+set.seed(1)
+merged.sex.sce <- do.call(fastMNN, c(normed.sce, 
+    list(subset.row=combined.hvg, BSPARAM=RandomParam())))
+
+# clustering in corrected space
+set.seed(1)
+g <- buildSNNGraph(merged.sex.sce, use.dimred="corrected", k = 8)
+#g <- buildSNNGraph(merged.sex.sce, use.dimred="corrected", k = 20)
+set.seed(1)
+colLabels(merged.sex.sce) <- factor(igraph::cluster_louvain(g)$membership)
+
+# add all cells scatter clusters
+all.scatter.clust = 
+  meta_df %>%
+  filter(label %in% c(16, 17, 18, 19, 5, 7)) %>%
+  select(cells, label) %>%
+  tibble::deframe()
+
+all.scatter.clust <- all.scatter.clust[colnames(merged.sex.sce)]
+merged.sex.sce$all.scatter.clust = all.scatter.clust
+
+merged.sex.sce <- runUMAP(merged.sex.sce, dimred="corrected")
+merged.sex.sce <- runTSNE(merged.sex.sce, dimred="corrected")
+
+saveRDS(merged.sex.sce, file = paste0(results_dir, "/no.support.merged.sex.sce.Rds"))
+```
+
+## Plot new clusters in TSNE space
+
+```{r, fig.width=10, fig.height=4}
+tsne_new = plotTSNE(merged.sex.sce, colour_by="label", text_by="label", text_colour="black", point_size = .05)
+tsne_old = plotTSNE(merged.sex.sce, colour_by="all.scatter.clust", text_by="all.scatter.clust", text_colour="black", point_size = .05)
+tsne_new + tsne_old
+```
+
+### Table of original to new cluster assignment
+
+Below is a table showing how many cells from each original sex cell cluster went to each new sex cell cluster.
+
+```{r}
+
+df <- as.data.frame(merged.sex.sce@colData)
+
+df_count <- 
+  df %>%
+  select(label, all.scatter.clust) %>%
+  dplyr::rename(sex.merged.clusters = "label") %>%
+  dplyr::count(sex.merged.clusters, all.scatter.clust) %>%
+  group_by(all.scatter.clust) %>%
+  mutate(total_m1 = sum(n)) %>%
+  ungroup() %>%
+  group_by(sex.merged.clusters) %>%
+  mutate(total_m2 = sum(n)) %>%
+  ungroup() %>%
+  # Compute the percentage of total in method 1 and method 2
+  mutate(
+    pct_of_all.clusters = round((n / total_m1) * 100, 2),
+    pct_of_sex.clusters = round((n / total_m2) * 100, 2)) %>%
+  select(-total_m1, -total_m2)
+  
+datatable(df_count, filter = "top", rownames = FALSE)
+write.csv(df_count, paste0(results_dir, "/cluster_to_subcluster_map.csv"))
+```
+## Heat map showing how closely reated the clusters are
+```{r}
+embeddings <- reducedDim(merged.sex.sce, "corrected")[, 1:30]
+clusters <- colData(merged.sex.sce)$label
+
+# Compute cluster centroids
+centroids <- aggregate(embeddings,
+                       by = list(cluster = clusters),
+                       FUN = mean)
+rownames(centroids) <- centroids$cluster
+centroids <- centroids[, -1]
+
+# Compute pairwise distances
+dist_matrix <- as.matrix(dist(centroids, method = "euclidean"))
+
+# Plot
+pheatmap(dist_matrix,
+         color = colorRampPalette(c("lightyellow", "orange", "darkred"))(100),
+         main = "Pairwise distances between cluster centroids (batch corrected space)",
+         display_numbers = TRUE,
+         number_format = "%.1f")
+```
+
+### Sex subclusters mapping to cluster annotations
+
+| sex subclusters | all cell clusters                                                                    |
+| --------------- | ------------------------------------------------------------------------------------ |
+| 1               | Oogonia/Oocytes                                                                      |
+| 2               | Migrating PGCs                                                                       |
+| 3               | Migrating PGCs                                                                       |
+| 4               | Oogonia/Oocytes                                                                      |
+| 5               | Migrating PGCs                                                                       |
+| 6               | Oogonia/Oocytes                                                                      |
+| 7               | Spermatocytes (cytokinetic)                                                          |
+| 8               | Male germ cells (migrating)                                                          |
+| 9               | Spermatocytes (apoptotic)                                                            |
+| 10              | Male germ cells (migrating)/Spermatocytes (GPCR-activated)                           |
+| 11              | Male germ cells (migrating)/Spermatocytes (apoptotic)                                |
+| 12              | Male germ cells (migrating)/Spermatocytes (apoptotic)                                |
+| 13              | Spermatocytes (GPCR-activated)                                                       |
+| 14              | Spermatocytes (cytokinetic)/Male germ cells (migrating)/Spermatocytes (apoptotic)    |
+| 15              | Male germ cells (migrating)/Spermatocytes (apoptotic)/Spermatocytes (GPCR-activated) |
+
+## Split by sample
+
+```{r,fig.height=8, fig.width=12}
+# plot TSNE
+
+p <- lapply(unique(merged.sex.sce$batch), function(f) {
+  sce.f = merged.sex.sce[, which(merged.sex.sce$batch == f)]
+  plotTSNE(sce.f, colour_by="label", text_by="label", text_colour="black", point_size = .05) + ggtitle(f)
+})
+
+wrap_plots(p, ncol = 2)
+```
+
+This plot shows the proportion of cells from each sample within each new cluster.
+
+```{r}
+meta_df = as.data.frame(colData(merged.sex.sce))
+
+sample_tally = 
+  meta_df %>%
+  mutate(label = as.factor(label),
+         batch = as.factor(batch)) %>%
+  group_by(label, batch, .drop = FALSE) %>%
+  tally()
+
+ggplot(sample_tally, aes(fill=batch, y=label, x=n)) + 
+    geom_bar(position="fill", stat="identity") +
+    xlab("Proportion of cells")
+```
+
+```{r, eval=TRUE}
+# make cds for plotting with monocle
+all.sex.dec <- lapply(all.sex.sce, modelGeneVar)
+# integration
+# Intersecting the common genes.
+universe <- Reduce(intersect, lapply(all.sex.sce, rownames))
+all.sex.sce2 <- lapply(all.sex.sce, "[", i=universe,)
+all.sex.dec2 <- lapply(all.sex.dec, "[", i=universe,)
+
+all.sex.sce2[["TM_C00004374"]]@colData$cluster="noclust" 
+
+combined.sex.sce <- do.call(cbind, all.sex.sce2)
+```
+```{r, eval=FALSE}
+merged.sex.cds <- new_cell_data_set(counts(combined.sex.sce),
+                                cell_metadata = merged.sex.sce@colData)
+
+reducedDims(merged.sex.cds)$tSNE <- reducedDims(merged.sex.sce)$TSNE
+rowData(merged.sex.cds)$gene_short_name = row.names(merged.sex.cds)
+
+saveRDS(merged.sex.cds, file = paste0(results_dir, "/no.support.merged.sex.cds.Rds"))
+```
+
+## Cluster enriched genes
+
+This table contains the top ~100 cluster enriched genes for each cluster. All of the cluster enriched genes are saved in `sex_scatter_cluster_marker_genes.csv`. The markers can help us map a cluster to a cell type.
+
+In this case, genes in each cluster were compared to genes in every other cluster in a pairwise manner, and the p.values and logFCs of those comparisons have been summarized for ease of interpretation. 
+
+**Column descriptions**
+
+* `cluster`: The cluster corresponding to the enriched genes.      
+* `Gene`: The enriched gene   
+* `p.value`: The combined p-value across all pairwise comparisons.     
+* `FDR`: The BH-adjusted p-value for each gene.   
+* `summary.logFC`: This contains the summary effect size, obtained by combining effect sizes from all pairwise comparison into a single value.   
+* `WangGeneID`: BLAST equivalent gene name dervived by Wang et al, 2024   
+* `description`: Gene description   
+
+```{r, eval=FALSE}
+scatter_markers = findMarkers(combined.sex.sce,
+                              merged.sex.sce$label,
+                              test.type="t",
+                              block=combined.sex.sce$sample,
+                              direction="up",
+                              pval.type="some")
+
+saveRDS(scatter_markers, file= paste0(results_dir, "/no.support_sex_scatter_markers.Rds"))
+```
+
+```{r}
+scatter_markers = readRDS(paste0(results_dir, "/no.support_sex_scatter_markers.Rds"))
+
+scatter_summary = list()
+
+for (i in 1:length(scatter_markers)){
+  
+scatter_markers[[i]]$cluster = i
+scatter_markers[[i]]$Gene = rownames(scatter_markers[[i]])
+scatter_summary[[i]] = 
+  as.data.frame(scatter_markers[[i]]) %>%
+  select(cluster, Gene, p.value, FDR, summary.logFC)
+
+}
+
+scatter_markers_df =
+  do.call(rbind, scatter_summary) %>%
+  left_join(gene_description, by="Gene") %>%
+  mutate(cluster = paste0("cluster_",cluster)) %>%
+  filter(FDR < .01)
+
+write.csv(scatter_markers_df, file = paste0(results_dir, "/no.support_sex_scatter_cluster_marker_genes.csv"))
+  
+scatter_markers_top100 = 
+  scatter_markers_df %>%
+  group_by(cluster) %>%
+  slice_min(FDR, n = 100, with_ties=TRUE) %>%
+  mutate(p.value = formatC(signif(p.value, digits = 3)),
+         FDR = formatC(signif(FDR, digits = 3)), 
+         summary.logFC = round(summary.logFC, digits = 3))
+  
+datatable(scatter_markers_top100, filter = "top", rownames = FALSE)  
+```
+
+## Comparison with known markers
+
+We'll check for the significance of the overlap between the top 100 cluster enriched genes and the supplied known cell-type markers. In the plot below, the rows represent cell types with know marker genes, and the columns represent the cell clusters. The number in each box is the number of genes shared between the top 100 cluster enriched genes for the specified clusters and the specified known cell-type markers. Each box is colored by the significance of the overlap ($-log10(FDR)$). Significant overlaps may signify that the cells in the cluster belong to the specified cell type. 
+
+```{r, fig.width=8}
+marker_test_genes =
+  scatter_markers_top100 %>%
+  select(Gene, cluster) 
+
+cluster_ol =  phyperOverlapSets(chung_davidson_cell_type_markers, 
+                                marker_test_genes, length(merged.sex.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  dplyr::rename(SharedGene = "Gene")
+
+cluster_ol$intersecting.genes = 
+  cluster_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(cluster_ol$intersecting.genes, file = paste0(results_dir, "/no.support_sex_scatter_cluster_marker_gene_overlaps.csv"), row.names = FALSE) 
+
+scores = cluster_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(CellTypes = "Group1",
+         Clusters = "Group2") %>%
+  group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+#scores$FDR[scores$FDR > .01] = 1
+
+FDR_wide <- 
+  scores %>%
+  mutate(logFDR = -log10(FDR)) %>%
+  tidyr::pivot_wider(id_cols = CellTypes, 
+                    names_from = Clusters, 
+                    values_from=logFDR)
+
+CellTypes = FDR_wide$CellTypes
+FDR_wide$CellTypes = NULL
+
+FDR_wide = as.matrix(FDR_wide)
+rownames(FDR_wide) = CellTypes
+
+ord_row <- hclust( dist(FDR_wide), method = "ward.D" )$order
+ord_col <- hclust( dist(t(FDR_wide)), method = "ward.D" )$order
+
+scores$CellTypes = factor(scores$CellTypes, levels = rownames(FDR_wide)[ord_row])
+scores$Clusters = factor(scores$Clusters, levels = colnames(FDR_wide)[ord_col])
+
+plot1 =
+    ggplot(scores,
+           aes(Clusters, CellTypes)) + 
+           geom_tile(aes(fill = -log10(FDR)), 
+                     color = "light gray") +
+        #Creating legend
+        guides(fill=guide_colorbar(title = "-log10(FDR)",
+                                   barheight = 10,
+                                   barwidth = 2,
+                                   default.unit = "mm")) +
+        #Creating color range
+        scale_fill_gradientn(colors=c("white",
+                                      "#fd9668",
+                                      "#f1605d",
+                                      "#de4968",
+                                      "#9e2f7f"),
+                             guide="colorbar",
+                             limits = c(0, ceiling(-log10(min(scores$FDR))))
+                             ) +
+        #Rotating labels
+         theme(axis.text.x = element_text(angle = 30, 
+                                          hjust = 1,vjust=1),
+               ) +
+        theme(text = element_text(size = 7),
+              axis.text = element_text(size = 7)) +
+        geom_text(aes(label = nSharedGenes), size = 1) +
+        coord_fixed()
+
+plot1
+
+ggsave(plot1, file = paste0(results_dir, "/no.support_sex_scatter_cluster_overlap_heatmap.png"))
+```
+
+```{r, eval=TRUE, fig.show = "hide"}
+
+nested_df <- chung_davidson_markers %>%
+  group_by(CellType) %>%
+  tidyr::nest()
+
+# Then extract as a named list
+list_of_dfs <- nested_df$data
+names(list_of_dfs) <- nested_df$CellType
+names(list_of_dfs) = gsub("\\(", "", names(list_of_dfs))
+
+file_names = gsub(" ", "_", names(list_of_dfs))
+file_names = paste0(file_names, "_germ_cell_clusters")
+
+anno = c( 
+"1. FGC (migrating)",
+"2. PGC",
+"3. Oogonia (stem cells)",
+"4. Oocytes",
+"5. Cyst epithelial cells",
+"6. Oogonia",
+"7. SPC (cytokinetic)",
+"8. MGC/SPC group2",
+"9. MGC/SPC group1",
+"10. MGC/SPC group3",
+"11. MGC/SPC group2",
+"12. MGC/SPC group1",
+"13. MGC/SPC group3",
+"14. MGC/SPC group2",
+"15. MGC/SPC group3"
+)
+
+plot.sce = combined.sex.sce
+colData(plot.sce) <- colData(merged.sex.sce)
+  
+ct = anno[colData(plot.sce)$label]
+plot.sce$CellType = ct
+plot.sce$CellType = factor(plot.sce$CellType, levels= anno)
+plot.sce$cluster = plot.sce$label
+
+plot_dir = paste0(results_dir, "/germ_cell_bubble")
+if(!dir.exists(plot_dir)){dir.create(plot_dir)}
+
+scatter_markers_df = read.csv(file = paste0(results_dir, "/no.support_sex_scatter_cluster_marker_genes.csv"), row.names = 1)
+cluster_index = as.numeric(gsub("cluster_","",scatter_markers_df$cluster))
+scatter_markers_df$CellType = anno[cluster_index]
+
+markers = 
+  scatter_markers_df %>%
+  select(WangGeneID, CellType, FDR, summary.logFC) %>%
+  dplyr::rename(Gene = "WangGeneID")
+
+## Known marker bubble plots
+for (i in 1:length(list_of_dfs)) {
+  plot_marker_bubbles(
+    sce = plot.sce,
+    markers = markers,
+    gene_description = gene_description,
+    cell_type_name = names(list_of_dfs)[i],
+    cell_type_genes = list_of_dfs[[i]],
+    anno = anno,
+    results_dir = plot_dir,
+    file_name = file_names[i]
+  )
+}
+```
+
+
+## Gene ontology of top 100 scatter cluster enriched genes 
+
+To help annotate cell type clusters, we can check for enriched gene ontology categories among cell-type enriched genes.
+
+**Columns**
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Clusters`: Cluster   
+* `nClusterEnrichedGenes`: Number of cluster enriched genes      
+* `nSharedGenes`: Number of shared genes between the GO term and cluster enriched genes   
+* `Pval`: p-value          
+* `FDR`: p-value corrected for multiple comparisons            
+
+```{r}
+gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf", header=F, comment = "!")
+
+gaf <- 
+  gaf %>%
+  filter(!grepl("NOT", V4)) %>%  
+  dplyr::select(V3, V5) %>%      
+  dplyr::rename(GOID = "V5",            
+                Gene = "V3") %>%
+  distinct() 
+
+keep_go = 
+  gaf %>%
+  group_by(GOID) %>%
+  tally() %>%
+  filter(n > 10,
+         n < 200) %>%
+  pull(GOID)
+
+gaf = 
+  gaf %>%
+  filter(GOID %in% keep_go)
+
+go_names = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GOs_names.txt", header = F)
+colnames(go_names) = c("GOID", "GOName")
+  
+go_ol =  phyperOverlapSets(gaf, 
+                           marker_test_genes, length(merged.sex.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  dplyr::rename(SharedGene = "Gene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/no.support_sex_scatter_cluster_top_100_marker_gene_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(nSharedGenes > 0)
+
+write.csv(scores, file = paste0(results_dir, "/no.support_sex_scatter_cluster_top_100_marker_gene_GO_pvals.csv"), row.names = FALSE) 
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Gene ontology of all significant (FDR < .01) scatter cluster enriched genes 
+
+To help annotate cell type clusters, we can check for enriched gene ontology categories among cell-type enriched genes.
+
+**Columns**
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Clusters`: Cluster   
+* `nClusterEnrichedGenes`: Number of cluster enriched genes      
+* `nSharedGenes`: Number of shared genes between the GO term and cluster enriched genes   
+* `Pval`: p-value          
+* `FDR`: p-value corrected for multiple comparisons            
+
+```{r}
+marker_test_genes =
+  scatter_markers_df %>%
+  select(Gene, cluster) 
+
+go_ol =  phyperOverlapSets(gaf, 
+                           marker_test_genes, length(merged.sex.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  dplyr::rename(SharedGene = "Gene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/no.support_sex_scatter_cluster_all_sig_marker_gene_GO_overlaps_all.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(nSharedGenes > 0)
+
+write.csv(scores, file = paste0(results_dir, "/no.support_sex_scatter_all_sig_cluster_marker_gene_GO_pvals.csv"), row.names = FALSE) 
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Sex cluster annotations
+
+| sex subclusters | Annotation                                                                                               |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| 1               | Female germ cells (migrating)                                                                            |
+| 2               | Primordial germ cells (migrating, differentiated, cyst)                                                  |
+| 3               | Oogonia (mitotic, cyst, stem cells)                                                                      |
+| 4               | Oocytes                                                                                                  |
+| 5               | Cyst epithelial cells                                                                                    |
+| 6               | Oogonia (mitotic, cyst, cell fate committed)                                                             |
+| 7               | Spermatocytes (cytokinetic)                                                                              |
+| 8               | Male germ cells (migrating, cell fate committed, differentiated)                                         |
+| 9               | Spermatocytes (meiosis arrested)                                                                         |
+| 10              | Spermatocytes (migrating, S-phase, cyst connected with cell bridges, cell fate committed, GPCR-activated)|
+| 11              | Spermatocytes (apoptotic, meiosis arrested)                                                              |
+| 12              | Male germ cells (migrating, differentiated)                                                              |
+| 13              | Spermatocytes (angiogenic, cell fate committed, GPCR-activated)                                          |
+| 14              | Spermatocytes (cell fate committed)                                                                      |
+| 15              | Male germ cells (migrating, cell fate committed, differentiated, wounded)                                |
+
+# Sex cell developement trajectory analysis
+
+## Trajectory plotted in TSNE space
+
+```{r}
+set.seed(1)
+by.cluster <- aggregateAcrossCells(merged.sex.sce, 
+                                   ids=merged.sex.sce$label, 
+                                   use.assay.type = "reconstructed")
+
+centroids <- reducedDim(by.cluster, "corrected")
+
+mst <- createClusterMST(centroids, clusters=NULL)
+
+line.data <- reportEdges(by.cluster, mst=mst, clusters=NULL, use.dimred="TSNE")
+
+plotTSNE(merged.sex.sce, colour_by="label", point_size = .5) + 
+    geom_line(data=line.data, mapping=aes(x=TSNE1, y=TSNE2, group=edge)) +
+  guides(color = guide_legend(override.aes = list(size=5)))
+
+```
+
+## Trajectory plotted in batch corrected gene expression space
+
+It's hard to interpret this in TSNE space, so we'll plot in batch corrected expression space instead because the clusters and trajectory analysis were actually calculated in batch corrected expression space. 
+
+```{r}
+line.data_corrected <- reportEdges(by.cluster, mst=mst, clusters=NULL, use.dimred="corrected")
+
+plotReducedDim(merged.sex.sce, colour_by="label", dimred = "corrected", point_size = .4) + 
+    geom_line(data=line.data_corrected, mapping=aes(x=dim1, y=dim2, group=edge)) + guides(color = guide_legend(override.aes = list(size=5)))
+```
+
+```{r, eval=FALSE}
+set.seed(1)
+
+pseudo <- quickPseudotime(merged.sex.sce, 
+                          clusters = merged.sex.sce$label, 
+                          use.dimred="corrected", 
+                          outgroup=FALSE,
+                          start = 2)
+
+pseudo_split <- quickPseudotime(merged.sex.sce, 
+                                clusters = merged.sex.sce$label, 
+                                use.dimred="corrected", 
+                                outgroup=TRUE,
+                                outscale=1.2)
+
+saveRDS(pseudo, file=paste0(results_dir, "/no.support.merged.sex.pseudo"))
+```
+
+## Trajectory plotted with each cluster as a node
+
+```{r, fig.width=10, fig.height=8}
+# plot sample proportions
+meta_df = as.data.frame(colData(merged.sex.sce))
+
+sample_tally = 
+  meta_df %>%
+  mutate(label = as.factor(label),
+         batch = as.factor(batch)) %>%
+  group_by(label, batch, .drop = FALSE) %>%
+  tally()
+
+pseudo = readRDS(paste0(results_dir, "/no.support.merged.sex.pseudo.Rds"))
+
+library(ggforce)
+library(ggraph)
+library(tidygraph)
+library(scatterpie)
+library(ggrepel)
+
+gr <- as_tbl_graph(pseudo$mst)
+
+node_meta =
+  sample_tally %>%
+  mutate(batch = case_when(
+    batch == "TF_C00004337" ~ "Female",
+    batch == "TM_C00004374" ~ "Male",
+    batch == "UND1_C00004336" ~ "Undifferentiated.1",
+    batch == "UND2_C00004362" ~ "Undifferentiated.2"
+  )) %>%
+  tidyr::pivot_wider(names_from = batch, values_from = n) %>%
+  mutate(totalCells = sum(Female, 
+                          Male, 
+                          Undifferentiated.1, 
+                          Undifferentiated.2, 
+                          na.rm = TRUE)) %>%
+  dplyr::rename(name = "label")
+
+anno = c( 
+"FGC (migrating)",
+"PGC",
+"Oogonia (stem cells)",
+"Oocytes",
+"Cyst epithelial cells",
+"Oogonia",
+"SPC (cytokinetic)",
+"MGC/SPC group2",
+"MGC/SPC group1",
+"MGC/SPC group3",
+"MGC/SPC group2",
+"MGC/SPC group1",
+"MGC/SPC group3",
+"MGC/SPC group2",
+"MGC/SPC group3"
+)
+
+node_meta$CellType = anno
+  
+gr = 
+  gr %>% 
+  activate(nodes) %>%
+  left_join(node_meta) %>%
+  arrange(desc(totalCells))
+
+common.pseudo <- averagePseudotime(pseudo$ordering) 
+merged.sex.sce$Pseudotime <- common.pseudo
+
+mean_pseudo= 
+  as.data.frame(colData(merged.sex.sce)) %>%
+  group_by(label) %>%
+  summarise(mean_pseudo = mean(Pseudotime)) %>%
+  dplyr::rename(name = "label")
+
+gr = 
+  gr %>% 
+  activate(nodes) %>%
+  left_join(mean_pseudo)
+
+layout_data <- create_layout(gr, layout = 'stress')
+
+hull_data <- layout_data %>%
+  group_by(CellType) %>%
+  slice(chull(x, y))
+
+lab_data1 = 
+  hull_data %>%
+  filter(name %in% c("4", "6", "1", "5",
+                     "3", "2", "12", 
+                     "8","7", "15"))
+
+gr_plot =
+  ggraph(layout_data) + 
+  geom_shape(
+      data = hull_data, 
+      aes(x, y, 
+          fill = CellType, 
+          fill = after_scale("gray"),
+          group = CellType),
+      expand = 0.04,
+      radius = 0.04,
+      show.legend = FALSE,
+      alpha = .2
+    ) + 
+  geom_edge_link() +
+  geom_label_repel(
+      data = lab_data1,
+      aes(x, y, label = CellType),
+      nudge_y = .15,
+      nudge_x = .05,
+      color = "black",
+      size = 3,
+      force = 5,
+      segment.color = "gray", 
+      segment.linetype = "dashed",
+      min.segment.length = 0
+    ) +
+  # Scatter pies with manual color scale + legend
+  geom_scatterpie(
+    aes(x, y),
+    cols = c("Female", "Male", "Undifferentiated.1", "Undifferentiated.2"),
+    data = layout_data,
+    colour = NA,
+    pie_scale = 1.5
+  ) +
+  scale_fill_manual(
+    name = "Sample",
+    values = c(
+      "Female" = "#FF6DB6",
+      "Male" = "#006ddb",
+      "Undifferentiated.1" = "#009292",
+      "Undifferentiated.2" = "#b66ddf"
+    )
+  ) +
+  guides(fill = guide_legend(keywidth = .8,
+                             keyheight =.8)) + 
+  geom_node_text(aes(label = name), color = "black") +
+  # geom_text_repel(
+  #   data = layout_data,
+  #   aes(x = x, y = y, label = CellType),
+  #   size = 3,
+  #   box.padding = 0.5,
+  #   point.padding = 0.5,
+  #   segment.color = "grey50",
+  #   segment.linetype = "dotted",
+  #   segment.size = 0.5,
+  #   min.segment.length = 0,
+  #   max.overlaps = Inf,
+  #   nudge_y = .15,
+  #   #nudge_x = -.04,
+  #   force = 2,
+  # ) +
+  theme_void() + 
+  theme(
+    legend.position = "left",
+    legend.justification = "center",  # left-align content inside legend box
+    legend.box.just = "center"           # align legend box in layout
+  )
+
+#gr_plot + coord_fixed()
+
+ggsave(file = paste0(results_dir, "/germ.only_pseudo_mst.pdf"), width=10, height=6)
+
+
+```
+
+```{r, fig.width=10, fig.height=8}
+#Plot pseudotime
+gr_pseudo =
+  ggraph(layout_data) + 
+  geom_shape(
+      data = hull_data, 
+      aes(x, y, 
+          fill = CellType, 
+          fill = after_scale("gray"),
+          group = CellType),
+      expand = 0.04,
+      radius = 0.04,
+      show.legend = FALSE,
+      alpha = .2
+    ) + 
+  geom_edge_link() +
+  geom_label_repel(
+      data = lab_data1,
+      aes(x, y, label = CellType),
+      nudge_y = .15,
+      nudge_x = .05,
+      color = "black",
+      size = 3,
+      force = 5,
+      segment.color = "gray", 
+      segment.linetype = "dashed",
+      min.segment.length = 0
+    ) +
+  geom_node_point(aes(color = mean_pseudo), size = 13) +  # Color nodes by pseudotime
+  scale_color_viridis_c(option = "viridis") +  # Continuous viridis scale
+  geom_node_text(aes(label = name), vjust = .75, size = 4, color = "red") +
+  scale_x_continuous(expand = expansion(mult = 0.15)) +  # add breathing room
+  scale_y_continuous(expand = expansion(mult = 0.15)) +  # this fixes the clipping
+  # geom_text_repel(
+  #   data = layout_data,
+  #   aes(x = x, y = y, label = CellType),
+  #   size = 3,
+  #   box.padding = 0.5,
+  #   point.padding = 0.5,
+  #   segment.color = "grey50",
+  #   segment.linetype = "dotted",
+  #   segment.size = 0.5,
+  #   min.segment.length = 0,
+  #   max.overlaps = Inf,
+  #   nudge_y = .15,
+  #   #nudge_x = -.04,
+  #   force = 2,
+  # ) +
+  theme_void() +
+  theme(
+    legend.position = "left",
+    legend.justification = "center",  # left-align content inside legend box
+    legend.box.just = "center"           # align legend box in layout
+  )
+
+#gr_pseudo + coord_fixed()
+
+```
+```{r fig.width=10, fig.height=10}
+
+(gr_plot + coord_fixed()) / (gr_pseudo + coord_fixed())
+
+ggsave(file = paste0(results_dir, "/germ.only_pseudo_mst.pdf"), width=10, height=10)
+```
+
+## Genes changing with pseudotime along each path
+
+Top ~100 genes by FDR changing with pseudotime along each path. All of the significant genes are saved in `/no.support_sex_pseudotime_de_genes.csv`
+
+**Column descriptions**
+
+* `Path`: The leaf node of the path along which the genes are changing
+* `SYMBOL`: The pseudotime-associated gene
+*	`WangGeneID`: BLAST equivalent gene name derived by Wang et al, 2024
+* `description`: Gene description
+* `logFC`: estimated log-fold change of expression along the path
+* `p.value`: p-value for each gene.
+* `FDR`: The BH-adjusted p-value for each gene.
+
+```{r}
+pseudo_mat = pathStat(pseudo$ordering)
+test_pseudo <- TSCAN::testPseudotime(combined.sex.sce, 
+                              pseudotime=pseudo_mat)
+
+test_pseudo_filt = list()
+
+for (i in 1:length(test_pseudo)){
+  
+  test_pseudo[[i]]$SYMBOL <- rownames(combined.sex.sce)
+  test_pseudo[[i]]$Path <- names(test_pseudo)[i]
+  
+  test_pseudo_filt[[i]] =
+    as.data.frame(test_pseudo[[i]]) %>%
+    filter(FDR < .01) %>%
+    arrange(desc(abs(logFC)))
+  
+}
+
+test_pseudo_filt_df = do.call(rbind, test_pseudo_filt)
+
+symbol_description = 
+  gene_description %>%
+  dplyr::rename(SYMBOL = "Gene")
+
+test_pseudo_filt_df = 
+  do.call(rbind, test_pseudo_filt) %>%
+  left_join(symbol_description, by = "SYMBOL")
+
+test_pseudo_filt_df = test_pseudo_filt_df[, c("Path", "SYMBOL", "WangGeneID", "description", "logFC", "p.value", "FDR")]
+
+write.csv(test_pseudo_filt_df, file = paste0(results_dir, "/no.support_sex_pseudotime_de_genes.csv"))
+
+test_pseudo100 = 
+  test_pseudo_filt_df %>%
+  mutate(Path = case_when(
+    logFC > 0 ~ paste0(Path, ".Upregulated"),
+    logFC < 0 ~  paste0(Path, ".Downregulated"))
+    ) %>%
+  group_by(Path) %>%
+  slice_min(order_by = FDR, n=100) %>%
+  mutate(logFC = round(logFC, digits = 2),
+         p.value = formatC(signif(p.value, digits = 2)),
+         FDR = formatC(signif(FDR, digits = 2)))
+  
+test_pseudo = 
+  test_pseudo_filt_df %>%
+  mutate(Path = case_when(
+    logFC > 0 ~ paste0(Path, ".Upregulated"),
+    logFC < 0 ~  paste0(Path, ".Downregulated"))
+    ) %>%
+  group_by(Path) %>%
+  mutate(logFC = round(logFC, digits = 2),
+         p.value = formatC(signif(p.value, digits = 2)),
+         FDR = formatC(signif(FDR, digits = 2)))
+
+datatable(test_pseudo100, filter = "top", rownames = FALSE)
+```
+
+## Plot trajectory heat maps
+```{r, fig.width=7, fig.height=4}
+test_pseudo_SYMBOL_list <-
+  test_pseudo_filt_df %>%
+  dplyr::mutate(
+    Path = dplyr::case_when(
+      logFC > 0 ~ paste0(Path, ".Upregulated"),
+      logFC < 0 ~ paste0(Path, ".Downregulated")
+    )
+  ) %>%
+  dplyr::group_by(Path) %>%
+  arrange(FDR, desc(abs(logFC))) %>%
+  dplyr::slice_head(n = 25) %>%
+  dplyr::summarise(SYMBOL = list(SYMBOL), .groups = "drop") %>%
+  tibble::deframe()
+
+colData(combined.sex.sce)$pseudotime_TSCAN <- averagePseudotime(pseudo$ordering) 
+
+p_list = list()
+
+for(p in names(test_pseudo_SYMBOL_list)){
+  
+  gene_ids = test_pseudo_SYMBOL_list[[p]]
+  
+  gene_labels =
+    gene_description %>%
+    filter(Gene %in% gene_ids) %>%
+    pull(WangGeneID)
+  
+  leafnode = sub("\\..*", "", p)
+  
+  cell_subset = 
+    as.data.frame(pseudo_mat) %>%
+    rownames_to_column(var = "Barcode") %>%
+    filter(!is.na(leafnode)) %>%
+    pull(Barcode)
+    
+  p_list[[p]] = 
+    plot_pseudotime_heatmap(combined.sex.sce,
+                            gene_ids,
+                            gene_labels,
+                            cell_subset,
+                            pseudotime_column = "pseudotime_TSCAN")
+  
+}
+```
+
+### Path 7
+```{r, fig.width=7, fig.height=4}
+title1 <- ggplot2::ggplot() + 
+  ggplot2::labs(title = "7.Upregulated") + 
+  ggplot2::theme_void() +
+  ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+                 plot.margin = ggplot2::margin(t = 10, r = 0, b = 0, l = 0))
+
+title2 <- ggplot2::ggplot() + 
+  ggplot2::labs(title = "7.Downregulated") + 
+  ggplot2::theme_void() +
+  ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+                 plot.margin = ggplot2::margin(t = 10, r = 0, b = 0, l = 0))
+
+up1 <- p_list[["7.Upregulated"]][[1]]
+up2 <- p_list[["7.Upregulated"]][[2]]
+down1 <- p_list[["7.Downregulated"]][[1]]
+down2 <- p_list[["7.Downregulated"]][[2]]
+
+col1 <- (title1 / up1 / up2) +
+  patchwork::plot_layout(heights = c(0.02, 0.025, 1))
+
+col2 <- (title2 / down1 / down2) +
+  patchwork::plot_layout(heights = c(0.02, 0.025, 1))
+
+# col1 <- patchwork::wrap_plots(
+#   title1, 
+#   p_list[["7.Upregulated"]][[1]], 
+#   p_list[["7.Upregulated"]][[2]],
+#   ncol = 1,
+#   heights = c(0.02, 0.025, 1)
+# )
+# 
+# col2 <- patchwork::wrap_plots(
+#   title2, 
+#   p_list[["7.Downregulated"]][[1]], 
+#   p_list[["7.Downregulated"]][[2]],
+#   ncol = 1,
+#   heights = c(0.02, 0.025, 1)
+# )
+
+final_plot = 
+  (col1 | col2) +
+    patchwork::plot_layout(guides = "collect") &
+    ggplot2::theme(legend.position = "right")
+
+final_plot
+
+ggsave(file = paste0(results_dir, "/path7_heatmaps.png"), width = 8, height = 5)
+```
+
+### Path 4
+```{r, fig.width=7, fig.height=4}
+title1 <- ggplot2::ggplot() + 
+  ggplot2::labs(title = "4.Upregulated") + 
+  ggplot2::theme_void() +
+  ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+                 plot.margin = ggplot2::margin(t = 10, r = 0, b = 0, l = 0))
+
+title2 <- ggplot2::ggplot() + 
+  ggplot2::labs(title = "4.Downregulated") + 
+  ggplot2::theme_void() +
+  ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+                 plot.margin = ggplot2::margin(t = 10, r = 0, b = 0, l = 0))
+
+col1 <- (title1 / p_list[["4.Upregulated"]][[1]] / p_list[["4.Upregulated"]][[2]]) +
+  patchwork::plot_layout(heights = c(0.02, 0.025, 1))
+
+col2 <- (title2 / p_list[["4.Downregulated"]][[1]] / p_list[["4.Downregulated"]][[2]]) +
+  patchwork::plot_layout(heights = c(0.02, 0.025, 1))
+
+# col1 <- patchwork::wrap_plots(
+#   title1, 
+#   p_list[["4.Upregulated"]][[1]], 
+#   p_list[["4.Upregulated"]][[2]],
+#   ncol = 1,
+#   heights = c(0.02, 0.025, 1)
+# )
+# 
+# col2 <- patchwork::wrap_plots(
+#   title2, 
+#   p_list[["4.Downregulated"]][[1]], 
+#   p_list[["4.Downregulated"]][[2]],
+#   ncol = 1,
+#   heights = c(0.02, 0.025, 1)
+# )
+
+final_plot = 
+  (col1 | col2) +
+    patchwork::plot_layout(guides = "collect") &
+    ggplot2::theme(legend.position = "right")
+
+final_plot
+
+ggsave(file = paste0(results_dir, "/path4_heatmaps.png"), width = 8, height = 5)
+
+```
+
+```{r, eval=FALSE}
+## Plot scaled average gene expression per cluster
+search_genes <- function(gene_description, patterns) {
+  all_genes <- gene_description$WangGeneID
+  
+  hits <- grep(patterns, all_genes, 
+               value = FALSE, ignore.case = TRUE)
+  
+  all_ids = gene_description$Gene
+  
+  return(all_ids[hits])
+}
+
+search_wang <- function(gene_description, patterns) {
+  all_genes <- gene_description$WangGeneID
+  
+  hits <- grep(patterns, all_genes, 
+               value = FALSE, ignore.case = TRUE)
+  
+  all_ids = gene_description$Gene
+  
+  return(all_genes[hits])
+}
+
+# Search for key genes
+pgc_hits    <- search_genes(gene_description, "DAZL|NANOS|DDX4$|PRDM1$|PRDM1.1|BLIMP|VASA|STRA8|PRDM14")
+male_hits   <- search_genes(gene_description, "CCNB2|CCNA2|HMGB1|HMGB2|STMN1|PACRG|IQCA1|DNALI1")
+ZP3_hits <- search_genes(gene_description, "ZP3")
+ZP4_hits <- search_genes(gene_description, "ZP4")
+CUZD1_hits <- search_genes(gene_description, "CUZD1")
+S100A1_hits1 <- search_genes(gene_description, "S100A1")[1:14]
+S100A1_hits2 <- search_genes(gene_description, "S100A1")[15:28]
+
+# Search for key genes
+pgc_wang    <- search_wang(gene_description, "DAZL|NANOS|DDX4$|PRDM1$|PRDM1.1|BLIMP|VASA|STRA8|PRDM14")
+male_wang   <- search_wang(gene_description, "CCNB2|CCNA2|HMGB1|HMGB2|STMN1|PACRG|IQCA1|DNALI1")
+ZP3_wang <- search_wang(gene_description, "ZP3")
+ZP4_wang <- search_wang(gene_description, "ZP4")
+CUZD1_wang <- search_wang(gene_description, "CUZD1")
+S100A1_wang <- search_wang(gene_description, "S100A1")[1:14]
+S100A1_wang <- search_wang(gene_description, "S100A1")[15:28]
+
+datatable(test_pseudo_filt_df %>% filter(WangGeneID %in% female_hits, abs(logFC) > .1), rownames = F)
+
+
+# Define trajectory orders - adjust to match your colData cluster names exactly
+male_order   <- paste0("cluster",c(2,12,11,8,10,13,7))
+female_order <- paste0("cluster",c(2,1,6,4))
+colData(combined.sex.sce)$label = paste0("cluster", colData(merged.sex.sce)$label)
+
+# Generate plots
+p1 <- plot_trajectory_genes(combined.sex.sce, male_hits, male_order, 
+                              "label", "Male trajectory markers")
+
+pZP3 <- plot_trajectory_genes(combined.sex.sce, ZP3_hits, female_order, 
+                              "label", "Female trajectory markers")
+
+pZP4 <- plot_trajectory_genes(combined.sex.sce, ZP4_hits, female_order, 
+                              "label", "Female trajectory markers")
+
+pCUZD1 <- plot_trajectory_genes(combined.sex.sce, CUZD1_hits, female_order, 
+                              "label", "Female trajectory markers")
+
+pS100A1_1<- plot_trajectory_genes(combined.sex.sce, S100A1_hits1, female_order, 
+                              "label", "Female trajectory markers")
+
+pS100A1_2<- plot_trajectory_genes(combined.sex.sce, S100A1_hits2, female_order, 
+                              "label", "Female trajectory markers")
+
+p3 <- plot_trajectory_genes(combined.sex.sce, pgc_hits, male_order, 
+                              "label", "Putative PGC markers")
+
+p4 <- plot_trajectory_genes(combined.sex.sce, pgc_hits, female_order, 
+                              "label", "Putative PGC markers")
+```
+
+## Gene ontology enrichment all significant genes (FDR < .01)
+
+**Columns**
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Path`: Trajectory path, upregulated or downregulated genes   
+* `nPathDEGenes`: Number of pseudotime-associated genes      
+* `nSharedGenes`: Number of shared genes between the GO term and pseudotime-associated genes    
+* `Pval`: p-value of the pseudotime association                   
+* `FDR`: p-value corrected for multiple comparisons         
+
+Overlap p-values are save in `results/no.support_sex_pseudotime_de_GO_pvals.csv`. Overlaps between cluster enriched genes and known marker genes are save in `results/no.support_sex_pseudotime_de_GO_overlaps.csv`.
+
+```{r}
+test_pseudo_genes =
+  test_pseudo %>%
+  select(SYMBOL, Path)
+
+go_ol =  phyperOverlapSets(gaf, 
+                           test_pseudo_genes, length(merged.sex.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  dplyr::rename(SharedGene = "Gene")
+
+go_int = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene") %>%
+  filter(!SharedGene == "none") %>%
+  dplyr::rename(GOID = "Group1",
+                Path = "Group2") %>%
+  left_join(go_names, by="GOID") %>%
+  relocate(GOName, .after = GOID)
+
+write.csv(go_int, file = paste0(results_dir, "/no.support_sex_pseudotime_de_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = 
+  go_ol$pval.scores %>%
+  dplyr::rename(GOID = "Group1",
+                Path = "Group2",
+                nGOTermGenes = "nGroup1",
+                nPathDEGenes = "nGroup2") %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .05)
+
+write.csv(scores, file = paste0(results_dir, "/no.support_sex_pseudotime_de_GO_pvals.csv"), row.names = FALSE) 
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Gene ontology enrichment all significant genes (FDR < .01)
+
+**Columns**
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Path`: Trajectory path, upregulated or downregulated genes   
+* `nPathDEGenes`: Number of pseudotime-associated genes      
+* `nSharedGenes`: Number of shared genes between the GO term and pseudotime-associated genes    
+* `Pval`: p-value of the pseudotime association                   
+* `FDR`: p-value corrected for multiple comparisons         
+
+Overlap p-values are save in `results/no.support_sex_pseudotime_top100_de_GO_pvals.csv`. Overlaps between cluster enriched genes and known marker genes are save in `results/no.support_sex_pseudotime_top100_de_GO_overlaps.csv`.
+
+```{r}
+test_pseudo_genes =
+  test_pseudo100 %>%
+  select(SYMBOL, Path)
+
+go_ol =  phyperOverlapSets(gaf, 
+                           test_pseudo_genes, length(merged.sex.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  dplyr::rename(SharedGene = "Gene")
+
+go_int = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene") %>%
+  filter(!SharedGene == "none") %>%
+  dplyr::rename(GOID = "Group1",
+                Path = "Group2") %>%
+  left_join(go_names, by="GOID") %>%
+  relocate(GOName, .after = GOID)
+
+write.csv(go_int, file = paste0(results_dir, "/no.support_sex_pseudotime_top100_de_GO_pvals.csv"), row.names = FALSE) 
+
+scores = 
+  go_ol$pval.scores %>%
+  dplyr::rename(GOID = "Group1",
+                Path = "Group2",
+                nGOTermGenes = "nGroup1",
+                nPathDEGenes = "nGroup2") %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .05)
+
+write.csv(scores, file = paste0(results_dir, "/no.support_sex_pseudotime_top100_de_GO_overlaps.csv"), row.names = FALSE) 
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+# Differential expression between clusters 2 and 3
+```{r, eval=FALSE}
+colData(combined.sex.sce)$label = colData(merged.sex.sce)$label
+
+keep = 
+  as.data.frame(colData(combined.sex.sce)) %>%
+  filter(label %in% c(2,3)) %>%
+  pull(barcode)
+  
+combined.sex.sce23 = combined.sex.sce[,keep]
+colData(combined.sex.sce23) <- droplevels(colData(combined.sex.sce23))
+  
+scatter_markers = findMarkers(combined.sex.sce23,
+                              combined.sex.sce23$label,
+                              test.type="t",
+                              block=combined.sex.sce23$sample,
+                              direction="up",
+                              pval.type="some")
+
+saveRDS(scatter_markers, file= paste0(results_dir, "/no.support_sex_scatter_2vs3_DEgenes.Rds"))
+
+scatter_summary = list()
+
+for (n in names(scatter_markers)){
+  
+scatter_markers[[n]]$cluster = n
+scatter_markers[[n]]$Gene = rownames(scatter_markers[[n]])
+scatter_summary[[n]] = 
+  as.data.frame(scatter_markers[[n]]) %>%
+  select(cluster, Gene, p.value, FDR, summary.logFC)
+
+}
+
+scatter_markers_df =
+  do.call(rbind, scatter_summary) %>%
+  left_join(gene_description, by="Gene") %>%
+  mutate(cluster = paste0("cluster_",cluster)) %>%
+  filter(FDR < .01)
+
+write.csv(scatter_markers_df, file = paste0(results_dir, "/no.support_sex_scatter_2vs3_DEgenes.csv"))
+
+scatter_markers_top100 = 
+  scatter_markers_df %>%
+  group_by(cluster) %>%
+  slice_min(FDR, n = 100, with_ties=TRUE) %>%
+  mutate(p.value = formatC(signif(p.value, digits = 3)),
+         FDR = formatC(signif(FDR, digits = 3)), 
+         summary.logFC = round(summary.logFC, digits = 3))
+
+datatable(scatter_markers_top100, filter = "top", rownames = FALSE)  
+```
+
+## Gene ontology top 100 DE genes between clusters 2 and 3
+
+**Columns**
+
+* `GOID`: Gene ontology ID            
+* `GOName`: Gene ontology name    
+* `nGOTermGenes`: Number of genes assigned to GO term        
+* `Clusters`: Cluster   
+* `nClusterEnrichedGenes`: Number of cluster enriched genes      
+* `nSharedGenes`: Number of shared genes between the GO term and cluster enriched genes   
+* `Pval`: p-value          
+* `FDR`: p-value corrected for multiple comparisons 
+
+```{r}
+marker_test_genes =
+  scatter_markers_top100 %>%
+  select(Gene, cluster) 
+
+go_ol =  phyperOverlapSets(gaf, 
+                           marker_test_genes, length(merged.sex.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  dplyr::rename(SharedGene = "Gene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/no.support_sex_scatter_cluster_2vs3_top_100_DE_gene_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(nSharedGenes > 0)
+
+write.csv(scores, file = paste0(results_dir, "/no.support_sex_scatter_cluster_2vs3_top_100_DE_gene_GO_pvals.csv"), row.names = FALSE) 
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Gene ontology all DE genes between clusters 2 and 3
+```{r}
+marker_test_genes =
+  scatter_markers_df %>%
+  select(Gene, cluster) 
+
+go_ol =  phyperOverlapSets(gaf, 
+                           marker_test_genes, length(merged.sex.sce))
+
+shared_gene_description = 
+  gene_description %>%
+  dplyr::rename(SharedGene = "Gene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/no.support_sex_scatter_cluster_2vs3_sig_DE_gene_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(nSharedGenes > 0)
+
+write.csv(scores, file = paste0(results_dir, "/no.support_sex_scatter_cluster_2vs3_sig_DE_gene_GO_pvals.csv"), row.names = FALSE) 
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+# Session info
+```{r}
+sessionInfo()
+```
+
