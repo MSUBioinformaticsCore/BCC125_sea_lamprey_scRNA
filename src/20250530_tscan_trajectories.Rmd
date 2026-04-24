@@ -157,11 +157,6 @@ merged.sce <- do.call(fastMNN, c(normed.sce,
 g <- buildSNNGraph(merged.sce, use.dimred="corrected", k=30)
 set.seed(1)
 colLabels(merged.sce) <- factor(igraph::cluster_louvain(g)$membership)
-# table(colLabels(merged.sce), merged.sce$batch)
-
-# add monocle clusters
-# cds_nb = readRDS(paste0(results_dir, "/cds_nb.Rds"))
-# merged.sce@colData$monocole_cluster = cds_nb@colData$cluster
 
 set.seed(1)
 merged.sce <- runUMAP(merged.sce, dimred="corrected")
@@ -602,10 +597,10 @@ datatable(scores, filter = "top", rownames = FALSE)
 | 13      | Macrophages                       |
 | 14      | Proliferating pre-granulosa cells |
 | 15      | Proliferating B cells             |
-| 16      | Proliferating gonocytes           |
-| 17      | Proliferating spermatogonia B     |
-| 18      | Proliferating spermatocytes       |
-| 19      | Proliferating spermatogonia A     |
+| 16      | Meiotic spermatocyte              |
+| 17      | Spermatocyte                      |
+| 18      | Mitotic spermatogonia             |
+| 19      | Migrating male germ cells.        |
 
 # Sex cell clusters analysis 
 
@@ -614,10 +609,10 @@ Filter for cells in clusters 16, 17, 18, 19, 5
 | sex clusters | annotation                    |
 | ------------ | ----------------------------- |
 | 5            | Primordial germ cells/oogonia |
-| 16           | Proliferating gonocytes       |
-| 17           | Proliferating spermatogonia B |
-| 18           | Proliferating spermatocytes   |
-| 19           | Proliferating spermatogonia A |
+| 16           | Meiotic spermatocyte          |
+| 17           | Spermatocyte                  |
+| 18           | Mitotic spermatogonia         |
+| 19           | Migrating male germ cells     |
 
 ```{r, echo=FALSE}
 # load for rendering
@@ -731,7 +726,7 @@ tsne_old = plotTSNE(merged.sex.sce, colour_by="all.scatter.clust", text_by="all.
 tsne_new + tsne_old
 ```
 
-### Table of orginal to new cluster assignment
+### Table of original to new cluster assignment
 Below is a table showing how many cells from each original sex cell cluster went to each new sex cell cluster.
 
 ```{r}
@@ -765,17 +760,17 @@ datatable(df_count, filter = "top", rownames = FALSE)
 | 1               | Primordial germ cells/oogonia                                    |
 | 2               | Primordial germ cells/oogonia                                    |
 | 3               | Primordial germ cells/oogonia                                    |
-| 4               | Proliferating gonocytes                                          |
-| 5               | Proliferating spermatogonia Type B                               |
-| 6               | Proliferating spermatogonia Type A + B                           |
-| 7               | Proliferating spermatocytes                                      |
-| 8               | Proliferating spermatogonia Type A + B                           |
-| 9               | Proliferating spermatogonia Type B                               |
-| 10              | Proliferating spermatogonia Type B + Proliferating spermatocytes |
-| 11              | Proliferating spermatocytes                                      |
-| 12              | Proliferating spermatogonia Type B                               |
-| 13              | Proliferating spermatogonia Type A                               |
-| 14              | Proliferating spermatogonia + Primordial germ cells/oogonia      |
+| 4               | Meiotic spermatocyte                                             |
+| 5               | Spermatocyte                                                     |
+| 6               | Migrating male germ cells + Spermatocyte                         |
+| 7               | Mitotic spermatogonia                                            |
+| 8               | Migrating male germ cells + Spermatocyte                         |
+| 9               | Spermatocyte                                                     |
+| 10              | Spermatocyte + Mitotic spermatogonia                             |
+| 11              | Mitotic spermatogonia                                            |
+| 12              | Spermatocyte                                                     |
+| 13              | Migrating male germ cells                                        |
+| 14              | Spermatocyte + Primordial germ cells/oogonia                     |
 | 15              | Primordial germ cells/oogonia                                    |
 
 ## Split by sample
@@ -1174,18 +1169,18 @@ group_vec =
   c("oogonia",
     "oogonia",
     "oogonia",
-    "proliferating gonocytes",
-    "spermatogonia",
-    "spermatogonia",
-    "spermatocytes",
-    "spermatogonia",
-    "spermatogonia",
-    "spermatogonia/spermatocytes",
-    "spermatocytes",
-    "spermatogonia",
-    "spermatogonia",
-    "germ cells/spermatogonia",
-    "primordial germ cells"
+    "meiotic spermatocyte",
+    "spermatocyte",
+    "migrating male GC/spermatocyte",
+    "mitotic spermatogonia",
+    "migrating male GC/spermatocyte",
+    "spermatocyte",
+    "spermatocytes/mitotic spermatogonia",
+    "mitotic spermatogonia",
+    "spermatocyte",
+    "migrating male GC",
+    "PCG/spermatocyte",
+    "PCG"
     )
 
 node_meta$CellType = group_vec
@@ -1205,13 +1200,13 @@ hull_data <- layout_data %>%
 
 lab_data1 = 
   hull_data %>%
-  filter(name %in% c("15", "4", "14", "3", "7")) %>%
-  mutate(y = y+.15)
+  filter(name %in% c("15", "4", "2", "8")) %>%
+  mutate(y = y+.05)
 
 lab_data2 = 
   hull_data %>%
-  filter(name %in% c("10", "9")) %>%
-  mutate(y = y-.15)
+  filter(name %in% c("9", "7")) %>%
+  mutate(y = y-.05)
 
 gr_plot =
   ggraph(gr, "stress") + 
@@ -1222,17 +1217,17 @@ gr_plot =
           fill = CellType, 
           fill = after_scale("gray"),
           group = CellType),
-      expand = 0.06,
-      radius = 0.06,
+      expand = 0.04,
+      radius = 0.04,
       show.legend = FALSE,
-      alpha = .4
+      alpha = .2
     ) +
     geom_edge_link() +
     # Scatter pies with manual color scale + legend
     geom_label_repel(
       data = lab_data1,
       aes(x, y, label = CellType),
-      nudge_y = 0.2,
+      nudge_y = 0.05,
       nudge_x = -0.05,
       color = "black",
       size = 3,
@@ -1243,8 +1238,8 @@ gr_plot =
     geom_label_repel(
       data = lab_data2,
       aes(x, y, label = CellType),
-      nudge_y = -0.2,
-      nudge_x = -0.1,
+      nudge_y = -0.05,
+      nudge_x = -0.05,
       color = "black",
       size = 3,
       force = 5,
@@ -1315,8 +1310,209 @@ gr_plot + coord_fixed()
 #     theme_void()
 
 ```
+## Cluster 7 vs cluster 13 differential expression
+```{r}
+keep = 
+  as.data.frame(colData(merged.sex.sce)) %>%
+  rownames_to_column(var = "barcode") %>%
+  filter(label %in% c(7,13)) %>%
+  pull(barcode)
+  
+clust7v13 = findMarkers(combined.sex.sce[,keep],
+                        merged.sex.sce[,keep]$label,
+                        test.type="t",
+                        block=combined.sex.sce[,keep]$sample,
+                        direction="up",
+                        pval.type="some")
 
+clust7v13_summary = list()
 
+for (i in c(7,13)){
+  
+clust7v13[[i]]$cluster = i
+clust7v13[[i]]$Gene = rownames(clust7v13[[i]])
+clust7v13_summary[[i]] = 
+  as.data.frame(clust7v13[[i]]) %>%
+  select(cluster, Gene, p.value, FDR, summary.logFC)
+
+}
+
+clust7v13_df =
+  do.call(rbind, clust7v13_summary) %>%
+  left_join(gene_description, by="Gene") %>%
+  mutate(cluster = paste0("cluster_",cluster)) %>%
+  filter(FDR < .01)
+
+write.csv(clust7v13_df, file = paste0(results_dir, "/cluster7vs13_de_genes.csv"), row.names = FALSE) 
+
+datatable(clust7v13_df %>%
+            mutate(p.value = formatC(signif(p.value, digits = 3)),
+                   FDR = formatC(signif(FDR, digits = 3)), 
+                   summary.logFC = round(summary.logFC, digits = 3)),
+          filter = "top", rownames = FALSE)
+```
+
+### Gene ontology 
+```{r}
+
+clust7v13_genes = 
+  clust7v13_df %>%
+  select(Gene, cluster)
+
+gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf", header=F, comment = "!")
+
+gaf <- 
+  gaf %>%
+  filter(!grepl("NOT", V4)) %>%  
+  dplyr::select(V3, V5) %>%      
+  dplyr::rename(GOID = "V5",            
+                Gene = "V3") %>%
+  distinct() 
+
+keep_go = 
+  gaf %>%
+  group_by(GOID) %>%
+  tally() %>%
+  filter(n > 10,
+         n < 200) %>%
+  pull(GOID)
+
+gaf = 
+  gaf %>%
+  filter(GOID %in% keep_go)
+
+go_names = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GOs_names.txt", header = F)
+colnames(go_names) = c("GOID", "GOName")
+  
+go_ol =  phyperOverlapSets(gaf, 
+                           clust7v13_genes, length(merged.sex.cds))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/cluster7vs13_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .01)
+
+write.csv(scores, file = paste0(results_dir, "/cluster7vs13_GO_overlap_pvalues.csv"), row.names = FALSE) 
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Clusters 8,13,6,5,9 vs 12,10,11,7 differential expression
+
+```{r}
+keep = 
+  as.data.frame(colData(merged.sex.sce)) %>%
+  rownames_to_column(var = "barcode") %>%
+  filter(label %in% c(8,13,6,5,9,12,10,11,7)) %>%
+  pull(barcode)
+
+male.sce = combined.sex.sce[,keep]
+
+meta = 
+  as.data.frame(colData(merged.sex.sce)) %>%
+  filter(label %in% c(8,13,6,5,9,12,10,11,7)) %>%
+  mutate(Group = case_when(
+    label %in% c(8,13,6,5,9) ~ "group13",
+    label %in% c(12,10,11,7) ~ "group7"
+  ))
+
+male.sce$Group = meta$Group
+  
+group7v13 = findMarkers(male.sce,
+                        male.sce$Group,
+                        test.type="t",
+                        block=male.sce$sample,
+                        direction="up",
+                        pval.type="some")
+
+group7v13_summary = list()
+
+for (g in names(group7v13)){
+  
+group7v13[[g]]$Group = g
+group7v13[[g]]$Gene = rownames(group7v13[[g]])
+group7v13_summary[[g]] = 
+  as.data.frame(group7v13[[g]]) %>%
+  select(Group, Gene, p.value, FDR, summary.logFC)
+
+}
+
+group7v13_df =
+  do.call(rbind, group7v13_summary) %>%
+  left_join(gene_description, by="Gene") %>%
+  filter(FDR < .01)
+
+write.csv(group7v13_df, file = paste0(results_dir, "/group7vs13_de_genes.csv"), row.names = FALSE) 
+
+datatable(group7v13_df %>%
+            mutate(p.value = formatC(signif(p.value, digits = 3)),
+                   FDR = formatC(signif(FDR, digits = 3)), 
+                   summary.logFC = round(summary.logFC, digits = 3)),
+          filter = "top", rownames = FALSE)
+```
+### Gene ontology
+```{r}
+
+group7v13_genes = 
+  group7v13_df %>%
+  select(Gene, Group)
+
+go_ol =  phyperOverlapSets(gaf, 
+                           group7v13_genes, length(merged.sex.cds))
+
+shared_gene_description = 
+  gene_description %>%
+  rename(Gene = "SharedGene")
+
+go_ol$intersecting.genes = 
+  go_ol$intersecting.genes %>%
+  left_join(shared_gene_description, by="SharedGene")
+
+write.csv(go_ol$intersecting.genes, file = paste0(results_dir, "/group7vs13_GO_overlaps.csv"), row.names = FALSE) 
+
+scores = go_ol$pval.scores
+
+scores = 
+  scores %>%
+  dplyr::rename(GOID = "Group1",
+                Clusters = "Group2",
+                nGOTermGenes = "nGroup1",
+                nClusterEnrichedGenes = "nGroup2") %>%
+  group_by(Clusters) %>%
+    mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores = 
+  left_join(go_names, scores, by="GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .01)
+
+write.csv(scores, file = paste0(results_dir, "/group7vs13_GO_overlap_pvalues.csv"), row.names = FALSE) 
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
 ## Plot pseudotime
 
 ### In tSNE space
@@ -1530,14 +1726,14 @@ line.data.sub_corrected <- line.data.sub_corrected[grepl("--1", line.data.sub_co
 
 ggline_corrected <- geom_line(data=line.data.sub_corrected, mapping=aes(x=dim1, y=dim2, group=edge))
 
-ps = pathStat(pseudo$ordering)
+ps = pathStat(pseudo14$ordering)
 
 # cells on female path
-pathF = rownames(ps)[!is.na(ps[,2])]
+pathF = rownames(ps)[!is.na(ps[,3])]
 # cells on male path
-pathM = rownames(ps)[!is.na(ps[,1])]
+pathM = rownames(ps)[!is.na(ps[,2])]
 # cells that haven't yet branched
-pathUB = intersect(pathF, pathM)
+pathUB = rownames(ps)[!is.na(ps[,1])]
 
 pathF = pathF[!pathF %in% pathUB]
 pathM = pathM[!pathM %in% pathUB]
@@ -1554,8 +1750,6 @@ coldat =
   ))
 
 merged.sex.sce14$Branch = coldat$CellPath
-# merged.sex.sce14$Female.Pseuodtime = coldat$TSCAN.2
-# merged.sex.sce14$Male.Pseuodtime = coldat$TSCAN.8
 
 path_plot = plotTSNE(merged.sex.sce14, dimred = "corrected", colour_by="Branch", point_size = .5) + ggline_corrected + guides(color = guide_legend(override.aes = list(size=3)))
 
@@ -2029,10 +2223,10 @@ anno_all = c("1. Interstitial stromal cells",
              "13. Macrophages",
              "14. Proliferating pre-granulosa cells",
              "15. Proliferating B cells",
-             "16. Proliferating gonocytes",
-             "17. Proliferating spermatogonia B",
-             "18. Proliferating spermatocytes",
-             "19. Proliferating spermatogonia A")
+             "16. Meiotic spermatocyte",
+             "17. Spermatocyte",
+             "18. Mitotic spermatogonia ",
+             "19. Migrating male germ cells")
 
 ct = anno_all[colData(merged.sce)$label]
 merged.sce$CellType = ct
@@ -2060,19 +2254,20 @@ anno =
   c("1. oogonia",
     "2. oogonia",
     "3. oogonia",
-    "4. proliferating gonocytes",
-    "5. spermatogonia",
-    "6. spermatogonia",
-    "7. spermatocytes",
-    "8. spermatogonia",
-    "9. spermatogonia",
-    "10. spermatogonia/spermatocytes",
-    "11. spermatocytes",
-    "12. spermatogonia",
-    "13. spermatogonia",
-    "14. germ cells/spermatogonia",
-    "15. primordial germ cells"
+    "4. meiotic spermatocyte",
+    "5. spermatocyte",
+    "6. migrating male GC/spermatocyte",
+    "7. mitotic spermatogonia",
+    "8. migrating male GC/spermatocyte",
+    "9. spermatocyte",
+    "10. spermatocyte/mitotic spermatogonia",
+    "11. mitotic spermatogonia",
+    "12. spermatocyte",
+    "13. migrating GC cells",
+    "14. PCG/spermatocyte",
+    "15. PCG"
     )
+  
 
 ct = anno[colData(merged.sex.sce)$label]
 merged.sex.sce$CellType = ct
@@ -2645,6 +2840,44 @@ ggsave(file = paste0(results_dir, "/fig3.png"), width = 8, height=7)
 ```
 
 A-C) Scatter plot of cluster 14 cells showing each cell’s branch assignment (A), pseudotime on the female-specific branch (B), and pseudotime on the male-specific branch (C). Cells are plotted in low-dimensional MNN-corrected space, with trajectories indicated by black lines. (D–E) Heatmaps showing scaled expression of the top genes uniquely associated with the female (D) and male (E) pseudotime trajectories. Each column represents an individual cell ordered by pseudotime progression, and each row corresponds to a gene. The color scale indicates relative expression (Z-score) across cells with red indicating high expression and blue indicating low expression. In some cases, gene names are derived from homologous proteins from humans and other species as reported by Wang et al. 
+
+# Clean SCEs with meta data
+
+## All cells
+
+pca and lognormcounts form individual samples
+
+```{r}
+combined.sce.final = combined.sce
+combined.sce.final$Size_Factor = NULL
+combined.sce.final$cluster = NULL
+combined.sce.final$discard = NULL
+saveRDS(combined.sce.final, paste0(results_dir, "/combined.sce.final.Rds"))
+
+merged.sce.final = merged.sce
+colData(merged.sce.final) = colData(combined.sce.final)
+merged.sce.final$monocole_cluster = NULL
+saveRDS(merged.sce.final, paste0(results_dir, "/merged.sce.final.Rds"))
+```
+
+## Germ cells
+```{r}
+merged.sex.sce.final = merged.sex.sce
+merged.sex.sce.final$all.merged.clusters = NULL
+merged.sex.sce.final$TSCAN.15 = NULL
+merged.sex.sce.final$TSCAN.4 = NULL
+merged.sex.sce.final$TSCAN.9 = NULL
+merged.sex.sce.final$TSCAN.7 = NULL
+
+merged.sex.sce.final$CommonPseudotime = merged.sex.sce.final$Pseudotime
+merged.sex.sce.final$Pseudotime = NULL
+
+merged.sex.sce.final$FemaleBranchPseudotime = merged.sex.sce.final$TSCAN.2
+merged.sex.sce.final$MaleBranchPseudotime = merged.sex.sce.final$TSCAN.8
+merged.sex.sce.final$TSCAN.2 = NULL
+merged.sex.sce.final$TSCAN.8 = NULL
+
+```
 
 # Session info
 ```{r}

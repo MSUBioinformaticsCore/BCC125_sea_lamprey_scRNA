@@ -1,0 +1,1228 @@
+---
+title: "scRNA-seq analysis in R"
+author: "Stephanie Hickey"
+date: "2024-07-23"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+---
+
+```{r, echo=FALSE}
+knitr::opts_chunk$set(echo = TRUE, eval = TRUE, message=FALSE)
+```
+
+```{css, echo=FALSE}
+pre, code {white-space:pre !important; overflow-x:auto}
+```
+
+## OSCA: Orchestrating Single-Cell Analysis with Bioconductor
+
+This tutorial is based off of the "Orchestrating Single-Cell Analysis with Bioconductor" e-book, a comprehensive resource designed to guide users through the process of analyzing single-cell RNA sequencing (scRNA-seq) data using the Bioconductor ecosystem in R. Links to more detailed explanations of the material are included in the tutorial.
+
+### Outline
+
+In this tutorial you will learn to:
+
+  * Make a SingleCellExperiment object from count data derived from `Kaslisto-Bustools` or processed counts downloaded from GEO.    
+  * Detect empty droplets with `DropletUtils`.    
+  * Detect barecodes that correspond to 'doublets'.   
+  * Identify and remove low quality cells from your data.   
+  * Normalize and transform the raw counts for downstream analysis    
+  * Select highly variable genes in the data.   
+  * Perform dimesnionality reductions using PCA, tSNE and UMAP.    
+  * Cluster the cells based on their gene expression profiles.    
+  * Identify cluster enriched genes.   
+  * Assign cell labels from gene sets.    
+  * Calculate mean gene expression per clusters or cell type.   
+  * Visualize your results.   
+
+## Set up
+
+### Open the R environment on HPCC
+```{bash, eval=FALSE}
+module purge
+module load R-bundle-CRAN/2023.12-foss-2023a
+R --vanilla
+```
+
+### Load libraries
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(DropletUtils)
+library(Matrix)
+library(patchwork)
+#library(PCAtools)
+library(bluster)
+library(scDblFinder)
+library(AUCell)
+library(pheatmap)
+library(RColorBrewer)
+library(readxl)
+```
+
+### Set paths
+```{r}
+data_dir <- "/mnt/research/bioinformaticsCore/projects/petroffm/BCC105_scRNAseq_training/data"
+
+results_dir <- "/mnt/research/bioinformaticsCore/projects/petroffm/BCC105_scRNAseq_training/results"
+
+if(!dir.exists(results_dir)){dir.create(results_dir)}
+
+results_dir <- "/mnt/research/bioinformaticsCore/projects/petroffm/BCC105_scRNAseq_training/results/Lukassen_testes"
+
+# if results_dir doesn't exist, make it
+if(!dir.exists(results_dir)){dir.create(results_dir)}
+```
+
+### Read in the count data
+```{r}
+# Read in the count matrix that was output by `kb`.
+mat <- readMM(paste0(data_dir, "/Lukassen_testes/SRR6129050_mouse1/counts_unfiltered/cells_x_genes.mtx"))
+
+dim(mat)
+head(mat[,1:5])
+
+# read in the gene names
+gene_names = read.delim(paste0(data_dir,"/Lukassen_testes/SRR6129050_mouse1/counts_unfiltered/cells_x_genes.genes.names.txt"), header=F)
+
+dim(gene_names)
+head(gene_names)
+
+# add genes as column names 
+colnames(mat) <- gene_names$V1
+head(mat[,1:5])
+
+# read in the cell barcodes
+barcodes <- read.delim(paste0(data_dir,"/Lukassen_testes/SRR6129050_mouse1/counts_unfiltered/cells_x_genes.barcodes.txt"), header=F)
+
+dim(barcodes)
+head(barcodes)
+
+# add cell barcodes as row names
+rownames(mat) <- barcodes$V1
+head(mat[,1:5])
+
+# get the total counts per barcode
+rs <- rowSums(mat)
+
+# remove barcodes with no detected counts from the matrix
+filt_mat <- mat[rs>0,]
+
+# get total number of cells each gene is expressed in 
+cells_exp = rowSums(t(filt_mat)!=0)
+
+filt_mat <- filt_mat[,cells_exp>0]
+```
+
+## Make a `SingleCellExperiment` object
+
+A [SingleCellExperiment](https://bioconductor.org/books/3.13/OSCA.intro/the-singlecellexperiment-class.html) object is a data structure in R, specifically designed for storing and managing single-cell RNA sequencing (scRNA-seq) data. 
+
+#### Key Features:
+
+**Data Storage**: The SingleCellExperiment object holds the main data matrix, typically containing gene expression counts, where rows represent genes and columns represent cells.
+
+**Metadata**: It includes slots for storing metadata related to both the rows (genes/features) and columns (cells/samples). This metadata can include information such as gene annotations or cell type labels.
+
+**Assays**: The object supports multiple "assays," allowing you to store different versions of the data (e.g., raw counts, normalized counts, or log-transformed data) within the same object.
+
+**Reduced Dimensions**: It can store the results of dimensionality reduction techniques like PCA, t-SNE, or UMAP, making it easier to manage and visualize lower-dimensional representations of the data.
+
+**Cell and Feature-Level Data**: The colData and rowData slots store additional cell-level and gene-level information, respectively, such as cell quality metrics, clustering results, or gene annotations.
+
+**Interoperability**: SingleCellExperiment objects are designed to be compatible with a wide range of Bioconductor packages, facilitating various downstream analyses, including clustering, differential expression analysis, and trajectory inference.
+
+
+Right now, we have a matrix where barcodes are rows and genes are columns. `SingleCellExperiment()` expects genes to be rows and barcodes to be columns, so we transpose the matrix with the `t()` function.
+```{r}
+sce <- SingleCellExperiment(assays = list(counts = t(filt_mat)))
+```
+
+To access the count data we just supplied, we can do any one of the following:
+
+  * assay(sce, "counts") - this is the most general method, where we can supply the name of the assay as the second argument.   
+  * counts(sce) - this is a short-cut for the above, but only works for assays with the special name "counts".
+
+## Detect empty droplets with `DropletUtils`
+
+[**OSCA advanced: Chapter 7**](https://bioconductor.org/books/3.13/OSCA.advanced/droplet-processing.html#droplet-processing)
+
+For droplet-based data only (ie 10x and drop-seq)
+
+### Knee plot
+
+A useful diagnostic for droplet-based data is the barcode rank plot, which shows the (log-)total UMI count for each barcode on the y-axis and the (log-)rank on the x-axis. This is effectively a transposed empirical cumulative density plot with log-transformed axes. It is useful as it allows users to examine the distribution of total counts across barcodes, focusing on those with the largest counts. 
+
+```{r}
+br.out <- barcodeRanks(counts(sce))
+head(br.out)
+
+# make the rownames a column
+br.out$barcodes <- rownames(br.out)
+head(br.out)
+
+# Making the knee plot.
+ggplot(as.data.frame(br.out), aes(x=rank, y=total)) +
+  geom_point() +
+  geom_hline(aes(yintercept=metadata(br.out)$knee,
+             linetype="knee"),
+             color = "dodgerblue") +
+  geom_hline(aes(yintercept=metadata(br.out)$inflection,
+             linetype="inflection"),
+             color = "forestgreen") +
+  scale_linetype_manual(name = "legend", 
+                        values = c(2, 2), 
+                        guide = guide_legend(override.aes = list(color = c("forestgreen", "dodgerblue")))) +
+  scale_x_continuous(trans='log10') +
+  scale_y_continuous(trans='log10') +
+  xlab("Rank") +
+  ylab("Total Counts")
+
+ggsave(file = paste0(results_dir, "/kneeplot.png"))
+```
+
+### Distinguish empty droplets from cells
+
+Empty droplets often contain RNA from the ambient solution, resulting in non-zero counts after debarcoding. The `emptyDrops` function is designed to distinguish between empty droplets and cells. It does so by testing each barcode’s expression profile for significant deviation from the ambient profile.
+
+```{r}
+# Set a seed. This can be any number. Using the same number every time ensures that a sequence of random numbers generated is the same every time you run your code.
+set.seed(100) 
+
+# set `by.rank` to the max number of cells you expect
+e.out <- emptyDrops(counts(sce), 
+                    by.rank = 2000) 
+e.out
+
+# add barcodes to a column
+e.out$barcode = rownames(e.out)
+
+# make a vector of significant barcodes
+# use a false discovery rate (FDR) of 0.1%,
+# meaning that no more than 0.1% of our called 
+# barcodes should be empty droplets on average.
+sig_barcodes <- 
+  as_tibble(e.out) %>%
+  filter(FDR < .001) %>% 
+  pull(barcode)
+
+# how many cells?
+length(sig_barcodes)
+```
+
+This is close to the number of cells used in the paper. Filter the sce for these cells.
+```{r}
+sce <- sce[,sig_barcodes]
+```
+
+## Identifying low quality cells
+
+[**OSCA basic: Chapter 1**](https://bioconductor.org/books/3.15/OSCA.basic/quality-control.html)
+
+Common metrics include for identifying low quality cells include:
+
+  * Total counts    
+  * Number of expressed features (genes)   
+  * Proportion of reads mapped to genes in the mitochondrial genome    
+  
+For each cell, we calculate these QC metrics using the `perCellQCMetrics()` function from the `scater` package.
+```{r}
+# Identifying the mitochondrial transcripts in our SingleCellExperiment.
+
+# mouse mito genes start with "mt"
+# human is "MT"
+# change for different species
+# this is a numeric vector of row numbers
+# corresponding to mito genes
+is.mito <- grep("^mt", rownames(sce))
+
+# show the gene names
+rownames(sce)[is.mito]
+
+# get the per cell stats
+stats <- perCellQCMetrics(sce,
+                          subsets=list(Mito=is.mito))
+
+head(stats)
+```
+
+'sum' is the the sum of counts for each cell. 'detected' is the number of genes with at least one count in each cell. 'subsets_Mito_percent' is the percent of the total counts ('sum') that come from mitochrondria genes: 'subsets_Mito_sum'.
+
+### Summarize the stats
+
+```{r}
+summary(stats$sum)
+
+summary(stats$detected)
+
+summary(stats$subsets_Mito_percent)
+```
+
+### Filtering with fixed thresholds
+
+If paper that describes the data outlines the thresholds used to quality filter the cells, you can use those fixed thresholds to filter. For example:
+
+```{r}
+# these aren't actually from the paper
+# I made them up as an example
+qc.counts <- stats$sum < 5000
+qc.nexprs <- stats$detected < 2000
+qc.mito <- stats$subsets_Mito_percent > 10
+discard <- qc.counts | qc.nexprs | qc.mito
+
+# Summarize the number of cells removed for each reason.
+DataFrame(LibSize=sum(qc.counts), NExprs=sum(qc.nexprs), MitoProp=sum(qc.mito), Total=sum(discard))
+
+# remove cells that don't meet the thresholds
+fixed_sce = sce[,!discard]
+fixed_sce
+```
+
+### Filtering with adaptive thresholds
+
+If the hard thresholds used by the authors are not available, you can use a relaxed QC strategy and only remove cells with large mitochondrial proportions, using it as a proxy for cell damage. This reduces the risk of removing cell types with low RNA content, especially in a heterogeneous populations with many different cell types. More information about the `isOutlier()` function can be found [here](https://bioconductor.org/books/3.13/OSCA.advanced/quality-control-redux.html#overview) 
+
+```{r}
+high.mito <- isOutlier(stats$subsets_Mito_percent, type="higher")
+
+# how many high mito cells?
+sum(high.mito)
+
+# What are the cuttoffs?
+attr(high.mito, "thresholds")
+
+# add the stats information to the sce object as col data
+colData(sce) <- cbind(colData(sce), stats)
+
+# add a column indicating the cells you want to discard
+# in this case high.mito cells
+sce$discard <- high.mito
+
+# plot the distribution of the stats and indicate which cells will be discarded
+
+plot.count = 
+  plotColData(sce, 
+              y="sum", 
+              colour_by="discard") +
+  scale_y_log10() + 
+  ggtitle("Total count")
+
+plot.genes = 
+  plotColData(sce, 
+              y="detected", 
+              colour_by="discard") +
+  scale_y_log10() + 
+  ggtitle("Detected genes")
+
+plot.mito = 
+  plotColData(sce, 
+              y="subsets_Mito_percent", 
+              colour_by="discard") +
+  ggtitle("Mito percent")
+
+plot.all = plot.count | plot.genes | plot.mito
+
+plot.all
+
+ggsave(plot.all, 
+       height = 4,
+       file = paste0(results_dir, "/qc_plots.png"))
+```
+
+The high mito cells tend to have lower total UMI counts and lower number of detected genes.
+
+Remove the high.mito cells from sce.
+```{r}
+sce <- sce[,!high.mito]
+sce
+```
+
+## Normalization and transformation
+
+[**OSCA basic: Chapter 2**](https://bioconductor.org/books/3.15/OSCA.basic/normalization.html#normalization)
+
+To accurately account for differences in library size (total count) between cells, we will first perform a quick cluster analysis to group similar cells together and calculate cell-specific scaling factors (often called size factors) using `computeSumFactors()`. See the detailed explanation from OSCA [here](https://bioconductor.org/books/3.15/OSCA.basic/normalization.html#normalization-by-deconvolution) 
+
+Once we have computed the size factors, we use the `logNormCounts()` function to compute normalized expression values for each cell. This is done by dividing the count for each gene with the appropriate size factor for that cell. The function also log-transforms the normalized values, creating a new assay called "logcounts". See the detailed explanation from OSCA [here](https://bioconductor.org/books/3.15/OSCA.basic/normalization.html#normalization-transformation)
+
+```{r}
+clusters <- quickCluster(sce)
+sce <- computeSumFactors(sce, cluster=clusters)
+sce <- logNormCounts(sce)
+```
+
+## Feature selection
+
+[**OSCA basic: Chapter 3**](https://bioconductor.org/books/3.15/OSCA.basic/feature-selection.html#feature-selection)
+
+For cell clustering we need to select genes that contain useful information about the biology of the system while removing genes that contain random noise.  The simplest approach to feature selection is to select the most variable genes based on their expression across cells. We'll use `getTopHVGs()` to detect these genes.
+
+The number of highly variable genes to consider is fairly arbitrary, with any value from 500 to 5000 considered “reasonable”. n=1000 is a common choice. 
+```{r}
+# store the highly variable genes within the single cell object
+rowSubset(sce, "HVGs") <- getTopHVGs(sce, n=1000)
+```
+
+## Dimesnionality reduction: PCA for downstream analysis
+
+[**OSCA basic: Chapter 4**](https://bioconductor.org/books/3.15/OSCA.basic/dimensionality-reduction.html#overview)
+
+In single-cell RNA-seq analysis, we have a lot of genes being measured across thousands of cells. This creates a massive amount of data, with each cell having a unique expression pattern for thousands of genes. Handling and interpreting such large datasets can be challenging.
+
+Principal Component Analysis (PCA) helps by reducing the complexity of the data. Instead of looking at thousands of genes, PCA combines them into a smaller number of "principal components." Each principal component is a combination of gene expression patterns that captures the most variation in the data. We'll use the PCs to define and visualize our cell clusters later.
+
+We'll run PCA on the expression of the highly variable genes.
+```{r}
+sce <- runPCA(sce, subset_row=rowSubset(sce, "HVGs"))
+sce
+```
+
+`runPCA()` reports the first 50 PCs by default, but how many do you actually need for downstream analysis? A simple heuristic for choosing the suitable number of PCs involves identifying the elbow point in the percentage of variance explained by successive PCs. This refers to the “elbow” in the curve of a scree plot. See [OSCA advanced: Chapter 4](https://bioconductor.org/books/3.15/OSCA.advanced/dimensionality-reduction-redux.html#more-choices-for-the-number-of-pcs) for more details. 
+
+We can plot a scree plot and identify the "elbow" using `findElbowPoint()`.
+```{r}
+# Percentage of variance explained is tucked away in the attributes.
+percent.var <- attr(reducedDim(sce), "percentVar")
+
+chosen.elbow <- findElbowPoint(percent.var)
+chosen.elbow
+
+# make the scree plot
+plot(percent.var, xlab="PC", ylab="Variance explained (%)")
+abline(v=chosen.elbow, col="red")
+
+# save as a pdf
+pdf(file = paste0(results_dir, "/scree.pdf"))
+plot(percent.var, xlab="PC", ylab="Variance explained (%)")
+abline(v = chosen.elbow, col="red")
+dev.off()
+
+# store only the relevant PCs in the sce 
+# with the name "PCA.elbow"
+reducedDim(sce, "PCA.elbow") <- reducedDim(sce, "PCA")[,1:chosen.elbow]
+```
+
+## Clustering
+
+[**OSCA basic: Chapter 5**](https://bioconductor.org/books/3.15/OSCA.basic/clustering.html#clustering)
+
+How do you find the "best" clusters within the single-cell data? I like this answer from the overview of the OSCA clustering chapter:
+
+> A more relevant question is “how well do the clusters approximate the cell types or states of interest?” Unfortunately, this is difficult to answer given the context-dependent interpretation of the underlying biology. Some analysts will be satisfied with resolution of the major cell types; other analysts may want resolution of subtypes; and others still may require resolution of different states (e.g., metabolic activity, stress) within those subtypes. Moreover, two clusterings can be highly inconsistent yet both valid, simply partitioning the cells based on different aspects of biology. Indeed, asking for an unqualified “best” clustering is akin to asking for the best magnification on a microscope without any context.
+
+So, there's no "one-size fits all" solution for finding the best clusters. 
+
+### Adjust $k$ to change the cluster resolution
+
+One basic way to alter clustering is by changing the value $k$, or the number of nearest neighbors of each cell to consider when building clusters.This controls the resolution of the clustering where higher $k$ yields broader clusters. You can exploit this by experimenting with different values of $k$ to obtain a satisfactory resolution. `clusterCells()` uses `k=10` as a default and is a good place to start. 
+
+As mentioned above, we'll cluster the cells in PC space rather than gene expression space for efficiency. We specify that the dimensionality reduction ("dimred") we want to use is the PCs we defined using the elbow plot.  
+```{r}
+clust.10 <- clusterCells(sce, use.dimred="PCA.elbow")
+table(clust.10)
+```
+
+`k=10` gives us 16 clusters. Let's try `k=40` and `k=20` for comparison.
+```{r}
+clust.40 <- clusterCells(sce, 
+                        use.dimred="PCA.elbow", 
+                        BLUSPARAM=NNGraphParam(k=40))
+
+table(clust.40)
+
+clust.20 <- clusterCells(sce, 
+                        use.dimred="PCA.elbow", 
+                        BLUSPARAM=NNGraphParam(k=20))
+table(clust.20)
+```
+
+Add the cluster information to the colData field of the sce object.
+```{r}
+sce$clust.10 <- clust.10
+sce$clust.40 <- clust.40
+sce$clust.20 <- clust.20
+```
+
+It can also be useful to plot our QC metrics by cluster to see if cells cluster based on technical rather than biological factors. We can do this with `plotColData()`. I'll use clust.20 as an example.
+```{r, fig.height=8}
+# plot
+plot.count <- 
+  plotColData(sce, 
+              y="sum", 
+              x = "clust.20",
+              colour_by="clust.20") +
+  scale_y_log10() + 
+  ggtitle("Total count")
+
+plot.genes <- 
+  plotColData(sce, 
+              y="detected", 
+              x = "clust.20",
+              colour_by="clust.20") +
+  scale_y_log10() + 
+  ggtitle("Detected genes")
+
+plot.mito <- 
+  plotColData(sce, 
+              y="subsets_Mito_percent", 
+              x = "clust.20",
+              colour_by="clust.20") +
+  ggtitle("Mito percent")
+
+plot.all <- plot.count / plot.genes / plot.mito
+
+plot.all
+
+ggsave(plot.all, 
+       file = paste0(results_dir, "/qc_plots_by_clust20.png"))
+```
+
+## Dimesnionality reduction: UMAP and TSNE for visualization
+
+[**OSCA basic: Chapter 4.5.2**](https://bioconductor.org/books/3.15/OSCA.basic/dimensionality-reduction.html#non-linear-methods-for-visualization)
+
+Single-cell RNA-seq data is high-dimensional, with thousands of genes measured across thousands to millions of cells. Uniform manifold approximation and projection (UMAP) and $t$-stochastic neighbor embedding (t-SNE) effectively reduce this complexity to 2D space, making it easier to visualize while preserving some of the underlying biological structure. 
+
+It is arguable whether the UMAP or  
+t-SNE visualizations are more useful or aesthetically pleasing. UMAP aims to preserve more global structure but this necessarily reduces resolution within each visual cluster. However, UMAP is unarguably much faster, and for that reason alone, it is increasingly displacing t-SNE as the method of choice for visualizing large scRNA-seq data sets.
+
+**Important** 
+
+When interpreting UMAP and t-SNE plots, it's safest to focus on local neighborhoods, as these methods prioritizes preserving the relationships between nearest neighbors from high-dimensional space in the 2D embedding. If multiple cell types or clusters appear close together in the plot, they were likely also neighbors in higher-dimensional space. However, distances between non-neighboring cells may not be accurately represented, so using the spacing between clusters to infer similarity between distinct cell types is unreliable.
+
+We'll use PC space rather than gene expression space to find the UMAP and t-SNE coordinates for efficiency. We specify that the dimensionality reduction ("dimred") we want to use is the PCs we defined using the elbow plot.
+```{r}
+set.seed(100)
+
+# runUMAP 
+sce <- runUMAP(sce, dimred="PCA.elbow")
+
+# runTSNE
+sce <- runTSNE(sce, dimred="PCA.elbow")
+
+sce
+```
+
+Plot the clusters colored by clust.10, clust.20 and clust.40 in UMAP space.
+```{r, fig.width=12, fig.height=4}
+plot10 <- plotReducedDim(sce, dimred="UMAP", colour_by="clust.10") 
+
+plot20 <- plotReducedDim(sce, dimred="UMAP", colour_by="clust.20")
+
+plot40 <- plotReducedDim(sce, dimred="UMAP", colour_by="clust.40")
+
+plot.all <- plot10 | plot20 | plot40 
+
+plot.all
+
+ggsave(plot.all, file = paste0(results_dir, "/UMAP_ktest.png"), width = 12, height = 4)
+```
+
+Plot the clusters colored by clust.10, clust.20 and clust.40 in TSNE space.
+```{r, fig.width=12, fig.height=4}
+plot10 <- plotReducedDim(sce, dimred="TSNE", colour_by="clust.10") 
+
+plot20 <- plotReducedDim(sce, dimred="TSNE", colour_by="clust.20")
+
+plot40 <- plotReducedDim(sce, dimred="TSNE", colour_by="clust.40")
+
+plot.all <- plot10 | plot20 | plot40 
+
+plot.all
+
+ggsave(plot.all, file = paste0(results_dir, "/TSNE_ktest.png"), width = 12, height = 4)
+```
+
+## Doublet detection
+
+[**OSCA advaced: Chapter 8**](https://bioconductor.org/books/3.15/OSCA.advanced/doublet-detection.html)
+
+"Doublets" are barcodes that contain the transcriptomes of two cells instead of just one. 
+
+We'll use `scDblFinder()` from the *scDblFinder* package to identify doublets for removal. `scDblFinder()` simulates thousands of doublets by combining the expression profiles of real cells in the data set. It then reports a "doublet score" for each cell that represents how similar the cell is to the simulated doublets vs real cells. Higher scoring cells are more likely to be doublets. The function also classifies the cells based on the scores and other criteria into "doublets" and "singlets". 
+
+```{r, fig.width=10, fig.height=6}
+sce.dbl <- scDblFinder(sce)
+
+# how many cells are classified as doublets?
+table(sce.dbl$scDblFinder.class)
+
+# plot the doublet score in tsne space
+tsne.dbl <- plotTSNE(sce.dbl, colour_by="scDblFinder.score")
+
+# plot the clusters in tsne space for reference
+tsne.20 <- plotTSNE(sce.dbl, colour_by="clust.20")
+
+# make a vln plot of the doublet score by cluster
+vln.dbl <- 
+  plotColData(sce.dbl, 
+              y="scDblFinder.score", 
+              x = "clust.20",
+              colour_by="scDblFinder.class")
+
+# combine the plots with patchwork
+plot.all <- (tsne.dbl | tsne.20) / vln.dbl + plot_layout(heights = c(2, 1))
+
+plot.all
+
+ggsave(plot.all, file = paste0(results_dir, "/TSNE_doublets.png"), width = 10, height=6)
+```
+
+The OSCA authors suggest that all cells from a cluster with a large average doublet score should be considered doublets. If no one cluster is over represented by doublets, as is the case here, it is safer to remove individual doublets.
+
+```{r}
+# select the barcodes corresponding to singlets
+singlets <- 
+  as_tibble(colData(sce.dbl)) %>%
+  mutate(barcodes = rownames(colData(sce.dbl))) %>%
+  filter(scDblFinder.class == "singlet") %>%
+  pull(barcodes)
+
+# filter the sce for singlets
+sce <- sce[,singlets]
+```
+
+**Important**
+Any time you remove cells from the analysis, it's important to re-normalize the data, find new PCs and recluster.
+
+```{r}
+#normalize
+clusters <- quickCluster(sce)
+sce <- computeSumFactors(sce, cluster=clusters)
+sce <- logNormCounts(sce)
+
+#feature selection
+rowSubset(sce, "HVGs") <- getTopHVGs(sce, n=1000)
+
+# PCA
+sce <- runPCA(sce, subset_row=rowSubset(sce, "HVGs"))
+percent.var <- attr(reducedDim(sce), "percentVar")
+chosen.elbow <- findElbowPoint(percent.var)
+reducedDim(sce, "PCA.elbow") <- reducedDim(sce, "PCA")[,1:chosen.elbow]
+
+# cluster
+clust.20 <- clusterCells(sce, 
+                        use.dimred="PCA.elbow", 
+                        BLUSPARAM=NNGraphParam(k=20))
+sce$clust.20 <- clust.20
+
+# runUMAP 
+sce <- runUMAP(sce, dimred="PCA.elbow")
+
+# runTSNE
+sce <- runTSNE(sce, dimred="PCA.elbow")
+```
+
+## Identify cluster enriched genes
+
+[**OSCA basic: Chapter 6**](https://bioconductor.org/books/3.15/OSCA.basic/marker-detection.html)
+
+To interpret our clustering results, we identify the genes that drive separation between clusters. These cluster enriched genes allow us to assign biological meaning to each cluster based on their functional annotation. We perform differential expression analysis between each pair of clusters clusters the using `scoreMarkers()` function from *scran*. For each pairwise comparison three different effect sizes are reported to describe the size of the gene expression difference:
+
+  * **Cohen’s $d$** (`logFC.cohen`) is a standardized log-fold change where the difference in the mean log-expression between groups is scaled by the average standard deviation across groups. In other words, it is the number of standard deviations that separate the means of the two groups. The interpretation is similar to the log-fold change; positive values indicate that the gene is upregulated in our cluster of interest, negative values indicate downregulation and values close to zero indicate that there is little difference.   
+  * **Area under the curve** (`AUC`) represents the probability that a randomly chosen observation from our cluster of interest is greater than a randomly chosen observation from the other cluster. A value of 1 corresponds to upregulation, where all values of our cluster of interest are greater than any value from the other cluster; a value of 0.5 means that there is no net difference in the location of the distributions; and a value of 0 corresponds to downregulation.    
+  * **The log-fold change in the proportion of cells with detected expression between clusters** (`logFC.detected`). This ignores any information about the magnitude of expression, only considering whether any expression is detected at all. Again, positive values indicate that a greater proportion of cells express the gene in our cluster of interest compared to the other cluster.
+
+If you ave $N$ clusters, then you'll have $N-1$ pairwise comparisons for each gene for each cluster. `scoreMarkers()` summarizes the effect sizes of the pairwise comparisons for each cluster with various summary statistics (mean, median, min, max), that may be useful in different scenarios. You can read more about them [here](https://bioconductor.org/books/3.15/OSCA.basic/marker-detection.html#summarizing-pairwise-effects).
+
+```{r}
+# use the k=20 clusters as an example
+markers20 <- scoreMarkers(sce, sce$clust.20)
+```
+
+The scores for all pairwise comparisons involving a particular cluster are consolidated into a single `DataFrame` for that cluster. The `scoreMarkers()` returns a list of `DataFrame`s where each `DataFrame` corresponds to a cluster and each row of the `DataFrame` corresponds to a gene. In the `DataFrame` for cluster $X$, the columns contain the `self.average`, the mean log-expression in $X$; `other.average`, the grand mean across all other clusters; `self.detected`, the proportion of cells with detected expression in $X$; `other.detected`, the mean detected proportion across all other clusters; and finally, the effect size summaries generated from all pairwise comparisons involving $X$.
+ .
+```{r}
+# markers20 is a list object. Each element of the list is a data frame with the summary 
+markers20
+
+colnames(markers20[["1"]]) # statistics for cluster 1.
+```
+
+I've written a function, `saveTopGenesDF()`, that pulls the top n genes for each cluster given a chosen statistic into a data frame. If write_df = TRUE it also writes a `.csv` file to `resuts_dir`. 
+```{r}
+# `saveTopGeneDF()` is a function to save the top cluster enriched genes for each cluster
+# marker_list is the output of scoreMarkers
+# topn is the number of genes you want
+# stat_oi is the  stat you want to sort by
+# if write_df=TRUE the df is saved to a csv file
+# in results_dir
+saveTopGenesDF = function(marker_list, 
+                          topn, 
+                          stat_oi,
+                          write_df=FALSE){
+  
+top_df <- {}
+
+for(i in 1:length(marker_list)){
+  
+ if(grepl("rank", stat_oi)){ # if the stat is a rank take the min
+   
+   top_clust <- 
+    as_tibble(marker_list[[i]]) %>% # select element i from the list
+    mutate(Gene = rownames(marker_list[[i]]), # add a column with the genes
+           Cluster = paste0("cluster", i)) %>% # add a column with the cluster
+    slice_min(order_by = !!sym(stat_oi), # order by stat oi and take the min n 
+              n = topn) %>%
+    select(Cluster, # select relevant columns
+           Gene,
+           self.average,
+           other.average,
+           self.detected,
+           other.detected,
+           !!stat_oi)
+ 
+  top_df <- rbind(top_df, top_clust) #bind into one df
+ 
+  } else { # if the stat is not a rank take the max
+ 
+   top_clust <- 
+    as_tibble(marker_list[[i]]) %>% # select element i from the list
+    mutate(Gene = rownames(marker_list[[i]]), # add a column with the genes
+           Cluster = paste0("cluster", i)) %>% # add a column with the cluster
+    slice_max(order_by = !!sym(stat_oi), # order by stat oi and take the top n 
+              n = topn) %>%
+    select(Cluster, # select relevant columns
+           Gene,
+           self.average,
+           other.average,
+           self.detected,
+           other.detected,
+           !!stat_oi)
+ 
+ top_df <- rbind(top_df, top_clust) #bind into one df
+     
+ }
+ 
+}
+
+if(write_df==TRUE){
+  write.csv(top_df, file = paste0(results_dir, "/marker_genes_top", topn, "_", stat_oi, ".csv"))
+    }
+return(top_df)
+}
+```
+
+`mean.logFC.cohen` is a reasonable default for most applications. Here, we'll pull the top 3 genes by `mean.logFC.cohen` for each cluster.
+```{r}
+top_mean <- saveTopGenesDF(markers20, 3, "mean.logFC.cohen")
+
+# show the first three clusters
+as.data.frame(top_mean) %>% filter(Cluster %in% c("cluster1", "cluster2", "cluster3"))
+```
+
+`min.logFC.cohen` is more strict, and can be useful to find genes that are specifically enriched in one cluster. 
+```{r}
+top_min <- saveTopGenesDF(markers20, 3, "min.logFC.cohen")
+
+# show the first three clusters
+as.data.frame(top_min) %>% filter(Cluster %in% c("cluster1", "cluster2", "cluster3"))
+```
+
+Plot the top genes from "mean.logFC.cohen" and "min.logFC.cohen" for cluster 1.
+```{r, fig.height = 12, fig.width = 10}
+goi_mean <- 
+  top_mean %>%
+  filter(Cluster == "cluster1") %>%
+  slice_max(order_by = mean.logFC.cohen, 
+            n =3) %>%
+  pull(Gene)
+
+goi_mean
+
+goi_min <- 
+  top_min %>%
+  filter(Cluster == "cluster1") %>%
+  slice_max(order_by = min.logFC.cohen, 
+            n =3) %>%
+  pull(Gene)
+
+goi_min
+
+plot.top.mean <- 
+  plotExpression(sce,
+                 features=goi_mean,
+                 x="clust.20", colour_by="clust.20") +
+  ggtitle("top mean.logFC.cohen")
+
+plot.top.min <- 
+  plotExpression(sce,
+                 features=goi_min,
+                 x="clust.20", colour_by="clust.20") +
+  ggtitle("top min.logFC.cohen")
+
+plot.both <- plot.top.mean / plot.top.min
+
+plot.both
+
+ggsave(plot.both, 
+       file = paste0(results_dir, "/cluster1_top_genes.png"),
+       height = 12, width = 10)
+```
+
+## Assigning cell labels from gene sets
+
+[**OSCA basic: Chapter 7**](https://bioconductor.org/books/3.15/OSCA.basic/cell-type-annotation.html)
+
+### Assign lables to single cells
+
+One common way to assign cell type labels to single cells is using pre-defined cell-type marker genes. Specifically, we use the *AUCell* package to identify marker sets that are highly expressed in each cell. 
+The marker genes should be formatted as a list where each element of the list is a character vector of genes for each cell type. I'll make this list from the marker genes identified by Lukassen et al. in  [`SuppTableGenes.xlsx`](https://figshare.com/articles/dataset/Cell_and_gene_data_for_testicular_single-cell_RNA-Seq/6139469?backTo=/collections/Single-cell_RNA_sequencing_of_adult_mouse_testes/4119713). 
+
+`SuppTableGenes.xlsx` is an example of a "messy" data frame. It's often easier to deal with data in a "tidy" format. 
+
+In [Tidy data](https://vita.had.co.nz/papers/tidy-data.pdf):
+
+1. Each variable forms a column.
+2. Each observation forms a row.
+3. Each type of observational unit forms a table.
+
+We'll use functions from the `dplyr` package in the [Tidyverse](https://www.tidyverse.org) to reformat `SuppTableGenes.xlsx` into a table with the following columns:
+
+| GeneName | CellType  | Log2FC | Pval |
+
+Where each row represents the log fold change and p-value of a gene in a specific cell type versus all other cell types. Then, we'll filter for positive fold changes, select the 100 genes with the smalest p-value in each cluster, and turn the data frame into a list of data frames.   
+```{r}
+# read in the cluster enriched genes from Lukassen
+sup_tab <- read_excel(paste0(data_dir, "/Lukassen_testes/SuppTableGenes.xlsx"))
+glimpse(sup_tab)
+
+# list the 100 genes with the smallest p-val
+# for each cell type
+top_lukassen_df <- 
+  sup_tab %>%
+  # Select columns that include "GeneName", "P-Value", and "Log2" (fold change columns)
+  select(GeneName, contains("P-Value"), contains("Log2")) %>% 
+  # Remove duplicate rows based on the "GeneName" column
+  filter(!duplicated(GeneName)) %>%
+  # Convert the data frame from wide to long format
+  pivot_longer(cols = -GeneName,   # Keep "GeneName" as is, and reshape other columns
+               names_to = "CellType", # Create a new column "CellType" from the names of reshaped columns
+               values_to = "val") %>% # Store the values in a new column "val"
+  # Create a new column "Stat" that categorizes values as either "Pval" or "Log2FC"
+  mutate(Stat = case_when(
+    grepl("P-Value", CellType) ~ "Pval",  # If "P-Value" is in the "CellType" column, set "Stat" as "Pval"
+    grepl("Log2", CellType) ~ "Log2FC"))  %>% # If "Log2" is in the "CellType" column, set "Stat" as "Log2FC"
+  # Clean up the "CellType" names by removing unnecessary strings
+  mutate(CellType = gsub(" P-Value", "", CellType), 
+         CellType = gsub(" Log2 Fold Change vs all", "", CellType)) %>% 
+  # Convert the data back from long to wide format
+  pivot_wider(names_from = Stat,  # Use "Stat" column (which contains "Pval" or "Log2FC") as the new column names
+              values_from = val) %>% # Use values from "val" column as the data for the new columns
+  # Filter the data to keep only rows where "Log2FC" is positive
+  filter(Log2FC > 0) %>%
+  # Group the data by "CellType"
+  group_by(CellType) %>% 
+  # Select the top 100 rows with the smallest "Pval" within each "CellType" group
+  slice_min(Pval, n = 100) %>% 
+  # Remove the grouping structure from the data frame
+  ungroup() %>%
+  # Filter out any remaining duplicate "GeneName" entries, keeping only one occurrence
+  filter(!duplicated(GeneName))
+  
+top_lukassen_list <- 
+  top_lukassen_df %>%
+  # Group the data by the "CellType" column
+  group_by(CellType) %>%
+  # Split the grouped data frame into a list of data frames
+  # Each element in the list corresponds to a unique "CellType"
+  split(f = as.factor(.$CellType))
+
+# pull just the genes to use with AUCell 
+for_aucell <- lapply(top_lukassen_list, function(x) x %>% pull(GeneName))
+```
+
+Now, we'll use `AUCell_buildRankings()` to rank genes by their expression value in each cell. Then `AUCell_calcAUC` will quantify the enrichment of the top Lukassen markers in each cell. Higher scores correspond to higher enrichment.
+```{r}
+rankings <- AUCell_buildRankings(as.matrix(counts(sce)), 
+                                 plotStats=FALSE,
+                                 verbose=FALSE)
+
+cell.aucs <- AUCell_calcAUC(for_aucell, rankings)
+```
+
+Next, we'll check how well the marker genes discriminate cell types. In heterogeneous populations, the distribution for each label should be bimodal with one high-scoring peak containing cells of that cell type and a low-scoring peak containing cells of other types.  In populations where a particular cell type is expected, lack of clear bimodality for the corresponding label may indicate that its gene set is not sufficiently informative. 
+```{r, results=FALSE, fig.height=10}
+par(mfrow=c(3,3))
+AUCell_exploreThresholds(cell.aucs, plotHist=TRUE, assign=TRUE) 
+
+# save the plot
+pdf(file = paste0(results_dir, "/aucell_check.pdf"))
+par(mfrow=c(3,3))
+AUCell_exploreThresholds(cell.aucs, plotHist=TRUE, assign=TRUE) 
+dev.off()
+```
+Based on the [examples](https://bioconductor.org/packages/release/bioc/vignettes/AUCell/inst/doc/AUCell.html#determine-the-cells-with-the-given-gene-signatures-or-active-gene-sets) from the `AUCell` vignette, these look as good as random gene sets. But let's see what the results look like.
+
+Assign the label with the highest score to each cell.
+```{r, fig.width=8, fig.height=4}
+results <- t(assay(cell.aucs))
+# Take the marker set with the top AUC as the label for that cell.
+aucell.labels <- colnames(results)[max.col(results)]
+
+# add the labels to the sce
+colData(sce) <- cbind(colData(sce), aucell.labels)
+
+# plot the labels on the tnse plot
+tsne.lab <- plotTSNE(sce, colour_by="aucell.labels")
+
+# plot the clusters in tsne space for reference
+tsne.20 <- plotTSNE(sce, colour_by="clust.20")
+
+# combine the plots with patchwork
+plot.all <- tsne.lab | tsne.20
+plot.all
+
+# Save the tsne plot as a PNG file in the specified results directory
+ggsave(plot.all, file = paste0(results_dir, "/TSNE_aucell_labels.png"), width = 8, height=4)
+```
+
+These actually look pretty reasonable!
+
+### Assign lables to clusters
+
+We can also assign cell-type labels to clusters of cells instead of individual cells. `AUCell` works best with large numbers of markers, but you might not always have access to that information. This is an example of using a short list of cell-type markers to label cell clusters instead of individual cells. We'll make a heatmap that shows the `mean.logFC.cohen` of the marker genes from figure 2 in each cluster. The rows represent marker genes. The columns are clusters. The genes are labeled by the cells they are expressed in according to supplemental table 3. If a cluster has a high `mean.logFC.cohen` for a specific set of cell-type marker genes, the cluster may represent that cell type.
+```{r}
+# This is a df I made using info from supplemental table 3
+fig2 <- read.delim(paste0(data_dir, "/Lukassen_testes/fig2_genes.txt"))
+
+# Set row names to the values in the 'Gene.name' column
+rownames(fig2) <- fig2$Gene.name 
+
+# Remove the 'Gene.name' column from the data frame since it's now used as row names
+fig2$Gene.name <- NULL
+
+# Replace all occurrences of 0 with "NO" in the data frame
+fig2[fig2 == 0] <- "NO"
+
+# Replace all occurrences of 1 with "YES" in the data frame
+fig2[fig2 == 1] <- "YES"
+
+# Define color mappings for each cell type based on the values "YES" (black) and "NO" (white)
+ann_colors <- list(
+  Early.Sgonia = c(YES="black", NO="white"),
+  Late.Sgonia = c(YES="black", NO="white"),
+  Early.Scytes = c(YES="black", NO="white"),
+  Late.Scytes = c(YES="black", NO="white"),
+  Round.Stids = c(YES="black", NO="white"),
+  Later.Stids = c(YES="black", NO="white"),
+  Sertoli = c(YES="black", NO="white"),
+  Leydig = c(YES="black", NO="white")
+)
+
+# This retrieves the "mean.logFC.cohen" of
+# every gene for each  of our clusters
+all <- saveTopGenesDF(markers20, nrow(markers20[[1]]), "mean.logFC.cohen")
+
+# Filter the 'all' data frame to keep only the marker genes of interest that are present in 'fig2'
+goi <- all %>% filter(Gene %in% rownames(fig2))
+
+# Reshape the data frame from long to wide format
+# This spreads the "mean.logFC.cohen" values across clusters for each gene
+goi_wide <- 
+  goi %>%
+  pivot_wider(id_cols = Gene,
+              names_from = Cluster,
+              values_from = mean.logFC.cohen)
+
+# Convert the wide-format tibbl to a regular data frame
+goi_wide <- as.data.frame(goi_wide)
+
+# Set the row names of the data frame to the gene names
+rownames(goi_wide) <- goi_wide$Gene
+
+# Remove the 'Gene' column since it's now used as row names
+goi_wide$Gene <- NULL
+
+# Define a color palette for the heatmap using a reversed "RdBu" color scheme
+color_pal <- colorRampPalette(rev(brewer.pal(n = 11, name ="RdBu")))(20)
+
+# Define breaks for the color scaling in the heatmap
+# The breaks are calculated to have less emphasis on the values close to zero
+myBreaks <- c(seq(min(goi_wide), 0, length.out=ceiling(20/2) + 1), 
+              seq(max(goi_wide)/20, max(goi_wide),
+                  length.out=floor(20/2)))
+
+# Generate the heatmap with specified settings
+pheatmap(goi_wide,
+         color = color_pal,
+         border_color = NA,                 # No border color around heatmap cells
+         cluster_cols = TRUE,               # Cluster columns (i.e., gene clusters)
+         cluster_rows = TRUE,               # Cluster rows (i.e., sample clusters)
+         show_rownames = TRUE,              # Show row names (gene names)
+         annotation_row = fig2,             # Add annotations from the fig2 data frame
+         annotation_colors = ann_colors,    # Apply the custom color mapping to the annotations
+         breaks=myBreaks)                   # Use the custom breaks for color scaling
+
+# Create a PDF file to save the heatmap
+pdf(file = paste0(results_dir, "/fig2_heatmap.pdf"))
+pheatmap(goi_wide,
+         color = color_pal,
+         border_color = NA,                 
+         cluster_cols = TRUE,               
+         cluster_rows = TRUE,               
+         show_rownames = TRUE,              
+         annotation_row = fig2,             
+         annotation_colors = ann_colors,    
+         breaks=myBreaks) 
+# Close the PDF device, saving the heatmap
+dev.off()
+```
+
+Based on the heatmap, these could be reasonable labels for the clusters:
+
+| Cluster  | CellType        |
+|----------|-----------------|
+| Cluster1 | Round Stids     |   
+| Cluster2 | Sgonia          |
+| Cluster3 | Scytes          |
+| Cluster4 | Scytes          |  
+| Cluster5 | Scytes          |
+| Cluster6 | Sgonia          |
+| Cluster7 | Sgonia          |
+| Cluster8 | Later Stids     |
+| Cluster9 | Round Stids     |
+| Cluster10| Later Stids     |
+| Cluster11| Late Scytes     |
+| Cluster12| Sgonia          |
+
+Add them to the `sce` and plot.
+```{r, fig.width=8, fig.height=4}
+# make a vector of the cluster labels in order of the cluster number
+type_vec <-  c("Round Stids", "Sgonia", "Scytes",
+             "Scytes", "Scytes", "Sgonia",
+             "Sgonia", "Later Stids", "Round Stids", 
+             "Later Stids", "Late Scytes", "Sgonia")
+
+# map the cell type lable of every cell to the cluster number 
+# of every cell
+label_vec <- type_vec[colData(sce)$clust.20]
+
+# add the cell type lables to coData
+colData(sce)$fig2.labels <- label_vec
+
+# plot
+tsne.lab <- plotTSNE(sce, colour_by="fig2.labels")
+ggsave(file = paste0(results_dir, "/TSNE_fig2.labels.pdf"),
+       width=8, height=4)
+
+tsne.lab | tsne.20
+```
+
+## Mean expression tables
+
+Use `aggregateAcrossCells()` from the scuttle package to get the mean expression of genes within groups of cells. We'll find the mean by "fig2.labels" as an example.
+```{r}
+mean_sce <- summarizeAssayByGroup(sce, 
+                                 ids = sce$fig2.labels,
+                                 statistics = "mean",
+                                 assay.type = "logcounts")
+
+# pull the mean assay into a data frame
+mean_df <- assay(mean_sce, "mean")
+
+head(mean_df)
+
+# write it to a csv file
+write.csv(mean_df, file = paste0(results_dir, "/mean_logcounts_by_fig2.labels.csv"))
+```
+
+## Start with deposited counts and supplied metadata
+
+If authors of a study have deposited the count matrix they used in GEO, it's often more efficient to use that than to re-process the raw sequencing files. 
+
+Using deposited data will also allow you to more accurately reproduce the original study. Often, only the cells used in the study after filtering for empty drops, outliers, and low quality cells are included in the deposited data, so there's no need to filter yourself. 
+
+If the authors also include a meta data file that lists a cell-type label for each cell, you will not have to repeat the clustering and annotation steps. 
+
+**Files deposited by the authors**
+
+  * `/data/Lukassen_testes/GSE104556_matrix.mtx.gz`: From GEO ([GSE104556](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE104556)). The gene x barcode UMI count matrix.   
+  * `/data/Lukassen_testes/GSE104556_genes.tsv.gz`: From GEO ([GSE104556](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE104556)). The genes that correspond to the rows of the UMI count matrix.    
+  * `/data/Lukassen_testes/GSE104556_barcodes.tsv.gz`: From GEO ([GSE104556](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE104556)). The barcodes that correspond to the columns of the UMI count matrix.    
+  * `/data/Lukassen_testes/SuppTableCells.xlsx`: From [figshare](https://figshare.com/articles/dataset/Cell_and_gene_data_for_testicular_single-cell_RNA-Seq/6139469?backTo=/collections/Single-cell_RNA_sequencing_of_adult_mouse_testes/4119713). Cell meta data including the cell-type labels.   
+* `/data/Lukassen_testes/SuppTableGenes.xlsx`: From [figshare](https://figshare.com/articles/dataset/Cell_and_gene_data_for_testicular_single-cell_RNA-Seq/6139469?backTo=/collections/Single-cell_RNA_sequencing_of_adult_mouse_testes/4119713). Gene meta data including gene names.
+
+Load the count matrix.
+```{r}
+# Read the count matrix data from a Matrix Market file (.mtx.gz) and store it in the 'counts' variable
+counts <- readMM(paste0(data_dir, "/Lukassen_testes/GSE104556_matrix.mtx.gz"))
+
+# Display the dimensions of the 'counts' matrix (number of genes x number of cells)
+dim(counts)
+
+# Read the barcodes file (which identifies individual cells) from a tab-delimited file and store it in 'barcodes'
+barcodes <- read.delim(paste0(data_dir, "/Lukassen_testes/GSE104556_barcodes.tsv.gz"), header = FALSE)
+
+# Display the dimensions of the 'barcodes' data (number of cells)
+dim(barcodes)
+
+# Display the first few rows of the 'barcodes' data
+head(barcodes)
+
+# Display the last few rows of the 'barcodes' data
+tail(barcodes)
+
+# The barcodes have "-1" or "-2" appended to them, corresponding to cells derived from mouse 1 or mouse 2 in the study
+# Assign the barcodes as the column names of the 'counts' matrix
+colnames(counts) <- barcodes$V1
+
+# Read the gene information from a tab-delimited file and store it in 'genes'
+genes <- read.delim(paste0(data_dir, "/Lukassen_testes/GSE104556_genes.tsv.gz"), header = FALSE)
+
+# Display the dimensions of the 'genes' data (number of genes)
+dim(genes)
+
+# Display the first few rows of the 'genes' data
+head(genes)
+
+# Assign the gene names as the row names of the 'counts' matrix
+rownames(counts) <- genes$V1
+
+# Display the first few rows of the first 5 columns of the 'counts' matrix
+head(counts[, 1:5])
+
+# get the number of cells each gene is expressed in
+rs <- rowSums(counts!=0)
+
+# remove genes expressed 0 cells
+filt_mat <- counts[rs>0,]
+```
+
+Load the cell and gene meta data.
+```{r}
+# Load gene data from an Excel file into a data frame
+sup_genes <- read_excel(paste0(data_dir, "/Lukassen_testes/SuppTableGenes.xlsx"))
+
+# Quickly view the structure and content of the 'sup_genes' data frame
+glimpse(sup_genes)
+
+# Convert the 'sup_genes' tibble (from read_excel) into a standard data frame
+sup_genes <- as.data.frame(sup_genes)
+
+# Set the Ensembl ID column as the row names of the 'sup_genes' data frame
+rownames(sup_genes) <- sup_genes$EnsemblID
+
+# Remove the 'EnsemblID' column now that it is used as row names
+sup_genes$EnsemblID <- NULL
+
+# Load cell data from another Excel file into a data frame
+sup_cells <- read_excel(paste0(data_dir, "/Lukassen_testes/SuppTableCells.xlsx"))
+
+# Quickly view the structure and content of the 'sup_cells' data frame
+glimpse(sup_cells)
+
+# Convert the 'sup_cells' tibble (from read_excel) into a standard data frame
+sup_cells <- as.data.frame(sup_cells)
+
+# Set the Barcode column as the row names of the 'sup_cells' data frame
+rownames(sup_cells) <- sup_cells$Barcode
+
+# Remove the 'Barcode' column now that it is used as row names
+sup_cells$Barcode <- NULL
+```
+
+Create a `SingleCellExperiment` object using the filtered matrix, with the counts stored in the 'counts' assay. Add `sup_cells` to the colData slot. Add gene names to the rowData slot.
+```{r}
+sce <- SingleCellExperiment(assays = list(counts = filt_mat), colData = sup_cells)
+```
+
+Add the gene meta data to the `sce` object.
+```{r}
+# Reorder the rows of 'sup_genes' to match the rownames of the 'sce' object
+# This ensures that the gene names and associated data in 'sup_genes' are aligned with the data in 'sce'
+sup_genes <- sup_genes[match(rownames(sce), rownames(sup_genes)),]
+
+# Add a new column to the 'rowData' of the 'sce' object to store the gene names from 'sup_genes'
+rowData(sce)$GeneNames <- sup_genes$GeneName
+```
+
+If you want, you can switch the `rownames(sce)` from ensembl IDs to gene names so that other functions will operate on the gene names instead of ensembl IDs.
+```{r}
+# Add Ensembl IDs to 'rowData' to preserve them, storing them under a new column 'GeneIDs'
+rowData(sce)$GeneIDs <- rownames(sce)
+
+# Replace the row names of 'sce' with the gene names stored in the 'GeneNames' column of 'rowData'
+# This makes gene names (rather than Ensembl IDs) the primary row identifiers in 'sce'
+rownames(sce) <- rowData(sce)$GeneNames
+
+# Display the 'sce' object to confirm the changes
+sce
+```
+
+At this point, you can perform the following analyses from above:
+```{r}
+#normalize
+clusters <- quickCluster(sce)
+sce <- computeSumFactors(sce, cluster=clusters)
+sce <- logNormCounts(sce)
+
+#feature selection
+rowSubset(sce, "HVGs") <- getTopHVGs(sce, n=1000)
+
+# PCA
+sce <- runPCA(sce, subset_row=rowSubset(sce, "HVGs"))
+percent.var <- attr(reducedDim(sce), "percentVar")
+chosen.elbow <- findElbowPoint(percent.var)
+reducedDim(sce, "PCA.elbow") <- reducedDim(sce, "PCA")[,1:chosen.elbow]
+
+# runTSNE
+sce <- runTSNE(sce, dimred="PCA.elbow")
+```
+
+Make a TSNE plot with the cell types from the paper.
+```{r}
+tsne.CellType <- plotTSNE(sce,
+                          colour_by="CellType")
+
+tsne.CellType
+
+# Save the tsne plot as a PNG file in the specified results directory
+ggsave(tsne.CellType, file = paste0(results_dir, "/TSNE_Lukassen_CellTypes.png"), width = 4, height=4)
+```
+
+In this case, the colData already includes the first two TSNE coordinates identified by the authors, so there isn't really a need to do anything other than Normalization and Transformation in order to repeat their analyses. But including this information is uncommon.
+
+Plot the author's TSNE coordinates. 
+```{r}
+# Extract the t-SNE coordinates (TSNE-1 and TSNE-2 columns) from the 'sup_cells' data frame
+paper_tsne <- sup_cells[, c("TSNE-1", "TSNE-2")]
+
+# Assign the extracted t-SNE coordinates to the 'sce' SingleCellExperiment object
+# This adds 'paper_tsne' as a reduced dimension slot in 'sce' named "paper_tsne"
+reducedDim(sce, "paper_tsne") <- paper_tsne
+
+paper_tsne.CellType <- plotReducedDim(sce,
+                                      colour_by ="CellType",
+                                      dimred = "paper_tsne")
+
+paper_tsne.CellType
+
+# Save the tsne plot as a PNG file in the specified results directory
+ggsave(paper_tsne.CellType, file = paste0(results_dir, "/Lukassen_TSNE_Lukassen_CellTypes.png"), width = 4, height=4)
+```
+
+Get the average expression of each gene in each cluster.
+```{r}
+mean_sce <- summarizeAssayByGroup(sce, 
+                                 ids = sce$CellType,
+                                 statistics = "mean",
+                                 assay.type = "logcounts")
+
+# pull the mean assay into a data frame
+mean_df <- assay(mean_sce, "mean")
+
+head(mean_df)
+
+# write it to a csv file
+write.csv(mean_df, file=paste0(results_dir, "/mean_logcounts_by_Lukassen_CellTypes.csv"))
+```
+ 
+## Session Info
+```{r}
+sessionInfo()
+```
