@@ -989,11 +989,15 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
 #' @param gene_description gene descriptions df with Gene and WangGeneID columns
 #' @param anno character vector of cell type names (defines x-axis order and colors)
 #' @param palette character vector of colors (one per cell type)
-#' @param cluster_col colData column holding cell type names (default "label")
+#' @param cluster_col colData column in sce holding cell type names (default "label")
+#' @param marker_col column in markers df holding cell type names; defaults to
+#'   cluster_col when NULL (set explicitly when the two column names differ)
 #' @param title optional plot title
 
 plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
-                                   palette, cluster_col = "label", title = NULL) {
+                                   palette, cluster_col = "label",
+                                   marker_col = NULL, title = NULL) {
+  if (is.null(marker_col)) marker_col <- cluster_col
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
@@ -1029,7 +1033,7 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
     mutate(
       stars   = fdr_to_stars(FDR),
       Feature = WangGeneID,
-      X       = factor(.data[[cluster_col]], levels = anno)
+      X       = factor(.data[[marker_col]], levels = anno)
     ) %>%
     filter(stars != "") %>%
     left_join(y_max_df, by = c("Feature", "X"))
