@@ -879,10 +879,12 @@ plot_marker_overlap_heatmap <- function(known_markers, test_genes,
 #' @param gene_description gene descriptions df with Gene and WangGeneID columns
 #' @param anno character vector mapping numeric cluster index to cell type name
 #' @param palette character vector of colors (one per cluster)
+#' @param label_col colData column for x-axis grouping; accepts a column name
+#'   (character) or column number (integer index into colData). Default "label".
 #' @param title optional plot title
 
 plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
-                             title = NULL) {
+                             label_col = "label", ncol = 1, title = NULL) {
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
@@ -892,6 +894,8 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
       TRUE        ~ ""
     )
   }
+
+  if (is.numeric(label_col)) label_col <- names(colData(sce))[label_col]
 
   goi_loc <- gene_description %>%
     filter(WangGeneID %in% goi) %>%
@@ -903,7 +907,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
     scattermore   = TRUE,
     point_size    = 0,
     swap_rownames = "WangGeneID",
-    x             = "label",
+    x             = label_col,
     ncol          = 1
   )$data %>%
     mutate(
@@ -958,7 +962,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
     coord_cartesian(clip = "off", ylim = c(0, NA)) +
-    facet_wrap(~ Feature, ncol = 1, scales = "free_y") +
+    facet_wrap(~ Feature, ncol = ncol, scales = "free_y") +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
     theme_classic(base_size = 11) +
     theme(
@@ -996,7 +1000,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
 
 plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
                                    palette, cluster_col = "label",
-                                   marker_col = NULL, title = NULL) {
+                                   marker_col = NULL, ncol = 1, title = NULL) {
   if (is.null(marker_col)) marker_col <- cluster_col
 
   fdr_to_stars <- function(fdr) {
@@ -1064,7 +1068,7 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
     coord_cartesian(clip = "off", ylim = c(0, NA)) +
-    facet_wrap(~ Feature, ncol = 1, scales = "free_y") +
+    facet_wrap(~ Feature, ncol = ncol, scales = "free_y") +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
     theme_classic(base_size = 11) +
     theme(
