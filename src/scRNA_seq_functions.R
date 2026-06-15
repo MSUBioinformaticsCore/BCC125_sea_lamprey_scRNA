@@ -834,3 +834,202 @@ plot_marker_bubbles <- function(
   
   return(combined)
 }
+
+
+# run_go_enrichment -------------------------------------------------------
+#' @name run_go_enrichment
+#' @description Runs GO hypergeometric overlap, writes CSVs, returns scores df.
+#' @param gaf filtered gene annotation file (GOID, Gene columns)
+#' @param gene_description gene descriptions df with Gene, WangGeneID, description
+#' @param go_names GO term name table (GOID, GOName)
+#' @param test_genes two-column df: Gene and group (cluster / path)
+#' @param background_n number of genes in the universe
+#' @param group2_label column name for the group2 variable in output (default "Clusters")
+#' @param ngroup2_label column name for nGroup2 in output (default "nClusterEnrichedGenes")
+#' @param overlaps_file path for intersecting genes CSV; NULL to skip
+#' @param pvals_file path for GO scores CSV; NULL to skip
+#' @param pval_filter if not NULL, keep only rows with Pval < pval_filter
+#' @param require_shared if TRUE, keep only rows with nSharedGenes > 0
+
+run_go_enrichment <- function(gaf, gene_description, go_names,
+                               test_genes, background_n,
+                               group2_label   = "Clusters",
+                               ngroup2_label  = "nClusterEnrichedGenes",
+                               overlaps_file  = NULL,
+                               pvals_file     = NULL,
+                               pval_filter    = NULL,
+                               require_shared = FALSE) {
+  require(dplyr)
+
+  go_ol <- phyperOverlapSets(gaf, test_genes, background_n)
+
+  shared_desc <- gene_description %>% dplyr::rename(SharedGene = "Gene")
+  go_ol$intersecting.genes <- go_ol$intersecting.genes %>%
+    left_join(shared_desc, by = "SharedGene")
+
+  if (!is.null(overlaps_file))
+    write.csv(go_ol$intersecting.genes, file = overlaps_file, row.names = FALSE)
+
+  scores <- go_ol$pval.scores %>%
+    dplyr::rename(GOID           = "Group1",
+                  !!group2_label  := "Group2",
+                  nGOTermGenes   = "nGroup1",
+                  !!ngroup2_label := "nGroup2") %>%
+    dplyr::group_by(!!sym(group2_label)) %>%
+    dplyr::mutate(FDR = p.adjust(Pval, "BH")) %>%
+    dplyr::select(-Enrichment)
+
+  scores <- left_join(go_names, scores, by = "GOID") %>%
+    filter(!is.na(nGOTermGenes))
+
+  if (!is.null(pval_filter))
+    scores <- scores %>% filter(Pval < pval_filter)
+  if (require_shared)
+    scores <- scores %>% filter(nSharedGenes > 0)
+
+  if (!is.null(pvals_file))
+    write.csv(scores, file = pvals_file, row.names = FALSE)
+
+  return(scores)
+}
+
+
+# run_pairwise_de ---------------------------------------------------------
+#' @name run_pairwise_de
+#' @description Subsets cells by cluster label, runs findMarkers, writes CSVs.
+#' @param combined_sce uncorrected SCE with counts (all sex cells)
+#' @param merged_sce batch-corrected SCE supplying $broad and $label colData
+#' @param cluster_labels integer vector of label values to keep
+#' @param gene_description gene descriptions df
+#' @param results_dir output directory
+#' @param file_prefix prefix for output file names
+#' @param group_col colData column used as grouping variable (default "broad")
+#' @param block_col colData column used as blocking variable (default "sample")
+#' @return list with $all (all FDR<0.01 genes) and $top100
+
+run_pairwise_de <- function(combined_sce, merged_sce, cluster_labels,
+                             gene_description, results_dir, file_prefix,
+                             group_col = "broad", block_col = "sample") {
+  require(scran)
+  require(dplyr)
+
+  colData(combined_sce)$broad <- colData(merged_sce)$broad
+  colData(combined_sce)$label <- colData(merged_sce)$label
+
+  keep <- as.data.frame(colData(combined_sce)) %>%
+    filter(label %in% cluster_labels) %>%
+    pull(barcode)
+
+  sce_sub <- combined_sce[, keep]
+  colData(sce_sub) <- droplevels(colData(sce_sub))
+
+  scatter_markers <- findMarkers(sce_sub,
+                                  sce_sub[[group_col]],
+                                  test.type  = "t",
+                                  block      = sce_sub[[block_col]],
+                                  direction  = "up",
+                                  pval.type  = "some")
+
+  saveRDS(scatter_markers,
+          file = paste0(results_dir, "/", file_prefix, "_DEgenes.Rds"))
+
+  scatter_summary <- list()
+  for (n in names(scatter_markers)) {
+    scatter_markers[[n]]$cluster <- n
+    scatter_markers[[n]]$Gene    <- rownames(scatter_markers[[n]])
+    scatter_summary[[n]] <- as.data.frame(scatter_markers[[n]]) %>%
+      select(cluster, Gene, p.value, FDR, summary.logFC)
+  }
+
+  markers_df <- do.call(rbind, scatter_summary) %>%
+    left_join(gene_description, by = "Gene") %>%
+    filter(FDR < .01)
+
+  write.csv(markers_df,
+            file = paste0(results_dir, "/", file_prefix, "_DEgenes.csv"))
+
+  top100 <- markers_df %>%
+    group_by(cluster) %>%
+    slice_min(FDR, n = 100, with_ties = TRUE) %>%
+    mutate(p.value       = formatC(signif(p.value, digits = 3)),
+           FDR           = formatC(signif(FDR, digits = 3)),
+           summary.logFC = round(summary.logFC, digits = 3))
+
+  return(list(all = markers_df, top100 = top100))
+}
+
+
+# plot_marker_overlap_heatmap ---------------------------------------------
+#' @name plot_marker_overlap_heatmap
+#' @description Hypergeometric overlap between known cell-type markers and
+#'   cluster enriched genes; draws and optionally saves a heatmap.
+#' @param known_markers two-column df: Gene, CellType
+#' @param test_genes two-column df: Gene, cluster (or other group label)
+#' @param background_n number of genes in the universe
+#' @param gene_description gene descriptions df
+#' @param overlaps_file path for intersecting genes CSV; NULL to skip
+#' @param pvals_file path for overlap p-values CSV; NULL to skip
+#' @param plot_file path to save the PNG; NULL to skip
+#' @return ggplot object
+
+plot_marker_overlap_heatmap <- function(known_markers, test_genes,
+                                         background_n, gene_description,
+                                         overlaps_file = NULL,
+                                         pvals_file    = NULL,
+                                         plot_file     = NULL) {
+  require(dplyr)
+  require(ggplot2)
+  require(tidyr)
+
+  cluster_ol <- phyperOverlapSets(known_markers, test_genes, background_n)
+
+  shared_desc <- gene_description %>% dplyr::rename(SharedGene = "Gene")
+  cluster_ol$intersecting.genes <- cluster_ol$intersecting.genes %>%
+    left_join(shared_desc, by = "SharedGene")
+
+  if (!is.null(overlaps_file))
+    write.csv(cluster_ol$intersecting.genes, file = overlaps_file, row.names = FALSE)
+
+  scores <- cluster_ol$pval.scores %>%
+    dplyr::rename(CellTypes = "Group1", Clusters = "Group2") %>%
+    group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+  if (!is.null(pvals_file))
+    write.csv(scores, file = pvals_file, row.names = FALSE)
+
+  FDR_wide <- scores %>%
+    mutate(logFDR = -log10(FDR)) %>%
+    tidyr::pivot_wider(id_cols = CellTypes, names_from = Clusters, values_from = logFDR)
+
+  CellTypes        <- FDR_wide$CellTypes
+  FDR_wide$CellTypes <- NULL
+  FDR_mat          <- as.matrix(FDR_wide)
+  rownames(FDR_mat) <- CellTypes
+
+  ord_row <- hclust(dist(FDR_mat),    method = "ward.D")$order
+  ord_col <- hclust(dist(t(FDR_mat)), method = "ward.D")$order
+
+  scores$CellTypes <- factor(scores$CellTypes, levels = rownames(FDR_mat)[ord_row])
+  scores$Clusters  <- factor(scores$Clusters,  levels = colnames(FDR_mat)[ord_col])
+
+  p <- ggplot(scores, aes(Clusters, CellTypes)) +
+    geom_tile(aes(fill = -log10(FDR)), color = "light gray") +
+    guides(fill = guide_colorbar(title = "-log10(FDR)",
+                                  barheight = 10, barwidth = 2,
+                                  default.unit = "mm")) +
+    scale_fill_gradientn(
+      colors = c("white", "#fd9668", "#f1605d", "#de4968", "#9e2f7f"),
+      guide  = "colorbar",
+      limits = c(0, ceiling(-log10(min(scores$FDR))))
+    ) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1)) +
+    theme(text = element_text(size = 7), axis.text = element_text(size = 7)) +
+    geom_text(aes(label = nSharedGenes), size = 1) +
+    coord_fixed()
+
+  if (!is.null(plot_file))
+    ggsave(p, file = plot_file)
+
+  return(p)
+}

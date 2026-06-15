@@ -1,0 +1,528 @@
+---
+title: "01_all_cells_clustering_annotation"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(RColorBrewer)
+library(readxl)
+library(monocle3)
+library(batchelor)
+library(DT)
+library(rtracklayer)
+library(BiocSingular)
+library(ggnewscale)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir = paste0(params$project_dir, "/results/20260424")
+data_dir    = paste0(params$project_dir, "/data")
+```
+
+```{r, echo=FALSE}
+# load pre-computed objects for rendering
+Robject_dir  = paste0(params$project_dir, "/results/20260312/Robjects")
+all.sce      = readRDS(paste0(Robject_dir, "/all.sce.Rds"))
+merged.sce   = readRDS(paste0(Robject_dir, "/merged.sce.Rds"))
+merged.cds   = readRDS(paste0(Robject_dir, "/merged.cds.Rds"))
+combined.sce = readRDS(paste0(Robject_dir, "/combined.sce.Rds"))
+```
+
+# Collect individual samples into one object
+
+```{r, eval=FALSE}
+sample_dirs  = list.dirs(data_dir, full.names = TRUE, recursive = FALSE)
+sample_names = basename(sample_dirs)
+
+cds_list = list()
+for (i in 1:length(sample_dirs)) {
+  cds_list[[i]] = readRDS(paste0(sample_dirs[i], "/", sample_names[i],
+                                  "_cds_mito_filter.Rds"))
+}
+names(cds_list) = sample_names
+
+all.sce = list()
+for (cds in names(cds_list)) {
+  raw_counts          = counts(cds_list[[cds]])
+  all.sce[[cds]]      = SingleCellExperiment(list(counts = raw_counts),
+                                              colData = cds_list[[cds]]@colData)
+  all.sce[[cds]]@colData$sample = cds
+}
+
+all.sce  <- lapply(all.sce, logNormCounts)
+all.dec  <- lapply(all.sce, modelGeneVar)
+all.hvgs <- lapply(all.dec, getTopHVGs, prop = 0.1)
+all.sce  <- mapply(FUN = runPCA, x = all.sce, subset_row = all.hvgs)
+saveRDS(all.sce, file = paste0(results_dir, "/all.sce.Rds"))
+```
+
+# Sample summary table
+
+```{r}
+df_list = list()
+for (samp in names(all.sce)) {
+  ncells     = ncol(all.sce[[samp]])
+  med_counts = round(median(colData(all.sce[[samp]])$sum))
+  med_genes  = round(median(colData(all.sce[[samp]])$detected))
+  med_mito   = round(median(colData(all.sce[[samp]])$subsets_Mito_percent), digits = 2)
+
+  df_list[[samp]] = data.frame(Sample                 = samp,
+                                nCells                 = ncells,
+                                medianCounts           = med_counts,
+                                medianGenesDetected    = med_genes,
+                                medianPercentMitoReads = med_mito)
+}
+
+df_all = do.call(rbind, df_list)
+write.csv(df_all, file = paste0(results_dir, "/median_stats.csv"))
+datatable(df_all, rownames = FALSE)
+```
+
+# Merge samples, removing batch effect
+
+```{r, eval=FALSE}
+universe     <- Reduce(intersect, lapply(all.sce, rownames))
+all.sce2     <- lapply(all.sce, "[", i = universe,)
+all.dec2     <- lapply(all.dec, "[", i = universe,)
+normed.sce   <- do.call(multiBatchNorm, all.sce2)
+combined.dec <- do.call(combineVar, all.dec2)
+combined.hvg <- getTopHVGs(combined.dec, n = 5000)
+
+set.seed(1)
+merged.sce <- do.call(fastMNN, c(normed.sce,
+    list(subset.row = combined.hvg, BSPARAM = RandomParam())))
+
+set.seed(1)
+g <- buildSNNGraph(merged.sce, use.dimred = "corrected", k = 30)
+set.seed(1)
+colLabels(merged.sce) <- factor(igraph::cluster_louvain(g)$membership)
+
+set.seed(1)
+merged.sce <- runUMAP(merged.sce, dimred = "corrected")
+set.seed(1)
+merged.sce <- runTSNE(merged.sce, dimred = "corrected")
+
+saveRDS(merged.sce, file = paste0(results_dir, "/merged.sce.Rds"))
+```
+
+The plot below shows the merged data in TSNE space separated by sample.
+
+```{r, fig.width=8, fig.height=8}
+p <- lapply(unique(merged.sce$batch), function(f) {
+  sce.f = merged.sce[, which(merged.sce$batch == f)]
+  plotTSNE(sce.f, point_size = .05) + ggtitle(f)
+})
+wrap_plots(p, ncol = 2)
+```
+
+Clusters identified in batch-corrected expression space.
+
+```{r, fig.width=6, fig.height=6}
+plotTSNE(merged.sce, colour_by = "label", text_by = "label",
+         text_colour = "red", point_size = .05) +
+  guides(color = guide_legend(override.aes = list(size = 5)))
+
+ggsave(file = paste0(results_dir, "/all_cells_tsne.png"))
+```
+
+Proportion of cells from each sample within each cluster.
+
+```{r}
+meta_df = as.data.frame(colData(merged.sce))
+
+sample_tally = meta_df %>%
+  group_by(label, batch) %>%
+  tally()
+
+ggplot(sample_tally, aes(fill = batch, y = label, x = n)) +
+  geom_bar(position = "fill", stat = "identity") +
+  xlab("Proportion of cells")
+```
+
+```{r, eval=FALSE}
+# build uncorrected combined SCE and monocle CDS for downstream plotting
+all.dec  <- lapply(all.sce, modelGeneVar)
+universe <- Reduce(intersect, lapply(all.sce, rownames))
+all.sce2 <- lapply(all.sce, "[", i = universe,)
+all.dec2 <- lapply(all.dec, "[", i = universe,)
+
+all.sce2 <- lapply(all.sce2, function(x) {
+  colData(x)    <- colData(x)[, "sample", drop = FALSE]
+  reducedDims(x) <- list()
+  rowData(x)    <- rowData(x)[, character(0)]
+  x
+})
+
+combined.sce <- do.call(cbind, all.sce2)
+saveRDS(combined.sce, file = paste0(results_dir, "/combined.sce.Rds"))
+
+merged.cds <- new_cell_data_set(counts(combined.sce),
+                                cell_metadata = merged.sce@colData)
+reducedDims(merged.cds)$UMAP <- reducedDims(merged.sce)$UMAP
+reducedDims(merged.cds)$tSNE <- reducedDims(merged.sce)$TSNE
+rowData(merged.cds)$gene_short_name <- row.names(merged.cds)
+
+saveRDS(merged.cds, file = paste0(results_dir, "/merged.cds.Rds"))
+```
+
+## Gene descriptions from Wang et al. and the kPetMar1.pri gtf
+
+Summarized from [Wang et al, 2024](https://www.nature.com/articles/s41467-024-55019-x#Sec16):
+LOC IDs are re-annotated to human gene symbols via BLAST; genes with human matches
+are UPPERCASE, others lowercase.
+
+```{r}
+gene_description =
+  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip = 1) %>%
+  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
+                Gene        = "NCBI_GTF_GENEID",
+                description = "NCBI_GTF_ProteinInfo") %>%
+  dplyr::select(Gene, WangGeneID, description) %>%
+  filter(!is.na(Gene)) %>%
+  filter(!WangGeneID %in% c("LOC116945425.1", "S100A1.1"))
+
+gtf = as.data.frame(readGFF("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_genomic.gtf"))
+
+gtf_filt =
+  gtf %>%
+  filter(gbkey %in% c("mRNA", "misc_RNA", "ncRNA", "tRNA", "rRNA")) %>%
+  mutate(product = gsub(", transcript variant.*", "", product)) %>%
+  dplyr::select(gene_id, product) %>%
+  distinct() %>%
+  dplyr::rename(Gene = "gene_id", description = "product") %>%
+  mutate(WangGeneID = Gene)
+
+notWang      = gtf_filt$Gene[!gtf_filt$Gene %in% gene_description$Gene]
+gtf_add      = gtf_filt %>% filter(Gene %in% notWang)
+gene_description = rbind(gene_description, gtf_add)
+
+write.csv(gene_description,
+          file = paste0(results_dir, "/gene_descritption.csv"), row.names = FALSE)
+datatable(gene_description)
+```
+
+## Known cell-type markers
+
+```{r}
+markers_wide = read.csv(paste0(data_dir, "/Cell_Type_Marker_Genes_12-12-25.csv"))
+markers_wide = markers_wide[, 2:ncol(markers_wide)]
+
+markers_long <- markers_wide %>%
+  pivot_longer(cols = everything(), names_to = "CellType", values_to = "Gene",
+               values_drop_na = TRUE) %>%
+  mutate(main_part  = str_remove(Gene, "\\s*\\(.*\\)"),
+         paren_part = str_extract(Gene, "(?<=\\().*(?=\\))")) %>%
+  tidyr::separate_rows(main_part, sep = "/") %>%
+  mutate(main_part  = trimws(main_part),
+         paren_part = trimws(paren_part)) %>%
+  filter(Gene != "")
+
+chung_davidson_markers = markers_long %>%
+  dplyr::select(CellType, main_part) %>%
+  dplyr::rename(WangGeneID = "main_part") %>%
+  filter(!WangGeneID == "") %>%
+  left_join(gene_description) %>%
+  filter(!is.na(Gene))
+
+datatable(chung_davidson_markers %>% arrange(CellType), rownames = FALSE)
+```
+
+## Cluster enriched genes
+
+Top ~100 cluster enriched genes per cluster. All significant genes (FDR < 0.01) are
+saved in `scatter_cluster_marker_genes.csv`.
+
+**Columns:** `cluster`, `Gene`, `p.value`, `FDR`, `summary.logFC`
+
+```{r}
+scatter_markers = findMarkers(combined.sce,
+                               merged.sce$label,
+                               test.type = "t",
+                               block     = combined.sce$sample,
+                               direction = "up",
+                               pval.type = "some")
+
+saveRDS(scatter_markers, file = paste0(results_dir, "/scatter_markers.Rds"))
+
+scatter_summary = list()
+for (i in 1:length(scatter_markers)) {
+  scatter_markers[[i]]$cluster = i
+  scatter_markers[[i]]$Gene    = rownames(scatter_markers[[i]])
+  scatter_summary[[i]] = as.data.frame(scatter_markers[[i]]) %>%
+    select(cluster, Gene, p.value, FDR, summary.logFC)
+}
+
+scatter_markers_df =
+  do.call(rbind, scatter_summary) %>%
+  left_join(gene_description, by = "Gene") %>%
+  filter(FDR < .01)
+
+write.csv(scatter_markers_df,
+          file = paste0(results_dir, "/scatter_cluster_marker_genes.csv"))
+
+scatter_markers_top100 = scatter_markers_df %>%
+  group_by(cluster) %>%
+  slice_min(FDR, n = 100, with_ties = TRUE)
+
+datatable(scatter_markers_top100, filter = "top", rownames = FALSE)
+```
+
+## Comparison with known markers
+
+Rows = cell types with known markers; columns = clusters. Color = $-log10(FDR)$ of
+overlap significance. Number in each box = shared genes.
+
+- Overlap p-values: `scatter_cluster_marker_overlap_pvalues.csv`
+- Overlapping genes: `scatter_cluster_marker_gene_overlaps.csv`
+
+```{r, fig.width=8}
+marker_test_genes =
+  scatter_markers_top100 %>%
+  select(Gene, cluster) %>%
+  mutate(cluster = paste0("cluster", cluster))
+
+chung_davidson_cell_type_markers = chung_davidson_markers %>%
+  select(Gene, CellType)
+
+plot_marker_overlap_heatmap(
+  known_markers  = chung_davidson_cell_type_markers,
+  test_genes     = marker_test_genes,
+  background_n   = length(merged.sce),
+  gene_description = gene_description,
+  overlaps_file  = paste0(results_dir, "/scatter_cluster_marker_gene_overlaps.csv"),
+  pvals_file     = paste0(results_dir, "/scatter_cluster_marker_overlap_pvalues.csv"),
+  plot_file      = paste0(results_dir, "/scatter_cluster_overlap_heatmap.png")
+)
+```
+
+## Gene ontology of top 100 cluster enriched genes
+
+**Columns:** `GOID`, `GOName`, `nGOTermGenes`, `Clusters`, `nClusterEnrichedGenes`,
+`nSharedGenes`, `Pval`, `FDR`
+
+- Overlap p-values: `scatter_cluster_marker_gene_GO_overlap_pvalues.csv`
+- Overlapping genes: `scatter_cluster_marker_gene_GO_overlaps.csv`
+
+```{r}
+gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf",
+                 header = FALSE, comment = "!")
+
+gaf <- gaf %>%
+  filter(!grepl("NOT", V4)) %>%
+  dplyr::select(V3, V5) %>%
+  dplyr::rename(GOID = "V5", Gene = "V3") %>%
+  distinct()
+
+keep_go = gaf %>%
+  group_by(GOID) %>% tally() %>%
+  filter(n > 10, n < 200) %>%
+  pull(GOID)
+
+gaf = gaf %>% filter(GOID %in% keep_go)
+
+go_names = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GOs_names.txt",
+                      header = FALSE)
+colnames(go_names) = c("GOID", "GOName")
+
+scores = run_go_enrichment(
+  gaf             = gaf,
+  gene_description = gene_description,
+  go_names        = go_names,
+  test_genes      = marker_test_genes,
+  background_n    = length(merged.cds),
+  overlaps_file   = paste0(results_dir, "/scatter_cluster_marker_gene_GO_overlaps.csv"),
+  pvals_file      = paste0(results_dir, "/scatter_cluster_marker_gene_GO_overlap_pvalues.csv"),
+  pval_filter     = 0.01
+)
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Plot known cell-type markers
+
+Early germ cell markers.
+
+```{r, fig.width=8, fig.height=4}
+rowData(merged.cds)$gene_short_name = row.names(merged.cds)
+
+unique_markers = chung_davidson_markers %>%
+  group_by(Gene) %>% tally() %>%
+  filter(n == 1) %>%
+  pull(Gene)
+
+genes_for_plot = chung_davidson_markers %>%
+  select(Gene, CellType) %>%
+  filter(Gene %in% unique_markers)
+
+plot_cells(merged.cds, reduction_method = "tSNE",
+           genes = genes_for_plot %>%
+             filter(CellType %in% c("Migrating.germ.cells", "Primordial.germ.cells")))
+```
+
+Female cell markers.
+
+```{r, fig.height=4, fig.width=12}
+plot_cells(merged.cds, reduction_method = "tSNE",
+           genes = genes_for_plot %>%
+             filter(CellType %in% c("Oogonia", "Oocyte",
+                                    "Granulosa.cells", "Pre.granulosa.cells")),
+           show_trajectory_graph = FALSE,
+           label_cell_groups     = FALSE,
+           label_leaves          = FALSE,
+           label_branch_points   = FALSE)
+```
+
+Male cell markers.
+
+```{r, fig.height=4, fig.width=12}
+plot_cells(merged.cds, reduction_method = "tSNE",
+           genes = genes_for_plot %>%
+             filter(CellType %in% c("Spermatocytes", "Spermatogonia",
+                                    "Spermatogonial.stem.cells")),
+           show_trajectory_graph = FALSE,
+           label_cell_groups     = FALSE,
+           label_leaves          = FALSE,
+           label_branch_points   = FALSE)
+```
+
+## Annotations
+
+```{r}
+anno = c(
+  "1. Fibroblasts (migrating)",
+  "2. Mesonephric cells",
+  "3. Granulosa cells (migrating)",
+  "4. Granulosa cells",
+  "5. Oogonia/Oocytes",
+  "6. Endothelial cells",
+  "7. Primordial germ cells (migrating)",
+  "8. Erythrocytes",
+  "9. Pre-granulosa cells (migrating)",
+  "10. Leukocytes",
+  "11. Hemopoietic stem cells",
+  "12. Podocytes",
+  "13. Macrophages",
+  "14. Pre-granulosa cells (mitotic)",
+  "15. Immune cells (migrating, mitotic)",
+  "16. Spermatocytes (cytokinetic)",
+  "17. Male germ cells (migrating)",
+  "18. Spermatocytes (apoptotic)",
+  "19. Spermatocytes (GPCR-activated)"
+)
+```
+
+1. Fibroblasts (migrating)
+2. Mesonephric cells
+3. Granulosa cells (migrating)
+4. Granulosa cells
+5. Oogonia/Oocytes
+6. Endothelial cells
+7. Primordial germ cells (migrating)
+8. Erythrocytes
+9. Pre-granulosa cells (migrating)
+10. Leukocytes
+11. Hemopoietic stem cells
+12. Podocytes
+13. Macrophages
+14. Pre-granulosa cells (mitotic)
+15. Immune cells (migrating, mitotic)
+16. Spermatocytes (cytokinetic)
+17. Male germ cells (migrating)
+18. Spermatocytes (apoptotic)
+19. Spermatocytes (GPCR-activated)
+
+```{r, fig.width=8, fig.height=6}
+ct = anno[colData(merged.sce)$label]
+merged.sce$CellType = ct
+merged.sce$CellType = factor(merged.sce$CellType, levels = anno)
+
+plotTSNE(merged.sce, colour_by = "CellType", text_by = "label",
+         text_colour = "red", point_size = .05) +
+  guides(color = guide_legend(override.aes = list(size = 5))) +
+  theme(panel.background = element_rect(fill = "black"),
+        axis.title = element_blank(),
+        axis.text  = element_blank(),
+        axis.ticks = element_blank())
+
+ggsave(file = paste0(results_dir, "/all_cells_tsne_black.png"), height = 6, width = 8)
+```
+
+## Bubble plots per cell type
+
+```{r, eval=TRUE, fig.show="hide"}
+nested_df   <- chung_davidson_markers %>% group_by(CellType) %>% tidyr::nest()
+list_of_dfs <- nested_df$data
+names(list_of_dfs) <- nested_df$CellType
+names(list_of_dfs)  = gsub("\\(", "", names(list_of_dfs))
+
+file_names = gsub(" ", "_", names(list_of_dfs))
+file_names = paste0(file_names, "_all_cell_clusters")
+
+plot.sce = combined.sce
+colData(plot.sce) <- colData(merged.sce)
+
+ct = anno[colData(plot.sce)$label]
+plot.sce$CellType = ct
+plot.sce$CellType = factor(plot.sce$CellType, levels = anno)
+plot.sce$cluster  = plot.sce$label
+
+plot_dir = paste0(results_dir, "/all_cell_bubble")
+if (!dir.exists(plot_dir)) dir.create(plot_dir)
+
+scatter_markers_df = read.csv(
+  file    = paste0(results_dir, "/scatter_cluster_marker_genes.csv"),
+  row.names = 1)
+
+cluster_index              = as.numeric(gsub("cluster_", "", scatter_markers_df$cluster))
+scatter_markers_df$CellType = anno[cluster_index]
+
+markers = scatter_markers_df %>%
+  select(WangGeneID, CellType, FDR, summary.logFC) %>%
+  dplyr::rename(Gene = "WangGeneID")
+
+for (i in 1:length(list_of_dfs)) {
+  plot_marker_bubbles(
+    sce              = plot.sce,
+    markers          = markers,
+    gene_description = gene_description,
+    cell_type_name   = names(list_of_dfs)[i],
+    cell_type_genes  = list_of_dfs[[i]],
+    anno             = anno,
+    results_dir      = plot_dir,
+    file_name        = file_names[i]
+  )
+}
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
