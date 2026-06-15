@@ -48,7 +48,7 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir = paste0(params$project_dir, "/results/20260424")
+results_dir = paste0(params$project_dir, "/results/20260615")
 data_dir    = paste0(params$project_dir, "/data")
 ```
 
