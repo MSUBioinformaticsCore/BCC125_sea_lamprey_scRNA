@@ -1,0 +1,589 @@
+---
+title: "03_trajectory_analysis"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(RColorBrewer)
+library(readxl)
+library(monocle3)
+library(batchelor)
+library(DT)
+library(TSCAN)
+library(rtracklayer)
+library(BiocSingular)
+library(ggforce)
+library(ggraph)
+library(tidygraph)
+library(scatterpie)
+library(ggrepel)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir = paste0(params$project_dir, "/results/20260424")
+data_dir    = paste0(params$project_dir, "/data")
+```
+
+```{r, echo=FALSE}
+# load pre-computed objects for rendering
+Robject_dir    = paste0(params$project_dir, "/results/20260312/Robjects")
+all.sex.sce    = readRDS(paste0(Robject_dir, "/no.support.sex.sce.Rds"))
+merged.sex.sce = readRDS(paste0(Robject_dir, "/no.support.merged.sex.sce.Rds"))
+pseudo         = readRDS(paste0(Robject_dir, "/no.support.merged.sex.pseudo.Rds"))
+```
+
+```{r}
+# broad + narrow annotations for sex clusters
+anno = c(
+  "FGC.migrating",
+  "PGC",
+  "Oogonia.stem.cells",
+  "Oocytes",
+  "Cyst.epithelial.cells",
+  "Oogonia",
+  "SPC.cytokinetic",
+  "MGC.SPC.group2",
+  "MGC.SPC.group1",
+  "MGC.SPC.group3",
+  "MGC.SPC.group2",
+  "MGC.SPC.group1",
+  "MGC.SPC.group3",
+  "MGC.SPC.group2",
+  "MGC.SPC.group3"
+)
+
+colData(merged.sex.sce)$broad = anno[colData(merged.sex.sce)$label]
+
+narrow = c(
+  "Female germ cells (migrating)",
+  "Primordial germ cells (migrating, differentiated, cyst)",
+  "Oogonia (mitotic, cyst, stem cells)",
+  "Oocytes",
+  "Cyst epithelial cells",
+  "Oogonia (mitotic, cyst, cell fate committed)",
+  "Spermatocytes (cytokinetic)",
+  "Male germ cells (migrating, cell fate committed, differentiated)",
+  "Spermatocytes (meiosis arrested)",
+  "Spermatocytes (migrating, S-phase, cyst connected with cell bridges, cell fate committed, GPCR-activated)",
+  "Spermatocytes (apoptotic, meiosis arrested)",
+  "Male germ cells (migrating, differentiated)",
+  "Spermatocytes (angiogenic, cell fate committed, GPCR-activated)",
+  "Spermatocytes (cell fate committed)",
+  "Male germ cells (migrating, cell fate committed, differentiated, wounded)"
+)
+
+colData(merged.sex.sce)$narrow = narrow[colData(merged.sex.sce)$label]
+```
+
+```{r}
+# reconstruct uncorrected combined sex SCE from all.sex.sce
+all.sex.dec  <- lapply(all.sex.sce, modelGeneVar)
+
+universe     <- Reduce(intersect, lapply(all.sex.sce, rownames))
+all.sex.sce2 <- lapply(all.sex.sce, "[", i = universe,)
+
+all.sex.sce2[["TM_C00004374"]]@colData$cluster = "noclust"
+
+combined.sex.sce <- do.call(cbind, all.sex.sce2)
+colData(combined.sex.sce)$broad = colData(merged.sex.sce)$broad
+colData(combined.sex.sce)$label = colData(merged.sex.sce)$label
+```
+
+```{r}
+# gene descriptions
+gene_description =
+  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip = 1) %>%
+  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
+                Gene        = "NCBI_GTF_GENEID",
+                description = "NCBI_GTF_ProteinInfo") %>%
+  dplyr::select(Gene, WangGeneID, description) %>%
+  filter(!is.na(Gene)) %>%
+  filter(!WangGeneID %in% c("LOC116945425.1", "S100A1.1"))
+
+gtf = as.data.frame(readGFF("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_genomic.gtf"))
+
+gtf_filt =
+  gtf %>%
+  filter(gbkey %in% c("mRNA", "misc_RNA", "ncRNA", "tRNA", "rRNA")) %>%
+  mutate(product = gsub(", transcript variant.*", "", product)) %>%
+  dplyr::select(gene_id, product) %>%
+  distinct() %>%
+  dplyr::rename(Gene = "gene_id", description = "product") %>%
+  mutate(WangGeneID = Gene)
+
+notWang      = gtf_filt$Gene[!gtf_filt$Gene %in% gene_description$Gene]
+gtf_add      = gtf_filt %>% filter(Gene %in% notWang)
+gene_description = rbind(gene_description, gtf_add)
+```
+
+```{r}
+# GO annotation
+gaf = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf",
+                 header = FALSE, comment = "!")
+
+gaf <- gaf %>%
+  filter(!grepl("NOT", V4)) %>%
+  dplyr::select(V3, V5) %>%
+  dplyr::rename(GOID = "V5", Gene = "V3") %>%
+  distinct()
+
+keep_go = gaf %>%
+  group_by(GOID) %>% tally() %>%
+  filter(n > 10, n < 200) %>%
+  pull(GOID)
+
+gaf = gaf %>% filter(GOID %in% keep_go)
+
+go_names = read.delim("/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus/GOs_names.txt",
+                      header = FALSE)
+colnames(go_names) = c("GOID", "GOName")
+```
+
+# Sex cell developmental trajectory analysis
+
+## Trajectory in TSNE space
+
+```{r}
+set.seed(1)
+by.cluster <- aggregateAcrossCells(merged.sex.sce,
+                                    ids = merged.sex.sce$broad,
+                                    use.assay.type = "reconstructed")
+
+centroids <- reducedDim(by.cluster, "corrected")
+mst       <- createClusterMST(centroids, clusters = NULL)
+line.data <- reportEdges(by.cluster, mst = mst, clusters = NULL, use.dimred = "TSNE")
+
+plotTSNE(merged.sex.sce, colour_by = "broad", point_size = .5) +
+  geom_line(data = line.data, mapping = aes(x = TSNE1, y = TSNE2, group = edge)) +
+  guides(color = guide_legend(override.aes = list(size = 5)))
+```
+
+## Trajectory in batch-corrected gene expression space
+
+The trajectory and clustering were calculated in batch-corrected expression space,
+so this view is more interpretable than TSNE.
+
+```{r}
+line.data_corrected <- reportEdges(by.cluster, mst = mst, clusters = NULL,
+                                    use.dimred = "corrected")
+
+plotReducedDim(merged.sex.sce, colour_by = "broad", dimred = "corrected",
+               point_size = .4) +
+  geom_line(data = line.data_corrected,
+            mapping = aes(x = dim1, y = dim2, group = edge)) +
+  guides(color = guide_legend(override.aes = list(size = 5)))
+```
+
+## Pseudotime calculation
+
+```{r, eval=FALSE}
+set.seed(1)
+pseudo <- quickPseudotime(merged.sex.sce,
+                           clusters   = merged.sex.sce$broad,
+                           use.dimred = "corrected",
+                           outgroup   = FALSE,
+                           start      = "PGC")
+
+saveRDS(pseudo, file = paste0(results_dir, "/no.support.merged.sex.pseudo.Rds"))
+```
+
+## Trajectory node graph
+
+Pie charts show the proportion of cells from each sample per node.
+
+```{r, fig.width=10, fig.height=8}
+meta_df = as.data.frame(colData(merged.sex.sce))
+
+sample_tally =
+  meta_df %>%
+  mutate(broad = as.factor(broad), batch = as.factor(batch)) %>%
+  group_by(broad, batch, .drop = FALSE) %>%
+  tally()
+
+gr <- as_tbl_graph(pseudo$mst)
+
+node_meta =
+  sample_tally %>%
+  mutate(batch = case_when(
+    batch == "TF_C00004337"   ~ "Female",
+    batch == "TM_C00004374"   ~ "Male",
+    batch == "UND1_C00004336" ~ "Undifferentiated.1",
+    batch == "UND2_C00004362" ~ "Undifferentiated.2"
+  )) %>%
+  tidyr::pivot_wider(names_from = batch, values_from = n) %>%
+  mutate(totalCells = sum(Female, Male, Undifferentiated.1, Undifferentiated.2,
+                          na.rm = TRUE)) %>%
+  dplyr::rename(name = "broad")
+
+common.pseudo <- averagePseudotime(pseudo$ordering)
+merged.sex.sce$Pseudotime <- common.pseudo
+
+mean_pseudo =
+  as.data.frame(colData(merged.sex.sce)) %>%
+  group_by(broad) %>%
+  summarise(mean_pseudo = mean(Pseudotime)) %>%
+  dplyr::rename(name = "broad")
+
+gr = gr %>%
+  activate(nodes) %>%
+  left_join(node_meta) %>%
+  arrange(desc(totalCells)) %>%
+  left_join(mean_pseudo)
+
+layout_data <- create_layout(gr, layout = "stress")
+
+gr_plot =
+  ggraph(layout_data) +
+  geom_edge_link() +
+  geom_scatterpie(
+    aes(x, y),
+    cols     = c("Female", "Male", "Undifferentiated.1", "Undifferentiated.2"),
+    data     = layout_data,
+    colour   = NA,
+    pie_scale = 1.5
+  ) +
+  scale_fill_manual(
+    name   = "Sample",
+    values = c(
+      "Female"           = "#FF6DB6",
+      "Male"             = "#006ddb",
+      "Undifferentiated.1" = "#009292",
+      "Undifferentiated.2" = "#b66ddf"
+    )
+  ) +
+  guides(fill = guide_legend(keywidth = .8, keyheight = .8)) +
+  geom_node_text(aes(label = name), color = "black") +
+  theme_void() +
+  theme(
+    legend.position    = "left",
+    legend.justification = "center",
+    legend.box.just    = "center"
+  )
+
+gr_pseudo =
+  ggraph(layout_data) +
+  geom_edge_link() +
+  geom_node_point(aes(color = mean_pseudo), size = 13) +
+  scale_color_viridis_c(option = "viridis") +
+  geom_node_text(aes(label = name), vjust = .75, size = 4, color = "red") +
+  scale_x_continuous(expand = expansion(mult = 0.15)) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  theme_void() +
+  theme(
+    legend.position    = "left",
+    legend.justification = "center",
+    legend.box.just    = "center"
+  )
+
+(gr_plot + coord_fixed()) / (gr_pseudo + coord_fixed())
+
+ggsave(file = paste0(results_dir, "/germ.only_pseudo_mst.pdf"), width = 10, height = 10)
+```
+
+# Pseudotime-associated genes
+
+Top ~100 genes by FDR changing along each path. All significant genes are saved in
+`no.support_sex_pseudotime_de_genes.csv`.
+
+**Columns:** `Path`, `SYMBOL`, `WangGeneID`, `description`, `logFC`, `p.value`, `FDR`
+
+```{r}
+pseudo_mat  <- pathStat(pseudo$ordering)
+test_pseudo <- TSCAN::testPseudotime(combined.sex.sce, pseudotime = pseudo_mat)
+
+test_pseudo_filt = list()
+for (i in 1:length(test_pseudo)) {
+  test_pseudo[[i]]$SYMBOL <- rownames(combined.sex.sce)
+  test_pseudo[[i]]$Path   <- names(test_pseudo)[i]
+
+  test_pseudo_filt[[i]] =
+    as.data.frame(test_pseudo[[i]]) %>%
+    filter(FDR < .01) %>%
+    arrange(desc(abs(logFC)))
+}
+
+symbol_description = gene_description %>% dplyr::rename(SYMBOL = "Gene")
+
+test_pseudo_filt_df =
+  do.call(rbind, test_pseudo_filt) %>%
+  left_join(symbol_description, by = "SYMBOL")
+
+test_pseudo_filt_df = test_pseudo_filt_df[,
+  c("Path", "SYMBOL", "WangGeneID", "description", "logFC", "p.value", "FDR")]
+
+write.csv(test_pseudo_filt_df,
+          file = paste0(results_dir, "/no.support_sex_pseudotime_de_genes.csv"))
+
+test_pseudo100 =
+  test_pseudo_filt_df %>%
+  mutate(Path = case_when(
+    logFC > 0 ~ paste0(Path, ".Upregulated"),
+    logFC < 0 ~ paste0(Path, ".Downregulated"))) %>%
+  group_by(Path) %>%
+  slice_min(order_by = FDR, n = 100) %>%
+  mutate(logFC   = round(logFC, digits = 2),
+         p.value = formatC(signif(p.value, digits = 2)),
+         FDR     = formatC(signif(FDR, digits = 2)))
+
+test_pseudo =
+  test_pseudo_filt_df %>%
+  mutate(Path = case_when(
+    logFC > 0 ~ paste0(Path, ".Upregulated"),
+    logFC < 0 ~ paste0(Path, ".Downregulated"))) %>%
+  group_by(Path) %>%
+  mutate(logFC   = round(logFC, digits = 2),
+         p.value = formatC(signif(p.value, digits = 2)),
+         FDR     = formatC(signif(FDR, digits = 2)))
+
+datatable(test_pseudo100, filter = "top", rownames = FALSE)
+```
+
+## Trajectory heatmaps (top 25 genes per path and direction)
+
+```{r}
+colData(combined.sex.sce)$pseudotime_TSCAN <- averagePseudotime(pseudo$ordering)
+
+test_pseudo_SYMBOL_list <-
+  test_pseudo_filt_df %>%
+  dplyr::mutate(Path = dplyr::case_when(
+    logFC > 0 ~ paste0(Path, ".Upregulated"),
+    logFC < 0 ~ paste0(Path, ".Downregulated"))) %>%
+  dplyr::group_by(Path) %>%
+  arrange(FDR, desc(abs(logFC))) %>%
+  dplyr::slice_head(n = 25) %>%
+  dplyr::summarise(SYMBOL = list(SYMBOL), .groups = "drop") %>%
+  tibble::deframe()
+
+p_list = list()
+for (p in names(test_pseudo_SYMBOL_list)) {
+  gene_ids = test_pseudo_SYMBOL_list[[p]]
+
+  gene_labels = gene_description %>%
+    filter(Gene %in% gene_ids) %>%
+    pull(WangGeneID)
+
+  cell_subset = as.data.frame(pseudo_mat) %>%
+    rownames_to_column(var = "Barcode") %>%
+    filter(!is.na(!!sym(gsub("\\..*", "", p)))) %>%
+    pull(Barcode)
+
+  p_list[[p]] =
+    plot_pseudotime_heatmap(combined.sex.sce,
+                             gene_ids,
+                             gene_labels,
+                             cell_subset,
+                             pseudotime_column = "pseudotime_TSCAN")
+}
+```
+
+### PGC → SPC.cytokinetic path
+
+```{r, fig.width=7, fig.height=4}
+make_heatmap_pair <- function(p_list, path_name) {
+  up_name   <- paste0(path_name, ".Upregulated")
+  down_name <- paste0(path_name, ".Downregulated")
+
+  title_up   <- ggplot2::ggplot() +
+    ggplot2::labs(title = up_name) + ggplot2::theme_void() +
+    ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+                   plot.margin = ggplot2::margin(t = 10))
+
+  title_down <- ggplot2::ggplot() +
+    ggplot2::labs(title = down_name) + ggplot2::theme_void() +
+    ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+                   plot.margin = ggplot2::margin(t = 10))
+
+  col1 <- (title_up   / p_list[[up_name]][[1]]   / p_list[[up_name]][[2]]) +
+    patchwork::plot_layout(heights = c(0.02, 0.025, 1))
+  col2 <- (title_down / p_list[[down_name]][[1]] / p_list[[down_name]][[2]]) +
+    patchwork::plot_layout(heights = c(0.02, 0.025, 1))
+
+  (col1 | col2) +
+    patchwork::plot_layout(guides = "collect") &
+    ggplot2::theme(legend.position = "right")
+}
+
+make_heatmap_pair(p_list, "SPC.cytokinetic")
+ggsave(file = paste0(results_dir, "/SPC.cytokinetic_heatmaps.png"), width = 8, height = 5)
+```
+
+### PGC → Oocytes path
+
+```{r, fig.width=7, fig.height=4}
+make_heatmap_pair(p_list, "Oocytes")
+ggsave(file = paste0(results_dir, "/Oocytes_heatmaps.png"), width = 8, height = 5)
+```
+
+# Gene ontology of pseudotime-associated genes
+
+**Columns:** `GOID`, `GOName`, `nGOTermGenes`, `Path`, `nPathDEGenes`,
+`nSharedGenes`, `Pval`, `FDR`
+
+## All significant genes (FDR < 0.01)
+
+- Overlap p-values: `no.support_sex_pseudotime_de_GO_pvals.csv`
+- Overlapping genes: `no.support_sex_pseudotime_de_GO_overlaps.csv`
+
+```{r}
+test_pseudo_genes = test_pseudo %>% select(SYMBOL, Path)
+
+go_ol <- phyperOverlapSets(gaf, test_pseudo_genes, length(merged.sex.sce))
+
+shared_desc <- gene_description %>% dplyr::rename(SharedGene = "Gene")
+
+go_int =
+  go_ol$intersecting.genes %>%
+  left_join(shared_desc, by = "SharedGene") %>%
+  filter(!SharedGene == "none") %>%
+  dplyr::rename(GOID = "Group1", Path = "Group2") %>%
+  left_join(go_names, by = "GOID") %>%
+  relocate(GOName, .after = GOID)
+
+write.csv(go_int,
+          file = paste0(results_dir, "/no.support_sex_pseudotime_de_GO_overlaps.csv"),
+          row.names = FALSE)
+
+scores =
+  go_ol$pval.scores %>%
+  dplyr::rename(GOID           = "Group1",
+                Path           = "Group2",
+                nGOTermGenes   = "nGroup1",
+                nPathDEGenes   = "nGroup2") %>%
+  mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores =
+  left_join(go_names, scores, by = "GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .05)
+
+write.csv(scores,
+          file = paste0(results_dir, "/no.support_sex_pseudotime_de_GO_pvals.csv"),
+          row.names = FALSE)
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+## Top 100 genes per path and direction
+
+- Overlap p-values: `no.support_sex_pseudotime_top100_de_GO_pvals.csv`
+- Overlapping genes: `no.support_sex_pseudotime_top100_de_GO_overlaps.csv`
+
+```{r}
+test_pseudo_genes100 = test_pseudo100 %>% select(SYMBOL, Path)
+
+go_ol <- phyperOverlapSets(gaf, test_pseudo_genes100, length(merged.sex.sce))
+
+go_int =
+  go_ol$intersecting.genes %>%
+  left_join(shared_desc, by = "SharedGene") %>%
+  filter(!SharedGene == "none") %>%
+  dplyr::rename(GOID = "Group1", Path = "Group2") %>%
+  left_join(go_names, by = "GOID") %>%
+  relocate(GOName, .after = GOID)
+
+write.csv(go_int,
+          file = paste0(results_dir, "/no.support_sex_pseudotime_top100_de_GO_overlaps.csv"),
+          row.names = FALSE)
+
+scores =
+  go_ol$pval.scores %>%
+  dplyr::rename(GOID           = "Group1",
+                Path           = "Group2",
+                nGOTermGenes   = "nGroup1",
+                nPathDEGenes   = "nGroup2") %>%
+  mutate(FDR = p.adjust(Pval, "BH")) %>%
+  select(-Enrichment)
+
+scores =
+  left_join(go_names, scores, by = "GOID") %>%
+  filter(!is.na(nGOTermGenes)) %>%
+  filter(Pval < .05)
+
+write.csv(scores,
+          file = paste0(results_dir, "/no.support_sex_pseudotime_top100_de_GO_pvals.csv"),
+          row.names = FALSE)
+
+datatable(scores, filter = "top", rownames = FALSE)
+```
+
+# Cell metadata export
+
+```{r}
+germ_meta = colData(merged.sex.sce)
+germ_meta$batch           = NULL
+germ_meta$all.scatter.clust = NULL
+
+colnames(germ_meta) = c("germ.cluster", "germ.broad.CellType",
+                         "germ.narrow.CellType", "germ.Pseudotime")
+
+germ_tsne      = reducedDim(merged.sex.sce, "TSNE")
+germ_corrected = reducedDim(merged.sex.sce, "corrected")
+colnames(germ_corrected) = paste0("germ.fastMNN.corrected.", 1:50)
+
+germ_meta$germ.TSNE1 = germ_tsne[, "TSNE1"]
+germ_meta$germ.TSNE2 = germ_tsne[, "TSNE2"]
+germ_meta = cbind(germ_meta, germ_corrected)
+germ_meta$barcode = rownames(germ_meta)
+
+# load the all-cells merged object for the full metadata join
+merged.sce    = readRDS(paste0(Robject_dir, "/merged.sce.Rds"))
+
+all_meta = colData(merged.sce)
+all_meta$monocole_cluster = NULL
+all_meta$barcode = rownames(all_meta)
+
+all_tsne      = reducedDim(merged.sce, "TSNE")
+all_corrected = reducedDim(merged.sce, "corrected")
+colnames(all_corrected) = paste0("fastMNN.corrected.", 1:50)
+
+all_meta$TSNE1 = all_tsne[, "TSNE1"]
+all_meta$TSNE2 = all_tsne[, "TSNE2"]
+all_meta = cbind(all_meta, all_corrected)
+
+meta_final =
+  left_join(as.data.frame(all_meta), as.data.frame(germ_meta), by = "barcode") %>%
+  relocate(barcode, .before = "batch")
+
+write.table(meta_final,
+            file      = paste0(results_dir, "/cell_metadata.tsv"),
+            row.names = FALSE,
+            sep       = "\t",
+            quote     = FALSE)
+
+zip(zipfile = paste0(results_dir, "/cell_metadata.tsv.gz"),
+    files   = paste0(results_dir, "/cell_metadata.tsv"))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
