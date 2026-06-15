@@ -226,124 +226,6 @@ fgseaEnrichment = function(stat_table, set_table, scoreType) {
   return(res)
 }
 
-# modify_vlnplot ----------------------------------------------------------
-#' @name modify_vlnplot
-#' @description from https://divingintogeneticsandgenomics.rbind.io/post/stacked-violin-plot-for-visualizing-single-cell-data-in-seurat/
-#' @description remove the x-axis text and tick marks from a Seurat Vln plot
-#' @param obj seurat object
-#' @param feature  one genes to be plotted
-#' @param pt.size size of points on Vln plot
-#' @param plot.margin to adjust the white space between each plot
-#' @param pass any arguments to VlnPlot in Seurat
-
-modify_vlnplot<- function(obj, 
-                          feature, 
-                          pt.size = 0, 
-                          plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
-                          ...) {
-  require(Seurat)
-  require(patchwork)
-  
-  p<- VlnPlot(obj, features = feature, pt.size = pt.size, ... )  + 
-    xlab("") + ylab("norm expr") + ggtitle(feature) + 
-    theme(legend.position = "none", 
-          axis.text.x = element_blank(), 
-          axis.ticks.x = element_blank(), 
-          axis.title.y = element_text(size = 8), 
-          axis.text.y = element_text(size = 8),
-          plot.title = element_text(size = 8),
-          plot.margin = plot.margin
-          ) +
-    ## add box plot (steph edit)
-    geom_boxplot(width=0.1, color="black") +
-    theme(legend.position = 'none')
-  return(p)
-}
-
-# extract_max_y -------------------------------------------------------------
-#' @name extract_max_y
-#' @description given a ggplot, extract the max value of the y axis
-#' @param p a ggplot object
-
-extract_max_y<- function(p){
-  require(ggplot2)
-  ymax<- max(ggplot_build(p)$layout$panel_scales_y[[1]]$range$range)
-  return(ceiling(ymax))
-}
-
-# StackedVlnPlot_samey ----------------------------------------------------
-#' @name StackedVlnPlot_samey
-#' @description make a stacked vln plot with the same y-axis for each gene
-#' @param obj seurat object
-#' @param features  charcter vector of genes to be plotted
-#' @param pt.size size of points on Vln plot
-#' @param plot.margin to adjust the white space between each plot
-#' @param pass any arguments to VlnPlot in Seurat
- 
-StackedVlnPlot_samey<- function(obj, 
-                                features,
-                                pt.size = 0, 
-                                plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
-                                ...) {
-  
-  require(Seurat)
-  require(patchwork)
-  
-  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
-  
-  # Add back x-axis title to bottom plot. patchwork is going to support this?
-  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
-    theme(axis.text.x=element_text(angle = 30,  hjust = 1, vjust = 1), axis.ticks.x = element_line())
-  
-  # change the y-axis tick to only max value 
-  ymaxs<- purrr::map_dbl(plot_list, extract_max_y)
-  ## fill ymaxs with the max of all of the plots (steph edit)
-  same_y = rep(max(ymaxs), length(ymaxs))
-  plot_list<- purrr::map2(plot_list, same_y, function(x,y) x + 
-                            scale_y_continuous(breaks = c(y)) + 
-                            expand_limits(y = y))
-  
-  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1)
-  return(p)
-}
-
-# StackedVlnPlot_samey ----------------------------------------------------
-#' @name StackedVlnPlot_samey
-#' @description make a stacked vln plot with the max-y for each gene
-#' @param obj seurat object
-#' @param features  charcter vector of genes to be plotted
-#' @param pt.size size of points on Vln plot
-#' @param plot.margin to adjust the white space between each plot
-#' @param pass any arguments to VlnPlot in Seurat
-
-StackedVlnPlot<- function(obj, features, plot_title,
-                          pt.size = 0, 
-                          plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
-                          ...) {
-  require(Seurat)
-  require(patchwork)
-  
-  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
-  
-  # Add back x-axis title to bottom plot. patchwork is going to support this?
-  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
-    theme(axis.text.x=element_text(angle = 30, hjust = 1, vjust = 1, size = 8), axis.ticks.x = element_line()) 
-  
-  # change the y-axis tick to only max value 
-  ymaxs<- purrr::map_dbl(plot_list, extract_max_y)
-  same_y = rep(max(ymaxs), length(ymaxs))
-  plot_list<- purrr::map2(plot_list, ymaxs, function(x,y) x + 
-                            scale_y_continuous(breaks = c(y)) + 
-                            expand_limits(y = y))
-  
-  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1)
-  p = p + plot_annotation(title = plot_title) &
-    theme(plot.title = element_text(hjust = 0.5)) +
-    theme(plot.title = element_text(face="bold")) + 
-    theme(text = element_text(size = 8))
-  return(p)
-}
-
 # find_stable_k -----------------------------------------------------------
 
 find_stable_k <- function(sce, k_range = seq(5, 50, by = 5), 
@@ -464,56 +346,6 @@ get_avg_expression <- function(sce, genes, cluster_col, assay = "logcounts") {
     rowMeans(expr_mat[, clusters == cl, drop = FALSE])
   })
   return(avg)
-}
-
-
-# plot_trajectory_genes ---------------------------------------------------
-# line plot of average gene expression across a trajectory
-plot_trajectory_genes <- function(sce, genes, cluster_order, 
-                                  cluster_col, title, assay = "logcounts") {
-  
-  avg_exp <- get_avg_expression(sce, genes, cluster_col, assay)
-  
-  wang_genes = 
-    gene_description %>%
-    filter(Gene %in% genes) %>%
-    pull(WangGeneID)
-  
-  # Reorder to trajectory order
-  valid_clusters <- cluster_order[cluster_order %in% colnames(avg_exp)]
-  avg_exp <- avg_exp[, valid_clusters, drop = FALSE]
-  
-  # Scale each gene 0-1
-  avg_exp_scaled <- t(apply(avg_exp, 1, function(x) {
-    rng <- max(x) - min(x)
-    if (rng == 0) return(rep(0, length(x)))
-    (x - min(x)) / rng
-  }))
-  
-  # Long format for ggplot
-  df <- as.data.frame(avg_exp_scaled)
-  df$gene <- wang_genes
-  df_long <- pivot_longer(df, -gene, 
-                          names_to = "cluster", 
-                          values_to = "expression")
-  df_long$cluster <- factor(df_long$cluster, levels = valid_clusters)
-  
-  library(Polychrome)
-  n_clusters <- length(wang_genes)
-  color_pal <- as.vector(kelly.colors(n_clusters + 1))[-1]  # up to 22 colors
-  
-  
-  ggplot(df_long, aes(x = cluster, y = expression, 
-                      color = gene, group = gene)) +
-    geom_line(linewidth = 1) +
-    geom_point(size = 2.5) +
-    theme_bw() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1),
-          legend.position = "right") +
-    labs(title = title,
-         x = "Cluster (ordered by trajectory)",
-         y = "Scaled mean expression (0-1)") +
-    scale_color_manual(values = color_pal)
 }
 
 
@@ -1032,4 +864,443 @@ plot_marker_overlap_heatmap <- function(known_markers, test_genes,
     ggsave(p, file = plot_file)
 
   return(p)
+}
+
+
+# plot_violin_goi ---------------------------------------------------------
+#' @name plot_violin_goi
+#' @description Stacked violin + boxplot for a set of genes across clusters.
+#'   Cluster labels are remapped from numeric `label` column via the `anno`
+#'   vector. Significance stars are overlaid from a marker table. Genes are
+#'   ordered by hierarchical clustering of mean expression across clusters.
+#' @param sce SingleCellExperiment with logcounts and a numeric `label` colData column
+#' @param markers data frame with columns WangGeneID, cluster (e.g. "cluster_1"), FDR
+#' @param goi character vector of WangGeneIDs to plot
+#' @param gene_description gene descriptions df with Gene and WangGeneID columns
+#' @param anno character vector mapping numeric cluster index to cell type name
+#' @param palette character vector of colors (one per cluster)
+#' @param title optional plot title
+
+plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
+                             title = NULL) {
+
+  fdr_to_stars <- function(fdr) {
+    dplyr::case_when(
+      fdr < 0.001 ~ "***",
+      fdr < 0.01  ~ "**",
+      fdr < 0.05  ~ "*",
+      TRUE        ~ ""
+    )
+  }
+
+  goi_loc <- gene_description %>%
+    filter(WangGeneID %in% goi) %>%
+    pull(Gene)
+
+  plot_df <- plotExpression(
+    sce,
+    features      = goi,
+    scattermore   = TRUE,
+    point_size    = 0,
+    swap_rownames = "WangGeneID",
+    x             = "label",
+    ncol          = 1
+  )$data %>%
+    mutate(
+      X = anno[as.numeric(gsub("cluster_", "", as.character(X)))],
+      X = factor(X, levels = anno)
+    )
+
+  y_max_df <- plot_df %>%
+    group_by(Feature, X) %>%
+    summarise(y_pos = max(Y) * 1.1, .groups = "drop")
+
+  expand_df <- plot_df %>%
+    group_by(Feature) %>%
+    summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
+    mutate(X = anno[1])
+
+  sig_df <- markers %>%
+    filter(WangGeneID %in% goi) %>%
+    mutate(
+      stars   = fdr_to_stars(FDR),
+      Feature = WangGeneID,
+      X       = anno[as.numeric(gsub("cluster_", "", as.character(cluster)))]
+    ) %>%
+    filter(stars != "") %>%
+    left_join(y_max_df, by = c("Feature", "X"))
+
+  if (length(goi) > 1) {
+    gene_order <- plot_df %>%
+      group_by(Feature, X) %>%
+      summarise(mean_expr = mean(Y), .groups = "drop") %>%
+      tidyr::pivot_wider(names_from = X, values_from = mean_expr, values_fill = 0) %>%
+      tibble::column_to_rownames("Feature") %>%
+      dist() %>%
+      hclust(method = "ward.D2") %>%
+      { .$labels[.$order] }
+
+    plot_df   <- plot_df   %>% mutate(Feature = factor(Feature, levels = gene_order))
+    sig_df    <- sig_df    %>% mutate(Feature = factor(Feature, levels = gene_order))
+    expand_df <- expand_df %>% mutate(Feature = factor(Feature, levels = gene_order))
+  }
+
+  cluster_colors <- setNames(palette[seq_along(anno)], anno)
+
+  ggplot(plot_df, aes(x = X, y = Y)) +
+    geom_violin(aes(fill = X, color = after_scale(fill)),
+                linewidth = 0.3, scale = "width", trim = TRUE) +
+    geom_boxplot(width = 0.12, fill = "white", color = "grey40",
+                 linewidth = 0.3, outlier.shape = NA) +
+    geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
+    geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
+              inherit.aes = FALSE, size = 2, vjust = 0, fontface = "bold",
+              color = "#2e2e2e") +
+    scale_fill_manual(values = cluster_colors, name = "Cell Type") +
+    coord_cartesian(clip = "off", ylim = c(0, NA)) +
+    facet_wrap(~ Feature, ncol = 1, scales = "free_y") +
+    labs(x = NULL, y = "Log-normalized expression", title = title) +
+    theme_classic(base_size = 11) +
+    theme(
+      strip.background = element_rect(fill = "#dce8ef", color = NA),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 10),
+      axis.text.x      = element_blank(),
+      axis.ticks.x     = element_blank(),
+      axis.text.y      = element_text(color = "#3a3a3a"),
+      axis.title       = element_text(color = "#2e2e2e"),
+      axis.line        = element_line(color = "#aaaaaa", linewidth = 0.4),
+      axis.ticks       = element_line(color = "#aaaaaa", linewidth = 0.4),
+      panel.spacing    = unit(0.8, "lines"),
+      legend.key.size  = unit(0.4, "cm")
+    )
+}
+
+
+# plot_violin_goi_named ---------------------------------------------------
+#' @name plot_violin_goi_named
+#' @description Stacked violin + boxplot for a set of genes across clusters
+#'   where the cluster column already contains cell type names (no numeric
+#'   remapping needed). Genes are ordered by hierarchical clustering of mean
+#'   expression. Significance stars from a marker table are overlaid.
+#' @param sce SingleCellExperiment with logcounts
+#' @param markers data frame with columns WangGeneID, a cluster column matching
+#'   cluster_col, and FDR
+#' @param goi character vector of WangGeneIDs to plot
+#' @param gene_description gene descriptions df with Gene and WangGeneID columns
+#' @param anno character vector of cell type names (defines x-axis order and colors)
+#' @param palette character vector of colors (one per cell type)
+#' @param cluster_col colData column holding cell type names (default "label")
+#' @param title optional plot title
+
+plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
+                                   palette, cluster_col = "label", title = NULL) {
+
+  fdr_to_stars <- function(fdr) {
+    dplyr::case_when(
+      fdr < 0.001 ~ "***",
+      fdr < 0.01  ~ "**",
+      fdr < 0.05  ~ "*",
+      TRUE        ~ ""
+    )
+  }
+
+  plot_df <- plotExpression(
+    sce,
+    features      = goi,
+    scattermore   = TRUE,
+    point_size    = 0,
+    swap_rownames = "WangGeneID",
+    x             = cluster_col,
+    ncol          = 1
+  )$data %>%
+    mutate(X = factor(X, levels = anno))
+
+  y_max_df <- plot_df %>%
+    group_by(Feature, X) %>%
+    summarise(y_pos = max(Y) * 1.1, .groups = "drop")
+
+  expand_df <- plot_df %>%
+    group_by(Feature) %>%
+    summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
+    mutate(X = anno[1])
+
+  sig_df <- markers %>%
+    filter(WangGeneID %in% goi) %>%
+    mutate(
+      stars   = fdr_to_stars(FDR),
+      Feature = WangGeneID,
+      X       = factor(.data[[cluster_col]], levels = anno)
+    ) %>%
+    filter(stars != "") %>%
+    left_join(y_max_df, by = c("Feature", "X"))
+
+  gene_order <- plot_df %>%
+    group_by(Feature, X) %>%
+    summarise(mean_expr = mean(Y), .groups = "drop") %>%
+    tidyr::pivot_wider(names_from = X, values_from = mean_expr, values_fill = 0) %>%
+    tibble::column_to_rownames("Feature") %>%
+    dist() %>%
+    hclust(method = "ward.D2") %>%
+    { .$labels[.$order] }
+
+  plot_df   <- plot_df   %>% mutate(Feature = factor(Feature, levels = gene_order))
+  sig_df    <- sig_df    %>% mutate(Feature = factor(Feature, levels = gene_order))
+  expand_df <- expand_df %>% mutate(Feature = factor(Feature, levels = gene_order))
+
+  cluster_colors <- setNames(palette[seq_along(anno)], anno)
+
+  ggplot(plot_df, aes(x = X, y = Y)) +
+    geom_violin(aes(fill = X, color = after_scale(fill)),
+                linewidth = 0.3, scale = "width", trim = TRUE) +
+    geom_boxplot(width = 0.12, fill = "white", color = "grey40",
+                 linewidth = 0.3, outlier.shape = NA) +
+    geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
+    geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
+              inherit.aes = FALSE, size = 3, vjust = 0, fontface = "bold",
+              color = "#2e2e2e") +
+    scale_fill_manual(values = cluster_colors, name = "Cell Type") +
+    coord_cartesian(clip = "off", ylim = c(0, NA)) +
+    facet_wrap(~ Feature, ncol = 1, scales = "free_y") +
+    labs(x = NULL, y = "Log-normalized expression", title = title) +
+    theme_classic(base_size = 11) +
+    theme(
+      strip.background = element_rect(fill = "#dce8ef", color = NA),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 10),
+      axis.text.x      = element_blank(),
+      axis.ticks.x     = element_blank(),
+      axis.text.y      = element_text(color = "#3a3a3a"),
+      axis.title       = element_text(color = "#2e2e2e"),
+      axis.line        = element_line(color = "#aaaaaa", linewidth = 0.4),
+      axis.ticks       = element_line(color = "#aaaaaa", linewidth = 0.4),
+      panel.spacing    = unit(0.8, "lines"),
+      legend.key.size  = unit(0.4, "cm")
+    )
+}
+
+
+# plot_violin_goi_single --------------------------------------------------
+#' @name plot_violin_goi_single
+#' @description Horizontal (flipped) violin + boxplot for a single gene across
+#'   clusters. Cluster labels are remapped from numeric `label` via `anno`.
+#'   Significance stars from a marker table are overlaid.
+#' @param sce SingleCellExperiment with logcounts and a numeric `label` colData column
+#' @param markers data frame with columns WangGeneID, cluster (e.g. "cluster_1"), FDR
+#' @param goi single WangGeneID string to plot
+#' @param gene_description gene descriptions df with Gene and WangGeneID columns
+#' @param anno character vector mapping numeric cluster index to cell type name
+#' @param palette character vector of colors (one per cluster)
+#' @param title optional plot title
+
+plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
+                                    palette, title = NULL) {
+
+  fdr_to_stars <- function(fdr) {
+    dplyr::case_when(
+      fdr < 0.001 ~ "***",
+      fdr < 0.01  ~ "**",
+      fdr < 0.05  ~ "*",
+      TRUE        ~ ""
+    )
+  }
+
+  plot_df <- plotExpression(
+    sce,
+    features      = goi,
+    scattermore   = TRUE,
+    point_size    = 0,
+    swap_rownames = "WangGeneID",
+    x             = "label",
+    ncol          = 1
+  )$data %>%
+    mutate(
+      X = anno[as.numeric(gsub("cluster_", "", as.character(X)))],
+      X = factor(X, levels = rev(anno))
+    )
+
+  y_max_df <- plot_df %>%
+    group_by(Feature, X) %>%
+    summarise(y_pos = max(Y) * 1.1, .groups = "drop")
+
+  expand_df <- plot_df %>%
+    group_by(Feature) %>%
+    summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
+    mutate(X = anno[1])
+
+  sig_df <- markers %>%
+    filter(WangGeneID %in% goi) %>%
+    mutate(
+      stars   = fdr_to_stars(FDR),
+      Feature = WangGeneID,
+      X       = anno[as.numeric(gsub("cluster_", "", as.character(cluster)))]
+    ) %>%
+    filter(stars != "") %>%
+    left_join(y_max_df, by = c("Feature", "X"))
+
+  cluster_colors <- setNames(palette[seq_along(anno)], anno)
+
+  ggplot(plot_df, aes(x = X, y = Y)) +
+    geom_violin(aes(fill = X, color = after_scale(fill)),
+                linewidth = 0.3, scale = "width", trim = TRUE) +
+    geom_boxplot(width = 0.12, fill = "white", color = "grey40",
+                 linewidth = 0.3, outlier.shape = NA) +
+    geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
+    geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
+              inherit.aes = FALSE, size = 2, vjust = 0, fontface = "bold",
+              color = "#2e2e2e") +
+    scale_fill_manual(values = cluster_colors, name = "Cell Type") +
+    coord_flip(clip = "off", ylim = c(0, NA)) +
+    labs(x = NULL, y = "Log-normalized expression", title = title) +
+    theme_classic(base_size = 11) +
+    theme(
+      axis.text.x     = element_text(color = "#3a3a3a"),
+      axis.ticks.x    = element_blank(),
+      axis.text.y     = element_blank(),
+      axis.ticks.y    = element_blank(),
+      axis.title      = element_text(color = "#2e2e2e"),
+      axis.line       = element_line(color = "#aaaaaa", linewidth = 0.4),
+      axis.ticks      = element_line(color = "#aaaaaa", linewidth = 0.4),
+      legend.key.size = unit(0.4, "cm")
+    ) +
+    guides(fill = guide_legend(reverse = TRUE))
+}
+
+
+# plot_expr_proportion ----------------------------------------------------
+#' @name plot_expr_proportion
+#' @description Bar chart showing the proportion of cells expressing a gene
+#'   (above a threshold) per cell type, faceted by batch/sample. Useful for
+#'   checking whether expression is sample-specific.
+#' @param sce SingleCellExperiment object
+#' @param gene rowname in sce to plot
+#' @param celltype_col colData column with cell type labels (default "celltype")
+#' @param batch_col colData column with batch/sample labels (default "batch")
+#' @param assay_name assay to use for expression values (default "counts")
+#' @param threshold expression threshold above which a cell is "expressing"
+#'   (default 0)
+#' @param ncol number of columns in the facet grid (default 3)
+
+plot_expr_proportion <- function(sce,
+                                  gene,
+                                  celltype_col = "celltype",
+                                  batch_col    = "batch",
+                                  assay_name   = "counts",
+                                  threshold    = 0,
+                                  ncol         = 3) {
+
+  stopifnot(gene %in% rownames(sce))
+  stopifnot(celltype_col %in% names(colData(sce)))
+  stopifnot(batch_col    %in% names(colData(sce)))
+
+  expr <- assay(sce, assay_name)[gene, ]
+
+  df <- data.frame(
+    expressed = expr > threshold,
+    celltype  = colData(sce)[[celltype_col]],
+    batch     = colData(sce)[[batch_col]]
+  )
+
+  prop_df <- df %>%
+    group_by(batch, celltype) %>%
+    summarise(
+      proportion = mean(expressed),
+      n_cells    = n(),
+      .groups    = "drop"
+    )
+
+  ggplot(prop_df, aes(x = batch, y = proportion, fill = batch)) +
+    geom_bar(stat = "identity", width = 0.7) +
+    geom_text(aes(label = scales::percent(proportion, accuracy = 0.1)),
+              vjust = -0.4, size = 3) +
+    facet_wrap(~ celltype, ncol = ncol) +
+    scale_y_continuous(labels = scales::percent_format(),
+                       limits = c(0, 1.20),
+                       breaks = seq(0, 1, by = 0.25)) +
+    labs(title = paste("Proportion of cells expressing", gene),
+         x     = "Batch",
+         y     = "% cells expressing",
+         fill  = "Batch") +
+    theme_bw() +
+    theme(axis.text.x     = element_text(angle = 45, hjust = 1),
+          legend.position = "none")
+}
+
+
+# plot_pseudotime_paths ---------------------------------------------------
+#' @name plot_pseudotime_paths
+#' @description GAM-smoothed expression curves along pseudotime, one line per
+#'   trajectory path, faceted by gene. FDR values from a pseudotime DE results
+#'   table are annotated in the top-right of each facet.
+#' @param sce SingleCellExperiment with logcounts
+#' @param pseudo_mat matrix from pathStat(); rows = cells, columns = path endpoints
+#' @param goi character vector of WangGeneIDs to plot
+#' @param gene_description gene descriptions df with Gene and WangGeneID columns
+#' @param tradeseq_res data frame of pseudotime DE results with columns
+#'   WangGeneID, Path, FDR (e.g. from testPseudotime + formatting)
+#' @param paths character vector of path (column) names from pseudo_mat to include
+#'   (default c("Oocytes", "SPC.cytokinetic"))
+#' @param title optional plot title
+
+plot_pseudotime_paths <- function(sce, pseudo_mat, goi, gene_description,
+                                   tradeseq_res,
+                                   paths = c("Oocytes", "SPC.cytokinetic"),
+                                   title = NULL) {
+
+  goi_loc <- gene_description %>%
+    filter(WangGeneID %in% goi) %>%
+    pull(Gene)
+
+  expr_mat <- as.matrix(logcounts(sce)[goi_loc, , drop = FALSE])
+  rownames(expr_mat) <- gene_description %>%
+    filter(Gene %in% goi_loc) %>%
+    select(Gene, WangGeneID) %>%
+    deframe() %>%
+    { .[goi_loc] }
+
+  pseudo_long <- pseudo_mat[, paths, drop = FALSE] %>%
+    as.data.frame() %>%
+    rownames_to_column("Cell") %>%
+    tidyr::pivot_longer(-Cell, names_to = "Path", values_to = "Pseudotime") %>%
+    filter(!is.na(Pseudotime))
+
+  expr_long <- as.data.frame(t(expr_mat)) %>%
+    rownames_to_column("Cell") %>%
+    tidyr::pivot_longer(-Cell, names_to = "Gene", values_to = "Expression")
+
+  plot_df <- pseudo_long %>%
+    left_join(expr_long, by = "Cell") %>%
+    filter(!is.na(Expression))
+
+  fdr_labels <- tradeseq_res %>%
+    filter(WangGeneID %in% goi, Path %in% paths) %>%
+    mutate(label = paste0(Path, ": ", formatC(FDR, format = "e", digits = 2))) %>%
+    group_by(WangGeneID) %>%
+    summarise(fdr_text = paste(label, collapse = "\n"), .groups = "drop") %>%
+    dplyr::rename(Gene = WangGeneID)
+
+  path_colors <- setNames(c("#E377C2", "#1F77B4"), paths)
+
+  ggplot(plot_df, aes(x = Pseudotime, y = Expression, color = Path, fill = Path)) +
+    geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"),
+                se = TRUE, alpha = 0.15, linewidth = 0.8) +
+    geom_text(data = fdr_labels,
+              aes(x = Inf, y = Inf, label = fdr_text),
+              inherit.aes = FALSE,
+              hjust = 1.05, vjust = 1.2, size = 2.5, color = "grey30",
+              lineheight = 1.4) +
+    scale_color_manual(values = path_colors) +
+    scale_fill_manual(values = path_colors) +
+    scale_y_continuous(expand = expansion(mult = c(0.05, 0.40))) +
+    facet_wrap(~ Gene, scales = "free_y", ncol = 2) +
+    labs(x = "Pseudotime", y = "Log-normalized expression",
+         color = "Path", fill = "Path", title = title) +
+    theme_classic(base_size = 11) +
+    theme(
+      strip.background = element_rect(fill = "#dce8ef", color = NA),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 9),
+      axis.text        = element_text(color = "#3a3a3a"),
+      axis.line        = element_line(color = "#aaaaaa", linewidth = 0.4),
+      axis.ticks       = element_line(color = "#aaaaaa", linewidth = 0.4),
+      legend.position  = "top",
+      panel.spacing    = unit(0.8, "lines")
+    )
 }
