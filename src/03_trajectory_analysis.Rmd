@@ -47,7 +47,7 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir = paste0(params$project_dir, "/results/20260424")
+results_dir = paste0(params$project_dir, "/results/20260615")
 data_dir    = paste0(params$project_dir, "/data")
 ```
 
@@ -216,7 +216,7 @@ saveRDS(pseudo, file = paste0(results_dir, "/no.support.merged.sex.pseudo.Rds"))
 
 ## Trajectory node graph
 
-Pie charts show the proportion of cells from each sample per node.
+Top: Pie charts show the proportion of cells from each sample per node. Bottom: Node color corresponds to pseudotim.e
 
 ```{r, fig.width=10, fig.height=8}
 meta_df = as.data.frame(colData(merged.sex.sce))
@@ -402,6 +402,8 @@ for (p in names(test_pseudo_SYMBOL_list)) {
                              cell_subset,
                              pseudotime_column = "pseudotime_TSCAN")
 }
+
+
 ```
 
 ### PGC → SPC.cytokinetic path
