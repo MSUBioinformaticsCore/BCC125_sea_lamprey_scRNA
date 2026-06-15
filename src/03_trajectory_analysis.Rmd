@@ -389,9 +389,10 @@ for (p in names(test_pseudo_SYMBOL_list)) {
     filter(Gene %in% gene_ids) %>%
     pull(WangGeneID)
 
+  path_name = sub("\\.(Upregulated|Downregulated)$", "", p)
   cell_subset = as.data.frame(pseudo_mat) %>%
     rownames_to_column(var = "Barcode") %>%
-    filter(!is.na(!!sym(gsub("\\..*", "", p)))) %>%
+    filter(!is.na(.data[[path_name]])) %>%
     pull(Barcode)
 
   p_list[[p]] =
