@@ -1327,6 +1327,8 @@ plot_pseudotime_paths <- function(sce, pseudo_mat, goi, gene_description,
 #' @param point_size point size (default 0.05)
 #' @param text_color color for cluster label text (default "red")
 #' @param text_size size for cluster label text (default 3)
+#' @param bg_color background color for panel, plot, and legend (default "black");
+#'   legend and title text automatically switch to black when bg_color is "white"
 #' @param title optional plot title
 
 plot_tsne <- function(df,
@@ -1336,7 +1338,10 @@ plot_tsne <- function(df,
                       point_size = 0.05,
                       text_color = "red",
                       text_size  = 3,
+                      bg_color   = "black",
                       title      = NULL) {
+
+  fg_color <- if (bg_color == "white") "black" else "white"
 
   p <- ggplot(df, aes(x = TSNE1, y = TSNE2, color = .data[[color_col]])) +
     geom_point(size = point_size, stroke = 0) +
@@ -1344,16 +1349,16 @@ plot_tsne <- function(df,
     labs(color = color_col, title = title) +
     theme_classic() +
     theme(
-      panel.background  = element_rect(fill = "black", color = NA),
-      plot.background   = element_rect(fill = "black", color = NA),
+      panel.background  = element_rect(fill = bg_color, color = NA),
+      plot.background   = element_rect(fill = bg_color, color = NA),
       axis.title        = element_blank(),
       axis.text         = element_blank(),
       axis.ticks        = element_blank(),
       axis.line         = element_blank(),
-      legend.background = element_rect(fill = "black"),
-      legend.text       = element_text(color = "white"),
-      legend.title      = element_text(color = "white"),
-      plot.title        = element_text(color = "white")
+      legend.background = element_rect(fill = bg_color),
+      legend.text       = element_text(color = fg_color),
+      legend.title      = element_text(color = fg_color),
+      plot.title        = element_text(color = fg_color)
     )
 
   if (!is.null(palette))
