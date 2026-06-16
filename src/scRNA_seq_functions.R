@@ -1374,8 +1374,11 @@ plot_tsne <- function(df,
       plot.title        = element_text(color = fg_color)
     )
 
-  if (!is.null(palette))
+  if (!is.null(palette)) {
+    if (!is.null(color_levels) && is.null(names(palette)))
+      palette <- setNames(palette[seq_along(color_levels)], color_levels)
     p <- p + scale_color_manual(values = palette)
+  }
 
   if (!is.null(label_col)) {
     label_df <- df %>%
@@ -1389,7 +1392,8 @@ plot_tsne <- function(df,
         aes(x = TSNE1, y = TSNE2),
         color       = "white",
         size        = text_size * 2,
-        inherit.aes = FALSE
+        inherit.aes = FALSE,
+        show.legend = FALSE
       ) +
       geom_text(
         data        = label_df,
