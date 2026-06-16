@@ -1388,7 +1388,7 @@ plot_tsne <- function(df,
         data        = label_df,
         aes(x = TSNE1, y = TSNE2),
         color       = "white",
-        size        = text_size * 2.8,
+        size        = text_size * 2,
         inherit.aes = FALSE
       ) +
       geom_text(
