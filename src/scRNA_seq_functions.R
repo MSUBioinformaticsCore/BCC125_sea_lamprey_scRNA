@@ -1328,20 +1328,33 @@ plot_pseudotime_paths <- function(sce, pseudo_mat, goi, gene_description,
 #' @param text_color color for cluster label text (default "red")
 #' @param text_size size for cluster label text (default 3)
 #' @param bg_color background color for panel, plot, and legend (default "black");
-#'   legend and title text automatically switch to black when bg_color is "white"
+#'   legend and title text automatically use black or white based on luminance
+#' @param color_levels optional character vector of levels for color_col, controls
+#'   legend order (e.g. anno[level_order])
 #' @param title optional plot title
 
 plot_tsne <- function(df,
                       color_col,
-                      label_col  = NULL,
-                      palette    = NULL,
-                      point_size = 0.05,
-                      text_color = "red",
-                      text_size  = 3,
-                      bg_color   = "black",
-                      title      = NULL) {
+                      label_col    = NULL,
+                      palette      = NULL,
+                      point_size   = 0.05,
+                      text_color   = "red",
+                      text_size    = 3,
+                      bg_color     = "black",
+                      color_levels = NULL,
+                      title        = NULL) {
 
-  fg_color <- if (bg_color == "white") "black" else "white"
+  # pick legible text color based on bg luminance (WCAG relative luminance)
+  .contrast_color <- function(hex) {
+    rgb  <- col2rgb(hex) / 255
+    lin  <- ifelse(rgb <= 0.03928, rgb / 12.92, ((rgb + 0.055) / 1.055)^2.4)
+    lum  <- 0.2126 * lin[1] + 0.7152 * lin[2] + 0.0722 * lin[3]
+    if (lum > 0.179) "black" else "white"
+  }
+  fg_color <- .contrast_color(bg_color)
+
+  if (!is.null(color_levels))
+    df[[color_col]] <- factor(df[[color_col]], levels = color_levels)
 
   p <- ggplot(df, aes(x = TSNE1, y = TSNE2, color = .data[[color_col]])) +
     geom_point(size = point_size, stroke = 0) +
@@ -1370,13 +1383,22 @@ plot_tsne <- function(df,
       summarise(TSNE1 = median(TSNE1), TSNE2 = median(TSNE2), .groups = "drop") %>%
       rename(.label = all_of(label_col))
 
-    p <- p + geom_text(
-      data        = label_df,
-      aes(x = TSNE1, y = TSNE2, label = .label),
-      color       = text_color,
-      size        = text_size,
-      inherit.aes = FALSE
-    )
+    p <- p +
+      geom_point(
+        data        = label_df,
+        aes(x = TSNE1, y = TSNE2),
+        color       = "white",
+        size        = text_size * 2.8,
+        inherit.aes = FALSE
+      ) +
+      geom_text(
+        data        = label_df,
+        aes(x = TSNE1, y = TSNE2, label = .label),
+        color       = text_color,
+        size        = text_size,
+        fontface    = "bold",
+        inherit.aes = FALSE
+      )
   }
 
   p
