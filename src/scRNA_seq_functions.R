@@ -1338,7 +1338,7 @@ plot_tsne <- function(df,
                       text_size  = 3,
                       title      = NULL) {
 
-  p <- ggplot(df, aes(x = tsne1, y = tsne2, color = .data[[color_col]])) +
+  p <- ggplot(df, aes(x = TSNE1, y = TSNE2, color = .data[[color_col]])) +
     geom_point(size = point_size, stroke = 0) +
     guides(color = guide_legend(override.aes = list(size = 5))) +
     labs(color = color_col, title = title) +
@@ -1362,12 +1362,12 @@ plot_tsne <- function(df,
   if (!is.null(label_col)) {
     label_df <- df %>%
       group_by(.data[[label_col]]) %>%
-      summarise(tsne1 = median(tsne1), tsne2 = median(tsne2), .groups = "drop") %>%
+      summarise(TSNE1 = median(TSNE1), TSNE2 = median(tsne2), .groups = "drop") %>%
       rename(.label = all_of(label_col))
 
     p <- p + geom_text(
       data        = label_df,
-      aes(x = tsne1, y = tsne2, label = .label),
+      aes(x = TSNE1, y = TSNE2, label = .label),
       color       = text_color,
       size        = text_size,
       inherit.aes = FALSE
