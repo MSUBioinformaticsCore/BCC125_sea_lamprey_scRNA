@@ -1377,7 +1377,8 @@ plot_tsne <- function(df,
   if (!is.null(palette)) {
     if (!is.null(color_levels) && is.null(names(palette)))
       palette <- setNames(palette[seq_along(color_levels)], color_levels)
-    p <- p + scale_color_manual(values = palette)
+    p <- p + scale_color_manual(values = palette,
+                                breaks = if (!is.null(color_levels)) color_levels else waiver())
   }
 
   if (!is.null(label_col)) {
