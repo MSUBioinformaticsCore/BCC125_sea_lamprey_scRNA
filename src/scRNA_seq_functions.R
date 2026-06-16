@@ -1362,7 +1362,7 @@ plot_tsne <- function(df,
   if (!is.null(label_col)) {
     label_df <- df %>%
       group_by(.data[[label_col]]) %>%
-      summarise(TSNE1 = median(TSNE1), TSNE2 = median(tsne2), .groups = "drop") %>%
+      summarise(TSNE1 = median(TSNE1), TSNE2 = median(TSNE2), .groups = "drop") %>%
       rename(.label = all_of(label_col))
 
     p <- p + geom_text(
