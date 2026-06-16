@@ -1113,10 +1113,13 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
 #' @param gene_description gene descriptions df with Gene and WangGeneID columns
 #' @param anno character vector mapping numeric cluster index to cell type name
 #' @param palette character vector of colors (one per cluster)
+#' @param level_order integer vector of cluster numbers in the same order as anno
+#'   (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)). Required when anno is not
+#'   indexed directly by cluster number.
 #' @param title optional plot title
 
 plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
-                                    palette, title = NULL) {
+                                    palette, level_order = NULL, title = NULL) {
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
@@ -1125,6 +1128,17 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
       fdr < 0.05  ~ "*",
       TRUE        ~ ""
     )
+  }
+
+  if (!is.null(level_order)) {
+    anno_lookup <- setNames(anno, as.character(level_order))
+  } else {
+    anno_lookup <- setNames(anno, as.character(seq_along(anno)))
+  }
+
+  .to_celltype <- function(x) {
+    num <- as.character(as.numeric(gsub("cluster_", "", as.character(x))))
+    unname(anno_lookup[num])
   }
 
   plot_df <- plotExpression(
@@ -1137,7 +1151,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     ncol          = 1
   )$data %>%
     mutate(
-      X = anno[as.numeric(gsub("cluster_", "", as.character(X)))],
+      X = .to_celltype(X),
       X = factor(X, levels = rev(anno))
     )
 
@@ -1155,7 +1169,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     mutate(
       stars   = fdr_to_stars(FDR),
       Feature = WangGeneID,
-      X       = anno[as.numeric(gsub("cluster_", "", as.character(cluster)))]
+      X       = .to_celltype(cluster)
     ) %>%
     filter(stars != "") %>%
     left_join(y_max_df, by = c("Feature", "X"))
