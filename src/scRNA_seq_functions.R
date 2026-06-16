@@ -1312,3 +1312,67 @@ plot_pseudotime_paths <- function(sce, pseudo_mat, goi, gene_description,
       panel.spacing    = unit(0.8, "lines")
     )
 }
+
+
+# plot_tsne ---------------------------------------------------------------
+#' @name plot_tsne
+#' @description ggplot2 scatter plot of TSNE coordinates with optional cluster
+#'   text labels. Mirrors plotTSNE() aesthetics (black background, no axes).
+#' @param df data frame with columns tsne1, tsne2, and any metadata columns
+#' @param color_col column name in df to map to point color
+#' @param label_col column name in df with cell type labels to display at
+#'   cluster medians. If NULL, no text is drawn.
+#' @param palette optional named character vector of colors passed to
+#'   scale_color_manual(). If NULL, ggplot2 default colors are used.
+#' @param point_size point size (default 0.05)
+#' @param text_color color for cluster label text (default "red")
+#' @param text_size size for cluster label text (default 3)
+#' @param title optional plot title
+
+plot_tsne <- function(df,
+                      color_col,
+                      label_col  = NULL,
+                      palette    = NULL,
+                      point_size = 0.05,
+                      text_color = "red",
+                      text_size  = 3,
+                      title      = NULL) {
+
+  p <- ggplot(df, aes(x = tsne1, y = tsne2, color = .data[[color_col]])) +
+    geom_point(size = point_size, stroke = 0) +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    labs(color = color_col, title = title) +
+    theme_classic() +
+    theme(
+      panel.background  = element_rect(fill = "black", color = NA),
+      plot.background   = element_rect(fill = "black", color = NA),
+      axis.title        = element_blank(),
+      axis.text         = element_blank(),
+      axis.ticks        = element_blank(),
+      axis.line         = element_blank(),
+      legend.background = element_rect(fill = "black"),
+      legend.text       = element_text(color = "white"),
+      legend.title      = element_text(color = "white"),
+      plot.title        = element_text(color = "white")
+    )
+
+  if (!is.null(palette))
+    p <- p + scale_color_manual(values = palette)
+
+  if (!is.null(label_col)) {
+    label_df <- df %>%
+      group_by(.data[[label_col]]) %>%
+      summarise(tsne1 = median(tsne1), tsne2 = median(tsne2), .groups = "drop") %>%
+      rename(.label = all_of(label_col))
+
+    p <- p + geom_text(
+      data        = label_df,
+      aes(x = tsne1, y = tsne2, label = .label),
+      color       = text_color,
+      size        = text_size,
+      inherit.aes = FALSE
+    )
+  }
+
+  p
+}
