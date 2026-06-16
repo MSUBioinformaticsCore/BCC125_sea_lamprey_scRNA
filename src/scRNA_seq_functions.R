@@ -881,10 +881,14 @@ plot_marker_overlap_heatmap <- function(known_markers, test_genes,
 #' @param palette character vector of colors (one per cluster)
 #' @param label_col colData column for x-axis grouping; accepts a column name
 #'   (character) or column number (integer index into colData). Default "label".
+#' @param level_order integer vector of cluster numbers in the same order as anno
+#'   (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)). Required when anno is not
+#'   indexed directly by cluster number.
 #' @param title optional plot title
 
 plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
-                             label_col = "label", ncol = 1, title = NULL) {
+                             label_col = "label", level_order = NULL,
+                             ncol = 1, title = NULL) {
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
@@ -893,6 +897,18 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
       fdr < 0.05  ~ "*",
       TRUE        ~ ""
     )
+  }
+
+  # build a named lookup: cluster number → cell type label
+  if (!is.null(level_order)) {
+    anno_lookup <- setNames(anno, as.character(level_order))
+  } else {
+    anno_lookup <- setNames(anno, as.character(seq_along(anno)))
+  }
+
+  .to_celltype <- function(x) {
+    num <- as.character(as.numeric(gsub("cluster_", "", as.character(x))))
+    unname(anno_lookup[num])
   }
 
   if (is.numeric(label_col)) label_col <- names(colData(sce))[label_col]
@@ -911,7 +927,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
     ncol          = 1
   )$data %>%
     mutate(
-      X = anno[as.numeric(gsub("cluster_", "", as.character(X)))],
+      X = .to_celltype(X),
       X = factor(X, levels = anno)
     )
 
@@ -929,7 +945,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
     mutate(
       stars   = fdr_to_stars(FDR),
       Feature = WangGeneID,
-      X       = anno[as.numeric(gsub("cluster_", "", as.character(cluster)))]
+      X       = .to_celltype(cluster)
     ) %>%
     filter(stars != "") %>%
     left_join(y_max_df, by = c("Feature", "X"))
