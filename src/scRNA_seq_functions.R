@@ -1247,6 +1247,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
 
 plot_expr_proportion <- function(sce,
                                   gene,
+                                  gene_symbol  = NULL,
                                   celltype_col = "celltype",
                                   batch_col    = "batch",
                                   assay_name   = "counts",
@@ -1281,14 +1282,15 @@ plot_expr_proportion <- function(sce,
     scale_y_continuous(labels = scales::percent_format(),
                        limits = c(0, 1.20),
                        breaks = seq(0, 1, by = 0.25)) +
-    labs(title = paste("Proportion of cells expressing", gene),
+    labs(title = paste("Proportion of cells expressing",
+                       if (!is.null(gene_symbol)) gene_symbol else gene),
          x     = "Batch",
          y     = "% cells expressing",
          fill  = "Batch") +
     theme_bw(base_size = 8) +
     theme(axis.text.x     = element_text(angle = 45, hjust = 1, size = 8),
           strip.text       = element_text(size = 8),
-          plot.title       = element_text(size = 8),
+          plot.title       = element_text(size = 8, face = "italic"),
           legend.position  = "none")
 }
 
