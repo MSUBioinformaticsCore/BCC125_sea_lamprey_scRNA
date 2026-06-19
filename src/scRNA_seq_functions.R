@@ -1208,7 +1208,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
                  linewidth = 0.3, outlier.shape = NA) +
     geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
     geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
-              inherit.aes = FALSE, size = 2.8, vjust = 0, fontface = "bold",
+              inherit.aes = FALSE, size = 2.8, vjust = 0.5, fontface = "bold",
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
     coord_flip(clip = "off", ylim = c(0, NA)) +
