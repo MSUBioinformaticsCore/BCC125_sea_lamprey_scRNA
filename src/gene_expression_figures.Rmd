@@ -250,7 +250,7 @@ ggsave(paste0(results_dir, "/Fig12_WNT_pseudotime.png"), width = 5, height = 5.5
 
 ### Fig.14 Chr 81 genes 
 
-```{r, fig.width=7, fig.height=6}
+```{r, fig.width=7.5, fig.height=8}
 id_oi = c("LOC116957683",
           "LOC116957684",
           "LOC116957694",
@@ -281,14 +281,14 @@ plot_violin_goi(sce              = combined.sce,
                 label_col        = "label",
                 level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
                 title            = NULL,
-                ncol             = 3)
+                ncol             = 2)
 
-ggsave(paste0(results_dir, "/Fig14_Chr81_genes.png"), width = 7, height = 6)
+ggsave(paste0(results_dir, "/Fig14_Chr81_genes.png"), width = 7.5, height = 8)
 ```
 
 ### Fig. S6: CUDZ1 genes
 
-```{r, fig.width=7, fig.height=9}
+```{r, fig.width=7.5, fig.height=8}
 cuzd1_genes <- c(
   "CUZD1", "CUZD1.1", "CUZD1.10", "CUZD1.11", "CUZD1.12",
   "CUZD1.13", "CUZD1.14", "CUZD1.15", "CUZD1.16", "CUZD1.2",
@@ -307,7 +307,7 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/S6_CUDZ1_genes.png"), width = 7, height = 8)
+ggsave(paste0(results_dir, "/S6_CUDZ1_genes.png"), width = 7.5, height = 8)
 ```
 ### S7: DDX4
 
@@ -325,7 +325,7 @@ plot_violin_goi_single(sce              = combined.sce,
 ggsave(paste0(results_dir, "/S7_DDX4.png"), width = 5, height = 3)
 ```
 
-### S8
+### S8: PIWIL1
 
 ```{r, fig.width=5, fig.height=3}
 plot_violin_goi_single(sce              = combined.sce,
@@ -359,7 +359,7 @@ ggsave(paste0(results_dir, "/S9_SYCP3.png"), width = 5, height = 3)
 
 ### S11
 
-```{r, fig.width=7, fig.height=5}
+```{r, fig.width=7.5, fig.height=5}
 fig_s11_genes <- c(
   "S100A1", "CXCR4", "RBPMS", "BOLL", "FOXL2", "SOX18"
 )
@@ -375,12 +375,12 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/S11_genes.png"), width = 7, height = 5)
+ggsave(paste0(results_dir, "/S11_genes.png"), width = 7.5, height = 5)
 ```
 
 ### S16: WNT5 genes all cells
 
-```{r, fig.width=7, fig.height=5}
+```{r, fig.width=7.5, fig.height=5}
 wnt5_genes <- c(
   "WNT5B", "WNT5B.2", "WNT5B.3", "WNT5B.1", "WNT5A-1"
 )
@@ -397,12 +397,12 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/S16_WTN5_all_cells_genes.png"), width = 7, height = 5)
+ggsave(paste0(results_dir, "/S16_WTN5_all_cells_genes.png"), width = 7.5, height = 5)
 ```
 
 ### S17: Immune/development genes
 
-```{r, fig.width=7, fig.height=8}
+```{r, fig.width=7.5, fig.height=8}
 immune_dev_genes <- c(
   "PFN2.1", "MMP19", "IQCG", "IGF1", "ALOX5", "IQUB",
   "STC2", "RPA1", "IGF1R", "MNS1", "RPA1.1", "PFN2", "IGFBP5"
@@ -419,12 +419,12 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/S17_immune_genes.png"), width = 7, height = 8)
+ggsave(paste0(results_dir, "/S17_immune_genes.png"), width = 7.5, height = 8)
 ```
 
 ### S18: growth factors
 
-```{r, fig.width=7, fig.height=6}
+```{r, fig.width=7.5, fig.height=6}
 growth_factor_genes <- c(
   "IGF1R", "IGF1R.1", "GNRH2", "IGF1-1", "IGF1", "GNRHR",
   "GNRHR2", "GNRHR.1", "GNRH2.1", "IGF1R.2"
@@ -441,12 +441,12 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/S18_growth_factor_genes.png"), width = 7, height = 6)
+ggsave(paste0(results_dir, "/S18_growth_factor_genes.png"), width = 7.5, height = 6)
 ```
 
 ### S19: TGFB genes
 
-```{r, fig.width=7, fig.height=8}
+```{r, fig.width=7.5, fig.height=8}
 tgfb_genes <- c(
   "TGFBR2", "SMAD3", "SMAD6", "BMPR2", "BRINP1", "BMP2",
   "SNIP1", "BRINP3", "TGFB2", "BMPER", "KCP", "BMP2K"
@@ -463,12 +463,12 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/S19_tgfb_genes.png"), width = 7, height = 8)
+ggsave(paste0(results_dir, "/S19_tgfb_genes.png"), width = 7.5, height = 8)
 ```
 
 ### S20: Sex steriod genes
 
-```{r, fig.width=7, fig.height=8}
+```{r, fig.width=7.5, fig.height=8}
 sex_steroid_genes <- c(
   "RERG", "HSD3B7", "ESRRG", "RERG-1", "CYP17A1", "ESR2.1",
   "BCA+E7903R3", "MEDAG", "BCAR3", "ESR2", "NR5A1", "ESR2.2",
@@ -486,7 +486,95 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/S20_sex_steroid_genes.png"), width = 7, height = 8)
+ggsave(paste0(results_dir, "/S20_sex_steroid_genes.png"), width = 7.5, height = 8)
+```
+
+### S21: percent cells expressing SOX9
+
+```{r, fig.width=7, fig.height=7}
+
+anno_order = c(
+  "1. Fibroblasts (migrating)",
+  "2. Mesonephric cells",
+  "3. Granulosa cells (migrating)",
+  "4. Granulosa cells",
+  "5. Oogonia/Oocytes",
+  "6. Endothelial cells",
+  "7. Primordial germ cells (migrating)",
+  "8. Erythrocytes",
+  "9. Pre-granulosa cells (migrating)",
+  "10. Leukocytes",
+  "11. Hemopoietic stem cells",
+  "12. Podocytes",
+  "13. Macrophages",
+  "14. Pre-granulosa cells (mitotic)",
+  "15. Immune cells (migrating, mitotic)",
+  "16. Spermatocytes (cytokinetic)",
+  "17. Male germ cells (migrating)",
+  "18. Spermatocytes (apoptotic)",
+  "19. Spermatocytes (GPCR-activated)"
+)
+
+combined.sce$CellType <- anno_order[as.integer(as.character(combined.sce$label))]
+
+batch_map <- c(
+  "TF_C00004337" = "Female",
+  "TM_C00004374" = "Male",
+  "UND1_C00004336" = "UND1",
+  "UND2_C00004362" = "UND2"
+)
+
+combined.sce$Sample <- batch_map[combined.sce$batch]
+
+plot_expr_proportion( combined.sce,
+                      gene = "LOC116951502",
+                      gene_symbol  = "SOX9",
+                      celltype_col = "CellType",
+                      batch_col    = "Sample",
+                      assay_name   = "counts",
+                      threshold    = 0,
+                      ncol         = 3,
+                      celltype_order = anno_order)
+
+ggsave(paste0(results_dir, "/S21_SOX9_percent.png"), width = 7, height = 7)
+
+plot_expr_proportion( combined.sce,
+                      gene     = "LOC103091769",
+                      gene_symbol    = "sox9-a",
+                      celltype_col   = "CellType",
+                      batch_col      = "Sample",
+                      assay_name     = "counts",
+                      threshold      = 0,
+                      ncol           = 3,
+                      celltype_order = anno_order)
+
+ggsave(paste0(results_dir, "/S21_sox9-a_percent.png"), width = 7, height = 7)
+```
+
+
+```{r, fig.width=5, fig.height=3}
+plot_violin_goi_single(sce              = combined.sce,
+                       markers          = scatter_markers,
+                       goi              = "sox9-a",
+                       gene_description = gene_descriptions,
+                       anno             = anno,
+                       palette          = publication_palette,
+                       title            = "sox9-a",
+                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+
+ggsave(paste0(results_dir, "/S21_sox9-a_violin.png"), width = 5, height = 3)
+
+plot_violin_goi_single(sce              = combined.sce,
+                       markers          = scatter_markers,
+                       goi              = "SOX9",
+                       gene_description = gene_descriptions,
+                       anno             = anno,
+                       palette          = publication_palette,
+                       title            = "SOX9",
+                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+
+ggsave(paste0(results_dir, "/S21_SOX9_violin.png"), width = 5, height = 3)
+
 ```
 
 ### S22: Germ cell fate genes
@@ -507,5 +595,5 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 1)
 
-ggsave(paste0(results_dir, "/S22_germ_cell_fate_genes.png"), width = 6, height = 5)
+ggsave(paste0(results_dir, "/S22_germ_cell_fate_genes.png"), width = 7, height = 5)
 ```
