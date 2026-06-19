@@ -1,0 +1,511 @@
+---
+title: "Gene expression figures"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(RColorBrewer)
+library(readxl)
+library(monocle3)
+library(batchelor)
+library(DT)
+library(TSCAN)
+library(rtracklayer)
+library(BiocSingular)
+library(ggforce)
+library(ggraph)
+library(tidygraph)
+library(scatterpie)
+library(ggrepel)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir = paste0(params$project_dir, "/results/20260615")
+data_dir    = paste0(params$project_dir, "/data")
+```
+
+```{r, echo=FALSE}
+# load pre-computed objects for rendering
+Robject_dir          = paste0(params$project_dir, "/results/20260312/Robjects")
+combined.sce         = readRDS(paste0(Robject_dir, "/combined.sce.Rds"))
+all.sex.sce          = readRDS(paste0(Robject_dir, "/no.support.sex.sce.Rds"))
+pseudo               = readRDS(paste0(Robject_dir, "/no.support.merged.sex.pseudo.Rds"))
+scatter_markers      = read.csv(paste0(results_dir, "/scatter_cluster_marker_genes.csv"),row.names = 1)
+germ_scatter_markers = read.csv(paste0(results_dir, "/no.support_sex_scatter_cluster_marker_genes.csv"), row.names = 1)
+cell_meta            = read.delim(paste0(results_dir, "/cell_metadata.tsv"))
+gene_descriptions    = read.csv(paste0(results_dir, "/gene_descritption.csv"))
+pseudo_de            = read.csv(paste0(results_dir, "/no.support_sex_pseudotime_de_genes.csv"), row.names = 1)
+```
+
+### Build combined (uncorrected) sex cell SCE
+
+```{r}
+all.sex.dec  <- lapply(all.sex.sce, modelGeneVar)
+
+universe     <- Reduce(intersect, lapply(all.sex.sce, rownames))
+all.sex.sce2 <- lapply(all.sex.sce, "[", i = universe,)
+all.sex.dec2 <- lapply(all.sex.dec, "[", i = universe,)
+
+all.sex.sce2[["TM_C00004374"]]@colData$cluster = "noclust"
+
+combined.sex.sce <- do.call(cbind, all.sex.sce2)
+```
+
+### Add meta data
+
+```{r}
+# set coldata
+rownames(cell_meta) = cell_meta$barcode
+cell_meta_ordered <- cell_meta[colnames(combined.sce), , drop = FALSE]
+colData(combined.sce) <- DataFrame(cell_meta_ordered)
+
+germ_cell_meta = 
+  cell_meta %>%
+  filter(!is.na(germ.cluster)) 
+
+germ_cell_meta_ordered <- germ_cell_meta[colnames(combined.sex.sce), , drop = FALSE]
+colData(combined.sex.sce) <- DataFrame(germ_cell_meta_ordered)
+
+
+# set rowdata
+rownames(gene_descriptions) = gene_descriptions$Gene
+gene_descriptions_ordered = gene_descriptions[rownames(combined.sce), , drop = FALSE]
+rowData(combined.sce) = DataFrame(gene_descriptions_ordered)
+rowData(combined.sex.sce) = DataFrame(gene_descriptions_ordered)
+```
+
+### Set cluster annotations and pallettes
+
+All cells
+```{r}
+anno = c(
+  "1. Fibroblasts (migrating)",
+  "2. Mesonephric cells",
+  "3. Granulosa cells (migrating)",
+  "4. Granulosa cells",
+  "6. Endothelial cells",
+  "8. Erythrocytes",
+  "9. Pre-granulosa cells (migrating)",
+  "10. Leukocytes",
+  "11. Hemopoietic stem cells",
+  "12. Podocytes",
+  "13. Macrophages",
+  "14. Pre-granulosa cells (mitotic)",
+  "15. Immune cells (migrating, mitotic)",
+  "7. Primordial germ cells (migrating)",
+  "5. Oogonia/Oocytes",
+  "17. Male germ cells (migrating)",
+  "16. Spermatocytes (cytokinetic)",
+  "18. Spermatocytes (apoptotic)",
+  "19. Spermatocytes (GPCR-activated)"
+)
+
+level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)
+combined.sce$label <- factor(combined.sce$label, levels = level_order)
+
+# Define a visible light blue and a deep dark blue from the Blues palette
+start_blue <- brewer.pal(9, "Blues")[3] # #9ECAE1 (skips the two whitest shades)
+end_blue   <- brewer.pal(9, "Blues")[9] # #08306B
+
+# Generate 12 sequential shades starting from the darker base
+color1_shades <- colorRampPalette(c(start_blue, end_blue))(13)
+
+# Generate 6 distinct shades of Oranges
+# Define custom boundaries for Orange to completely block the brown tones
+start_org     <- "#FDBE85" # A highly visible, crisp light orange
+end_org       <- "#A62B00" # A rich, intense burnt orange/terracotta (replaces the brown)
+
+# Generate your 7 distinct, non-brown orange shades
+color2_shades <- colorRampPalette(c(start_org, end_org))(6)
+
+
+# Merge into your publication-ready master palette
+publication_palette <- c(color1_shades, color2_shades)
+publication_palette  <- setNames(publication_palette, anno)
+```
+
+Germ cells 
+
+```{r}
+
+# broad annotations (15 sex cell clusters)
+germ_anno = c(
+  "PGC",
+  "Cyst.epithelial.cells",
+  "FGC.migrating",
+  "Oogonia.stem.cells",
+  "Oogonia",
+  "Oocytes",
+  "MGC.SPC.group1",
+  "MGC.SPC.group2",
+  "MGC.SPC.group3",
+  "SPC.cytokinetic"
+)
+
+combined.sex.sce$germ.broad.CellType <- factor(combined.sex.sce$germ.broad.CellType, levels = germ_anno)
+
+# 1. Family One: 2 Shades (Gold/Amber)
+# Custom anchors to guarantee a clean, high-contrast 2-step jump
+color1_shades <- c("#FEC44F", "#D95F02")
+
+# 2. Family Two: 4 Shades (Blues - skipping white/light tones)
+start_blue    <- brewer.pal(9, "Blues")[4] # Clear light-medium blue
+end_blue      <- brewer.pal(9, "Blues")[8] # Rich dark blue
+color2_shades <- colorRampPalette(c(start_blue, end_blue))(4)
+
+# 3. Family Three: 4 Shades (Greens - skipping white/light tones)
+start_green   <- brewer.pal(9, "Greens")[4] # Vibrant light-medium green
+end_green     <- brewer.pal(9, "Greens")[8] # Deep forest green
+color3_shades <- colorRampPalette(c(start_green, end_green))(4)
+
+# Combine into your final 10-color publication palette
+three_group_palette <- c(color1_shades, color3_shades, color2_shades)
+three_group_palette  <- setNames(three_group_palette, germ_anno)
+```
+
+### Fig.1: All cell tSNE
+
+```{r, fig.width=8, fig.height=5}
+level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)
+cell_meta$label = factor(cell_meta$label, levels = level_order)
+
+cell_meta <- cell_meta %>%
+  mutate(CellType = anno[as.integer(label)])  
+
+plot_tsne(df           = cell_meta,
+          color_col    = "CellType",
+          label_col    = "label",
+          palette      = publication_palette,
+          color_levels = anno,
+          point_size   = 0.5,
+          text_color   = "black",
+          bg_color     = "white",
+          text_size    = 2)
+
+ggsave(paste0(results_dir, "/Fig1_tsne.png"), width = 8, height = 5)
+```
+
+### Fig. 10: WNT Genes in germ cell clusters
+
+```{r, fig.width=4, fig.height=4}
+goi = c("WNT5B", "WNT5A-1", "WNT5B.1")
+
+plot_violin_goi_named(sce              = combined.sex.sce,
+                      markers          = germ_scatter_markers, 
+                      goi              = goi, 
+                      gene_description = gene_description, 
+                      anno             = germ_anno,
+                      palette          = three_group_palette,
+                      cluster_col      = "germ.broad.CellType",
+                      marker_col       = "cluster",
+                      title            = NULL
+                      )
+
+ggsave(paste0(results_dir, "/Fig10_WNT_germ_cell_clusters.png"), width = 4, height = 4)
+```
+
+### Fig.12 Wnt5 pseudotime
+
+```{r, fig.width=5, fig.height=5.5}
+pseudo_mat  <- pathStat(pseudo$ordering)
+goi = c("WNT5A-1", "WNT5B", "WNT5B.1", "WNT5B.2", "WNT5B.3")
+
+plot_pseudotime_paths(sce = combined.sex.sce, 
+                      pseudo_mat = pseudo_mat, 
+                      goi = goi, 
+                      gene_description = gene_descriptions, 
+                      paths = c("Oocytes", "SPC.cytokinetic"),
+                      tradeseq_res = pseudo_de,
+                      title = NULL)
+
+ggsave(paste0(results_dir, "/Fig12_WNT_pseudotime.png"), width = 5, height = 5.5)
+```
+
+### Fig.14 Chr 81 genes 
+
+```{r, fig.width=7, fig.height=6}
+id_oi = c("LOC116957683",
+          "LOC116957684",
+          "LOC116957694",
+          "LOC116957681",
+          "LOC116957685",
+          "LOC116957682",
+          "LOC116957686",
+          "LOC116957687",
+          "LOC116957688",
+          "LOC116957695",
+          "LOC116957689",
+          "LOC116957690",
+          "LOC116957691",
+          "LOC116957693",
+          "LOC116957692")
+
+goi = 
+  gene_descriptions %>%
+  filter(Gene %in% id_oi) %>%
+  pull(WangGeneID)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = goi,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 3)
+
+ggsave(paste0(results_dir, "/Fig14_Chr81_genes.png"), width = 7, height = 6)
+```
+
+### Fig. S6: CUDZ1 genes
+
+```{r, fig.width=7, fig.height=9}
+cuzd1_genes <- c(
+  "CUZD1", "CUZD1.1", "CUZD1.10", "CUZD1.11", "CUZD1.12",
+  "CUZD1.13", "CUZD1.14", "CUZD1.15", "CUZD1.16", "CUZD1.2",
+  "CUZD1.3", "CUZD1.4", "CUZD1.5", "CUZD1.6", "CUZD1.7",
+  "CUZD1.8", "CUZD1.9"
+)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = cuzd1_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/S6_CUDZ1_genes.png"), width = 7, height = 8)
+```
+### S7: DDX4
+
+```{r, fig.width=5, fig.height=3}
+plot_violin_goi_single(sce              = combined.sce,
+                       markers          = scatter_markers,
+                       goi              = "DDX4",
+                       gene_description = gene_descriptions,
+                       anno             = anno,
+                       palette          = publication_palette,
+                       title            = "DDX4",
+                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+
+  
+ggsave(paste0(results_dir, "/S7_DDX4.png"), width = 5, height = 3)
+```
+
+### S8
+
+```{r, fig.width=5, fig.height=3}
+plot_violin_goi_single(sce              = combined.sce,
+                       markers          = scatter_markers,
+                       goi              = "PIWIL1",
+                       gene_description = gene_descriptions,
+                       anno             = anno,
+                       palette          = publication_palette,
+                       title            = "PIWIL1",
+                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+
+  
+ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3)
+```
+
+### S9: SYCP3
+
+```{r, fig.width=5, fig.height=3}
+plot_violin_goi_single(sce              = combined.sce,
+                       markers          = scatter_markers,
+                       goi              = "SYCP3",
+                       gene_description = gene_descriptions,
+                       anno             = anno,
+                       palette          = publication_palette,
+                       title            = "SYCP3",
+                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+
+  
+ggsave(paste0(results_dir, "/S9_SYCP3.png"), width = 5, height = 3)
+```
+
+### S11
+
+```{r, fig.width=7, fig.height=5}
+fig_s11_genes <- c(
+  "S100A1", "CXCR4", "RBPMS", "BOLL", "FOXL2", "SOX18"
+)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = fig_s11_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/S11_genes.png"), width = 7, height = 5)
+```
+
+### S16: WNT5 genes all cells
+
+```{r, fig.width=7, fig.height=5}
+wnt5_genes <- c(
+  "WNT5B", "WNT5B.2", "WNT5B.3", "WNT5B.1", "WNT5A-1"
+)
+
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = wnt5_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/S16_WTN5_all_cells_genes.png"), width = 7, height = 5)
+```
+
+### S17: Immune/development genes
+
+```{r, fig.width=7, fig.height=8}
+immune_dev_genes <- c(
+  "PFN2.1", "MMP19", "IQCG", "IGF1", "ALOX5", "IQUB",
+  "STC2", "RPA1", "IGF1R", "MNS1", "RPA1.1", "PFN2", "IGFBP5"
+)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = immune_dev_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/S17_immune_genes.png"), width = 7, height = 8)
+```
+
+### S18: growth factors
+
+```{r, fig.width=7, fig.height=6}
+growth_factor_genes <- c(
+  "IGF1R", "IGF1R.1", "GNRH2", "IGF1-1", "IGF1", "GNRHR",
+  "GNRHR2", "GNRHR.1", "GNRH2.1", "IGF1R.2"
+)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = growth_factor_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/S18_growth_factor_genes.png"), width = 7, height = 6)
+```
+
+### S19: TGFB genes
+
+```{r, fig.width=7, fig.height=8}
+tgfb_genes <- c(
+  "TGFBR2", "SMAD3", "SMAD6", "BMPR2", "BRINP1", "BMP2",
+  "SNIP1", "BRINP3", "TGFB2", "BMPER", "KCP", "BMP2K"
+)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = tgfb_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/S19_tgfb_genes.png"), width = 7, height = 8)
+```
+
+### S20: Sex steriod genes
+
+```{r, fig.width=7, fig.height=8}
+sex_steroid_genes <- c(
+  "RERG", "HSD3B7", "ESRRG", "RERG-1", "CYP17A1", "ESR2.1",
+  "BCA+E7903R3", "MEDAG", "BCAR3", "ESR2", "NR5A1", "ESR2.2",
+  "BCAR1-1", "ESRRG-2", "ESRRG-1"
+)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = sex_steroid_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/S20_sex_steroid_genes.png"), width = 7, height = 8)
+```
+
+### S22: Germ cell fate genes
+
+```{r, fig.width=7, fig.height=5}
+germ_fate_genes <- c(
+  "CDK9", "SRCAP", "PRDM1", "PRDM1.1"
+)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = scatter_markers,
+                goi              = germ_fate_genes,
+                gene_description = gene_descriptions,
+                anno             = anno,
+                palette          = publication_palette,
+                label_col        = "label",
+                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                title            = NULL,
+                ncol             = 1)
+
+ggsave(paste0(results_dir, "/S22_germ_cell_fate_genes.png"), width = 6, height = 5)
+```
