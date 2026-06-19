@@ -218,7 +218,7 @@ saveRDS(pseudo, file = paste0(results_dir, "/no.support.merged.sex.pseudo.Rds"))
 
 Top: Pie charts show the proportion of cells from each sample per node. Bottom: Node color corresponds to pseudotim.e
 
-```{r, fig.width=8, fig.height=7}
+```{r, fig.width=7, fig.height=7}
 meta_df = as.data.frame(colData(merged.sex.sce))
 
 sample_tally =
@@ -279,22 +279,24 @@ gr_plot =
     )
   ) +
   guides(fill = guide_legend(keywidth = .8, keyheight = .8)) +
-  geom_node_text(aes(label = name), color = "black") +
+  geom_node_text(aes(label = name), color = "black", size = 2.6) +
   theme_void(base_size = 8) +
   theme(
     legend.position    = "left",
     legend.justification = "center",
     legend.box.just    = "center",
     legend.title       = element_text(size = 8),
-    legend.text        = element_text(size = 8)
-  )
+    legend.text        = element_text(size = 8),
+    plot.tag           = element_text(size = 12)
+  ) + 
+   labs(tag = "A")
 
 gr_pseudo =
   ggraph(layout_data) +
   geom_edge_link() +
-  geom_node_point(aes(color = mean_pseudo), size = 13) +
+  geom_node_point(aes(color = mean_pseudo), size = 9) +
   scale_color_viridis_c(option = "viridis") +
-  geom_node_text(aes(label = name), vjust = .75, size = 2.8, color = "red") +
+  geom_node_text(aes(label = name), vjust = .75, size = 2.6, color = "red") +
   scale_x_continuous(expand = expansion(mult = 0.15)) +
   scale_y_continuous(expand = expansion(mult = 0.15)) +
   theme_void(base_size = 8) +
@@ -303,12 +305,14 @@ gr_pseudo =
     legend.justification = "center",
     legend.box.just    = "center",
     legend.title       = element_text(size = 8),
-    legend.text        = element_text(size = 8)
-  )
+    legend.text        = element_text(size = 8),
+    plot.tag           = element_text(size = 12)
+  ) +
+  labs(tag = "B")
 
 (gr_plot + coord_fixed()) / (gr_pseudo + coord_fixed())
 
-ggsave(file = paste0(results_dir, "/germ.only_pseudo_mst.pdf"), width = 8, height = 7)
+ggsave(file = paste0(results_dir, "/germ.only_pseudo_mst.pdf"), width = 7, height = 7)
 ```
 
 # Pseudotime-associated genes
