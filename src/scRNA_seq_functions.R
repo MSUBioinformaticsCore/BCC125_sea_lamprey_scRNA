@@ -1102,7 +1102,6 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
               inherit.aes = FALSE, size = 2.8, vjust = 0, fontface = "bold",
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
-    scale_x_discrete(labels = function(x) sub("^(\\d+)\\..*", "\\1", x)) +
     coord_cartesian(clip = "off", ylim = c(0, NA)) +
     facet_wrap(~ Feature, ncol = ncol, scales = "free_y") +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
@@ -1110,7 +1109,7 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
     theme(
       strip.background = element_rect(fill = "#dce8ef", color = NA),
       strip.text       = element_text(color = "#2e4a5a", face = "bold.italic", size = 8),
-      axis.text.x      = element_text(color = "#3a3a3a", size = 8),
+      axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
       axis.text.y      = element_text(color = "#3a3a3a", size = 8),
       axis.title       = element_text(color = "#2e2e2e", size = 8),
