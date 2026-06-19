@@ -906,12 +906,20 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
     anno_lookup <- setNames(anno, as.character(seq_along(anno)))
   }
 
+  if (is.numeric(label_col)) label_col <- names(colData(sce))[label_col]
+
+  # append cell counts to labels
+  count_tab   <- table(as.character(colData(sce)[[label_col]]))
+  anno_lookup <- setNames(
+    paste0(anno_lookup, " (n=", count_tab[names(anno_lookup)], ")"),
+    names(anno_lookup)
+  )
+  anno_n <- unname(anno_lookup[as.character(if (!is.null(level_order)) level_order else seq_along(anno))])
+
   .to_celltype <- function(x) {
     num <- as.character(as.numeric(gsub("cluster_", "", as.character(x))))
     unname(anno_lookup[num])
   }
-
-  if (is.numeric(label_col)) label_col <- names(colData(sce))[label_col]
 
   goi_loc <- gene_description %>%
     filter(WangGeneID %in% goi) %>%
@@ -928,7 +936,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
   )$data %>%
     mutate(
       X = .to_celltype(X),
-      X = factor(X, levels = anno)
+      X = factor(X, levels = anno_n)
     )
 
   y_max_df <- plot_df %>%
@@ -938,7 +946,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
   expand_df <- plot_df %>%
     group_by(Feature) %>%
     summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
-    mutate(X = anno[1])
+    mutate(X = anno_n[1])
 
   sig_df <- markers %>%
     filter(WangGeneID %in% goi) %>%
@@ -965,7 +973,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
     expand_df <- expand_df %>% mutate(Feature = factor(Feature, levels = gene_order))
   }
 
-  cluster_colors <- setNames(palette[seq_along(anno)], anno)
+  cluster_colors <- setNames(palette[seq_along(anno_n)], anno_n)
 
   ggplot(plot_df, aes(x = X, y = Y)) +
     geom_violin(aes(fill = X, color = after_scale(fill)),
@@ -1028,6 +1036,11 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
     )
   }
 
+  # append cell counts to anno labels
+  count_tab <- table(as.character(colData(sce)[[cluster_col]]))
+  anno_n    <- paste0(anno, " (n=", count_tab[anno], ")")
+  names(anno_n) <- anno
+
   plot_df <- plotExpression(
     sce,
     features      = goi,
@@ -1037,7 +1050,10 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
     x             = cluster_col,
     ncol          = 1
   )$data %>%
-    mutate(X = factor(X, levels = anno))
+    mutate(
+      X = anno_n[as.character(X)],
+      X = factor(X, levels = anno_n)
+    )
 
   y_max_df <- plot_df %>%
     group_by(Feature, X) %>%
@@ -1046,14 +1062,14 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
   expand_df <- plot_df %>%
     group_by(Feature) %>%
     summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
-    mutate(X = anno[1])
+    mutate(X = anno_n[1])
 
   sig_df <- markers %>%
     filter(WangGeneID %in% goi) %>%
     mutate(
       stars   = fdr_to_stars(FDR),
       Feature = WangGeneID,
-      X       = factor(.data[[marker_col]], levels = anno)
+      X       = factor(anno_n[as.character(.data[[marker_col]])], levels = anno_n)
     ) %>%
     filter(stars != "") %>%
     left_join(y_max_df, by = c("Feature", "X"))
@@ -1071,7 +1087,7 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
   sig_df    <- sig_df    %>% mutate(Feature = factor(Feature, levels = gene_order))
   expand_df <- expand_df %>% mutate(Feature = factor(Feature, levels = gene_order))
 
-  cluster_colors <- setNames(palette[seq_along(anno)], anno)
+  cluster_colors <- setNames(palette[seq_along(anno_n)], anno_n)
 
   ggplot(plot_df, aes(x = X, y = Y)) +
     geom_violin(aes(fill = X, color = after_scale(fill)),
@@ -1136,6 +1152,13 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     anno_lookup <- setNames(anno, as.character(seq_along(anno)))
   }
 
+  count_tab   <- table(as.character(colData(sce)[["label"]]))
+  anno_lookup <- setNames(
+    paste0(anno_lookup, " (n=", count_tab[names(anno_lookup)], ")"),
+    names(anno_lookup)
+  )
+  anno_n <- unname(anno_lookup[as.character(if (!is.null(level_order)) level_order else seq_along(anno))])
+
   .to_celltype <- function(x) {
     num <- as.character(as.numeric(gsub("cluster_", "", as.character(x))))
     unname(anno_lookup[num])
@@ -1152,7 +1175,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
   )$data %>%
     mutate(
       X = .to_celltype(X),
-      X = factor(X, levels = rev(anno))
+      X = factor(X, levels = rev(anno_n))
     )
 
   y_max_df <- plot_df %>%
@@ -1162,7 +1185,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
   expand_df <- plot_df %>%
     group_by(Feature) %>%
     summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
-    mutate(X = anno[1])
+    mutate(X = anno_n[length(anno_n)])
 
   sig_df <- markers %>%
     filter(WangGeneID %in% goi) %>%
@@ -1174,7 +1197,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     filter(stars != "") %>%
     left_join(y_max_df, by = c("Feature", "X"))
 
-  cluster_colors <- setNames(palette[seq_along(anno)], anno)
+  cluster_colors <- setNames(palette[seq_along(anno_n)], anno_n)
 
   ggplot(plot_df, aes(x = X, y = Y)) +
     geom_violin(aes(fill = X, color = after_scale(fill)),
