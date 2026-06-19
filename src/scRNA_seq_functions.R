@@ -424,9 +424,11 @@ plot_pseudotime_heatmap <- function(
       na.value = "white",
       limits = c(0, 1)
     ) +
-    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme_minimal(base_size = 8) +
     ggplot2::theme(
       legend.position = "right",
+      legend.title    = ggplot2::element_text(size = 8),
+      legend.text     = ggplot2::element_text(size = 8),
       axis.text.x = ggplot2::element_blank(),
       axis.ticks.x = ggplot2::element_blank(),
       axis.text.y = ggplot2::element_blank(),
@@ -458,16 +460,18 @@ plot_pseudotime_heatmap <- function(
       limits = heatmap_limits
     ) +
     ggplot2::scale_x_discrete(expand = c(0, 0)) +
-    ggplot2::theme_minimal(base_size = 10) +
+    ggplot2::theme_minimal(base_size = 8) +
     ggplot2::theme(
       axis.text.x = ggplot2::element_blank(),
       axis.ticks.x = ggplot2::element_blank(),
       axis.text.y = ggplot2::element_text(
-        size = 7,
+        size = 8,
         color = "black",
         face = "italic",
         family = "sans"
       ),
+      legend.title = ggplot2::element_text(size = 8),
+      legend.text  = ggplot2::element_text(size = 8),
       panel.grid = ggplot2::element_blank(),
       axis.title = ggplot2::element_blank(),
       plot.margin = ggplot2::margin(0, 5, 0, 40)
