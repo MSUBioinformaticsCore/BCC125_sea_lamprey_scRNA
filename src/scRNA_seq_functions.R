@@ -982,16 +982,16 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
                  linewidth = 0.3, outlier.shape = NA) +
     geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
     geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
-              inherit.aes = FALSE, size = 2, vjust = 0, fontface = "bold",
+              inherit.aes = FALSE, size = 2.8, vjust = 0, fontface = "bold",
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
     coord_cartesian(clip = "off", ylim = c(0, NA)) +
     facet_wrap(~ Feature, ncol = ncol, scales = "free_y") +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
-    theme_classic(base_size = 11) +
+    theme_classic(base_size = 8) +
     theme(
       strip.background = element_rect(fill = "#dce8ef", color = NA),
-      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 10),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 8),
       axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
       axis.text.y      = element_text(color = "#3a3a3a"),
@@ -1096,16 +1096,16 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
                  linewidth = 0.3, outlier.shape = NA) +
     geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
     geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
-              inherit.aes = FALSE, size = 3, vjust = 0, fontface = "bold",
+              inherit.aes = FALSE, size = 2.8, vjust = 0, fontface = "bold",
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
     coord_cartesian(clip = "off", ylim = c(0, NA)) +
     facet_wrap(~ Feature, ncol = ncol, scales = "free_y") +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
-    theme_classic(base_size = 11) +
+    theme_classic(base_size = 8) +
     theme(
       strip.background = element_rect(fill = "#dce8ef", color = NA),
-      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 10),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 8),
       axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
       axis.text.y      = element_text(color = "#3a3a3a"),
@@ -1206,12 +1206,12 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
                  linewidth = 0.3, outlier.shape = NA) +
     geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
     geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
-              inherit.aes = FALSE, size = 2, vjust = 0, fontface = "bold",
+              inherit.aes = FALSE, size = 2.8, vjust = 0, fontface = "bold",
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
     coord_flip(clip = "off", ylim = c(0, NA)) +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
-    theme_classic(base_size = 11) +
+    theme_classic(base_size = 8) +
     theme(
       axis.text.x     = element_text(color = "#3a3a3a"),
       axis.ticks.x    = element_blank(),
