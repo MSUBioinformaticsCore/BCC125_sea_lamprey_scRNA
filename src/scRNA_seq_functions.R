@@ -989,7 +989,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
     theme_classic(base_size = 8) +
     theme(
       strip.background = element_rect(fill = "#dce8ef", color = NA),
-      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 8),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold.italic", size = 8),
       axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
       axis.text.y      = element_text(color = "#3a3a3a", size = 8),
@@ -1103,7 +1103,7 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
     theme_classic(base_size = 8) +
     theme(
       strip.background = element_rect(fill = "#dce8ef", color = NA),
-      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 8),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold.italic", size = 8),
       axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
       axis.text.y      = element_text(color = "#3a3a3a", size = 8),
@@ -1220,7 +1220,8 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
       axis.ticks      = element_line(color = "#aaaaaa", linewidth = 0.4),
       legend.title    = element_text(size = 8),
       legend.text     = element_text(size = 8),
-      legend.key.size = unit(0.4, "cm")
+      legend.key.size = unit(0.4, "cm"),
+      plot.title      = element_text(face = "bold.italic", size = 8)
     ) +
     guides(fill = guide_legend(reverse = TRUE))
 }
@@ -1338,7 +1339,14 @@ plot_pseudotime_paths <- function(sce, pseudo_mat, goi, gene_description,
     summarise(fdr_text = paste(label, collapse = "\n"), .groups = "drop") %>%
     dplyr::rename(Gene = WangGeneID)
 
-  path_colors <- setNames(c("#E377C2", "#1F77B4"), paths)
+  path_n      <- pseudo_long %>%
+    group_by(Path) %>%
+    summarise(n = n_distinct(Cell), .groups = "drop") %>%
+    deframe()
+  path_labels <- paste0(paths, " (n=", path_n[paths], ")")
+  path_colors <- setNames(c("#E377C2", "#1F77B4"), path_labels)
+  plot_df     <- plot_df %>%
+    mutate(Path = path_labels[match(Path, paths)])
 
   ggplot(plot_df, aes(x = Pseudotime, y = Expression, color = Path, fill = Path)) +
     geom_smooth(method = "gam", formula = y ~ s(x, bs = "cs"),
@@ -1346,7 +1354,7 @@ plot_pseudotime_paths <- function(sce, pseudo_mat, goi, gene_description,
     geom_text(data = fdr_labels,
               aes(x = Inf, y = Inf, label = fdr_text),
               inherit.aes = FALSE,
-              hjust = 1.05, vjust = 1.2, size = 2.5, color = "grey30",
+              hjust = 1.05, vjust = 1.2, size = 2.8, color = "grey30",
               lineheight = 1.4) +
     scale_color_manual(values = path_colors) +
     scale_fill_manual(values = path_colors) +
@@ -1354,13 +1362,16 @@ plot_pseudotime_paths <- function(sce, pseudo_mat, goi, gene_description,
     facet_wrap(~ Gene, scales = "free_y", ncol = 2) +
     labs(x = "Pseudotime", y = "Log-normalized expression",
          color = "Path", fill = "Path", title = title) +
-    theme_classic(base_size = 11) +
+    theme_classic(base_size = 8) +
     theme(
       strip.background = element_rect(fill = "#dce8ef", color = NA),
-      strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 9),
-      axis.text        = element_text(color = "#3a3a3a"),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold.italic", size = 8),
+      axis.text        = element_text(color = "#3a3a3a", size = 8),
+      axis.title       = element_text(size = 8),
       axis.line        = element_line(color = "#aaaaaa", linewidth = 0.4),
       axis.ticks       = element_line(color = "#aaaaaa", linewidth = 0.4),
+      legend.title     = element_text(size = 8),
+      legend.text      = element_text(size = 8),
       legend.position  = "top",
       panel.spacing    = unit(0.8, "lines")
     )
