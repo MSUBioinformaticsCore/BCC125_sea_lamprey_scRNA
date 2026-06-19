@@ -381,7 +381,8 @@ test_pseudo_SYMBOL_list <-
   dplyr::summarise(SYMBOL = list(SYMBOL), .groups = "drop") %>%
   tibble::deframe()
 
-p_list = list()
+p_list      <- list()
+n_cells_list <- list()
 for (p in names(test_pseudo_SYMBOL_list)) {
   gene_ids = test_pseudo_SYMBOL_list[[p]]
 
@@ -394,6 +395,8 @@ for (p in names(test_pseudo_SYMBOL_list)) {
     rownames_to_column(var = "Barcode") %>%
     filter(!is.na(.data[[path_name]])) %>%
     pull(Barcode)
+
+  n_cells_list[[p]] <- length(cell_subset)
 
   p_list[[p]] =
     plot_pseudotime_heatmap(combined.sex.sce,
@@ -409,18 +412,23 @@ for (p in names(test_pseudo_SYMBOL_list)) {
 ### PGC → SPC.cytokinetic path
 
 ```{r, fig.width=7, fig.height=4}
-make_heatmap_pair <- function(p_list, path_name) {
+make_heatmap_pair <- function(p_list, path_name, n_cells_list = NULL) {
   up_name   <- paste0(path_name, ".Upregulated")
   down_name <- paste0(path_name, ".Downregulated")
 
+  up_label   <- if (!is.null(n_cells_list))
+    paste0(up_name,   " (n=", n_cells_list[[up_name]],   ")") else up_name
+  down_label <- if (!is.null(n_cells_list))
+    paste0(down_name, " (n=", n_cells_list[[down_name]], ")") else down_name
+
   title_up   <- ggplot2::ggplot() +
-    ggplot2::labs(title = up_name) + ggplot2::theme_void() +
-    ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+    ggplot2::labs(title = up_label) + ggplot2::theme_void() +
+    ggplot2::theme(plot.title = ggplot2::element_text(size = 8, face = "bold"),
                    plot.margin = ggplot2::margin(t = 10))
 
   title_down <- ggplot2::ggplot() +
-    ggplot2::labs(title = down_name) + ggplot2::theme_void() +
-    ggplot2::theme(plot.title = ggplot2::element_text(size = 12, face = "bold"),
+    ggplot2::labs(title = down_label) + ggplot2::theme_void() +
+    ggplot2::theme(plot.title = ggplot2::element_text(size = 8, face = "bold"),
                    plot.margin = ggplot2::margin(t = 10))
 
   col1 <- (title_up   / p_list[[up_name]][[1]]   / p_list[[up_name]][[2]]) +
@@ -433,14 +441,14 @@ make_heatmap_pair <- function(p_list, path_name) {
     ggplot2::theme(legend.position = "right")
 }
 
-make_heatmap_pair(p_list, "SPC.cytokinetic")
+make_heatmap_pair(p_list, "SPC.cytokinetic", n_cells_list)
 ggsave(file = paste0(results_dir, "/SPC.cytokinetic_heatmaps.png"), width = 8, height = 5)
 ```
 
 ### PGC → Oocytes path
 
 ```{r, fig.width=7, fig.height=4}
-make_heatmap_pair(p_list, "Oocytes")
+make_heatmap_pair(p_list, "Oocytes", n_cells_list)
 ggsave(file = paste0(results_dir, "/Oocytes_heatmaps.png"), width = 8, height = 5)
 ```
 
