@@ -45,6 +45,13 @@ data_dir = paste0(params$project_dir, "/data")
 # data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
 ```
 
+```{r, include=FALSE}
+sampleID        <- params$sampleID
+cds             <- readRDS(paste0(data_dir, "/", sampleID, "_cds.Rds"))
+sig_barcodes    <- colnames(cds)
+marker_test_res <- read.csv(paste0(results_dir, "/", sampleID, "_cluster_marker_genes_mito_filtered.csv"))
+```
+
 ```{r}
 sampleID = params$sampleID
 mat = readMM(paste0(data_dir, "/", sampleID, "/raw_matrix/matrix.mtx.gz"))
@@ -63,9 +70,9 @@ sce <- SingleCellExperiment(assays = list(counts = mat))
 
 ## Detect empty droplets with `DropletUtils`
 
-```{r}
+```{r, eval=FALSE}
 # Set a seed. This can be any number. Using the same number every time ensures that a sequence of random numbers generated is the same every time you run your code.
-set.seed(100) 
+set.seed(100)
 
 # set `by.rank` to the max number of cells you expect
 e.out <- emptyDrops(counts(sce), 
@@ -188,7 +195,7 @@ high.mito <- isOutlier(stats$subsets_Mito_percent, type="higher")
 
 I propose removing every cell with percent mito > `r as.numeric(attr(high.mito, "thresholds")[2])`, which is 3 median absolute deviations (MAD) above the median percent mito. This is `r sum(high.mito)` out of `r length(high.mito)` cells.
 
-```{r}
+```{r, eval=FALSE}
 counts = counts(sce)
 cds <- new_cell_data_set(counts,
                          cell_metadata = stats)
@@ -197,11 +204,11 @@ saveRDS(cds, file = paste0(data_dir, "/", sampleID, "_cds.Rds"))
 ```
 
 ## Cluster cells
-```{r}
+```{r, eval=FALSE}
 colData(cds)$barcode = rownames(colData(cds))
 colData_df = as.data.frame(colData(cds))
 
-keep_cells = 
+keep_cells =
   colData_df %>%
   filter(discard == FALSE) %>%
   pull(barcode)
@@ -214,6 +221,11 @@ saveRDS(cds, file = paste0(data_dir, "/", sampleID, "_cds_mito_filter.Rds"))
 
 plot_cells(cds)
 ggsave(file = paste0(results_dir, "/", sampleID, "_cluster_mito_filtered_UMAP.png"))
+```
+
+```{r}
+cds <- readRDS(paste0(data_dir, "/", sampleID, "_cds_mito_filter.Rds"))
+plot_cells(cds)
 ```
 
 ## Check for enrichment of known cell-type markers 
@@ -232,12 +244,12 @@ This table contains the top ~100 cluster enriched genes for each cluster after r
 * `marker_test_p_value` numeric vector of likelihood ratio p-values   
 * `marker_test_q_value` numeric vector of likelihood ratio q-values   
 
-```{r, results='hide'}
-marker_test_res <- top_markers(cds, 
+```{r, eval=FALSE}
+marker_test_res <- top_markers(cds,
                                genes_to_test_per_group = 100,
                                group_cells_by="cluster", cores=8)
 
-write.csv(marker_test_res, file = paste0(results_dir, "/", sampleID, "_cluster_marker_genes_mito_filtered.csv"), row.names = FALSE) 
+write.csv(marker_test_res, file = paste0(results_dir, "/", sampleID, "_cluster_marker_genes_mito_filtered.csv"), row.names = FALSE)
 ```
 
 ```{r}
