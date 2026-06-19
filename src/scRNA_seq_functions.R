@@ -1276,7 +1276,7 @@ plot_expr_proportion <- function(sce,
   ggplot(prop_df, aes(x = batch, y = proportion, fill = batch)) +
     geom_bar(stat = "identity", width = 0.7) +
     geom_text(aes(label = scales::percent(proportion, accuracy = 0.1)),
-              vjust = -0.4, size = 3) +
+              vjust = -0.4, size = 2.8) +
     facet_wrap(~ celltype, ncol = ncol) +
     scale_y_continuous(labels = scales::percent_format(),
                        limits = c(0, 1.20),
@@ -1285,9 +1285,11 @@ plot_expr_proportion <- function(sce,
          x     = "Batch",
          y     = "% cells expressing",
          fill  = "Batch") +
-    theme_bw() +
-    theme(axis.text.x     = element_text(angle = 45, hjust = 1),
-          legend.position = "none")
+    theme_bw(base_size = 8) +
+    theme(axis.text.x     = element_text(angle = 45, hjust = 1, size = 8),
+          strip.text       = element_text(size = 8),
+          plot.title       = element_text(size = 8),
+          legend.position  = "none")
 }
 
 
