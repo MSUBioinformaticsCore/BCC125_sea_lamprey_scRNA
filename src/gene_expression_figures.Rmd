@@ -130,6 +130,39 @@ anno = c(
 level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)
 combined.sce$label <- factor(combined.sce$label, levels = level_order)
 
+anno_order = c(
+  "1. Fibroblasts (migrating)",
+  "2. Mesonephric cells",
+  "3. Granulosa cells (migrating)",
+  "4. Granulosa cells",
+  "5. Oogonia/Oocytes",
+  "6. Endothelial cells",
+  "7. Primordial germ cells (migrating)",
+  "8. Erythrocytes",
+  "9. Pre-granulosa cells (migrating)",
+  "10. Leukocytes",
+  "11. Hemopoietic stem cells",
+  "12. Podocytes",
+  "13. Macrophages",
+  "14. Pre-granulosa cells (mitotic)",
+  "15. Immune cells (migrating, mitotic)",
+  "16. Spermatocytes (cytokinetic)",
+  "17. Male germ cells (migrating)",
+  "18. Spermatocytes (apoptotic)",
+  "19. Spermatocytes (GPCR-activated)"
+)
+
+combined.sce$CellType <- anno_order[as.integer(as.character(combined.sce$label))]
+
+batch_map <- c(
+  "TF_C00004337" = "Female",
+  "TM_C00004374" = "Male",
+  "UND1_C00004336" = "UND1",
+  "UND2_C00004362" = "UND2"
+)
+
+combined.sce$Sample <- batch_map[combined.sce$batch]
+
 # Define a visible light blue and a deep dark blue from the Blues palette
 start_blue <- brewer.pal(9, "Blues")[3] # #9ECAE1 (skips the two whitest shades)
 end_blue   <- brewer.pal(9, "Blues")[9] # #08306B
@@ -309,6 +342,7 @@ plot_violin_goi(sce              = combined.sce,
 
 ggsave(paste0(results_dir, "/S6_CUDZ1_genes.png"), width = 7.5, height = 8)
 ```
+
 ### S7: DDX4
 
 ```{r, fig.width=5, fig.height=3}
@@ -377,6 +411,22 @@ plot_violin_goi(sce              = combined.sce,
 
 ggsave(paste0(results_dir, "/S11_genes.png"), width = 7.5, height = 5)
 ```
+### FOXL2 percentage
+
+```{r, fig.width=7, fig.height=7}
+plot_expr_proportion( combined.sce,
+                      gene     = "LOC116946948",
+                      gene_symbol    = "FOXL2",
+                      celltype_col   = "CellType",
+                      batch_col      = "Sample",
+                      assay_name     = "counts",
+                      threshold      = 0,
+                      ncol           = 3,
+                      celltype_order = anno_order)
+
+ggsave(paste0(results_dir, "/FOXL2_percent.png"), width = 7, height = 7)
+```
+
 
 ### S16: WNT5 genes all cells
 
@@ -492,39 +542,6 @@ ggsave(paste0(results_dir, "/S20_sex_steroid_genes.png"), width = 7.5, height = 
 ### S21: percent cells expressing SOX9
 
 ```{r, fig.width=7, fig.height=7}
-
-anno_order = c(
-  "1. Fibroblasts (migrating)",
-  "2. Mesonephric cells",
-  "3. Granulosa cells (migrating)",
-  "4. Granulosa cells",
-  "5. Oogonia/Oocytes",
-  "6. Endothelial cells",
-  "7. Primordial germ cells (migrating)",
-  "8. Erythrocytes",
-  "9. Pre-granulosa cells (migrating)",
-  "10. Leukocytes",
-  "11. Hemopoietic stem cells",
-  "12. Podocytes",
-  "13. Macrophages",
-  "14. Pre-granulosa cells (mitotic)",
-  "15. Immune cells (migrating, mitotic)",
-  "16. Spermatocytes (cytokinetic)",
-  "17. Male germ cells (migrating)",
-  "18. Spermatocytes (apoptotic)",
-  "19. Spermatocytes (GPCR-activated)"
-)
-
-combined.sce$CellType <- anno_order[as.integer(as.character(combined.sce$label))]
-
-batch_map <- c(
-  "TF_C00004337" = "Female",
-  "TM_C00004374" = "Male",
-  "UND1_C00004336" = "UND1",
-  "UND2_C00004362" = "UND2"
-)
-
-combined.sce$Sample <- batch_map[combined.sce$batch]
 
 plot_expr_proportion( combined.sce,
                       gene = "LOC116951502",
