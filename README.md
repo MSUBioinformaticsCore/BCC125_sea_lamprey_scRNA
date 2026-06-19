@@ -14,6 +14,9 @@
 ---
 
 ## Analysis Reports and Code
+Stephanie Hickey, PhD — MSU Bioinformatics Core
+
+Raw and processed data is deposited in GEO: [GSE334273](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE334273)
 
 ### PIP-seq Preprocessing & QC
 
