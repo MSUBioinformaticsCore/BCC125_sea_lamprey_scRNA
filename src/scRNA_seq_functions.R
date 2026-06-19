@@ -1424,7 +1424,7 @@ plot_tsne <- function(df,
     geom_point(size = point_size, stroke = 0) +
     guides(color = guide_legend(override.aes = list(size = 5))) +
     labs(color = color_col, title = title) +
-    theme_classic() +
+    theme_classic(base_size = 8) +
     theme(
       panel.background  = element_rect(fill = bg_color, color = NA),
       plot.background   = element_rect(fill = bg_color, color = NA),
@@ -1433,9 +1433,9 @@ plot_tsne <- function(df,
       axis.ticks        = element_blank(),
       axis.line         = element_blank(),
       legend.background = element_rect(fill = bg_color),
-      legend.text       = element_text(color = fg_color),
-      legend.title      = element_text(color = fg_color),
-      plot.title        = element_text(color = fg_color)
+      legend.text       = element_text(color = fg_color, size = 8),
+      legend.title      = element_text(color = fg_color, size = 8),
+      plot.title        = element_text(color = fg_color, size = 8)
     )
 
   if (!is.null(palette)) {
