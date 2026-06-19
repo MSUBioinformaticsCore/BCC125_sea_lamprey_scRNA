@@ -2,7 +2,12 @@
 title: "BCC125_sea_lamprey_scRNA"
 author: "Stephanie Hickey"
 date: "`r Sys.Date()`"
-output: html_document
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
 params:
     project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
     project_name: BCC125_sea_lamprey_scRNA
