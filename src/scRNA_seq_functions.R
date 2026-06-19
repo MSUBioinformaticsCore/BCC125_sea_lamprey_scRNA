@@ -892,10 +892,8 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
-      fdr < 0.001 ~ "***",
-      fdr < 0.01  ~ "**",
-      fdr < 0.05  ~ "*",
-      TRUE        ~ ""
+      fdr < 0.05 ~ "*",
+      TRUE       ~ ""
     )
   }
 
@@ -994,11 +992,13 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
       strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 8),
       axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
-      axis.text.y      = element_text(color = "#3a3a3a"),
-      axis.title       = element_text(color = "#2e2e2e"),
+      axis.text.y      = element_text(color = "#3a3a3a", size = 8),
+      axis.title       = element_text(color = "#2e2e2e", size = 8),
       axis.line        = element_line(color = "#aaaaaa", linewidth = 0.4),
       axis.ticks       = element_line(color = "#aaaaaa", linewidth = 0.4),
       panel.spacing    = unit(0.8, "lines"),
+      legend.title     = element_text(size = 8),
+      legend.text      = element_text(size = 8),
       legend.key.size  = unit(0.4, "cm")
     )
 }
@@ -1029,10 +1029,8 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
-      fdr < 0.001 ~ "***",
-      fdr < 0.01  ~ "**",
-      fdr < 0.05  ~ "*",
-      TRUE        ~ ""
+      fdr < 0.05 ~ "*",
+      TRUE       ~ ""
     )
   }
 
@@ -1108,11 +1106,13 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
       strip.text       = element_text(color = "#2e4a5a", face = "bold", size = 8),
       axis.text.x      = element_blank(),
       axis.ticks.x     = element_blank(),
-      axis.text.y      = element_text(color = "#3a3a3a"),
-      axis.title       = element_text(color = "#2e2e2e"),
+      axis.text.y      = element_text(color = "#3a3a3a", size = 8),
+      axis.title       = element_text(color = "#2e2e2e", size = 8),
       axis.line        = element_line(color = "#aaaaaa", linewidth = 0.4),
       axis.ticks       = element_line(color = "#aaaaaa", linewidth = 0.4),
       panel.spacing    = unit(0.8, "lines"),
+      legend.title     = element_text(size = 8),
+      legend.text      = element_text(size = 8),
       legend.key.size  = unit(0.4, "cm")
     )
 }
@@ -1139,10 +1139,8 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
-      fdr < 0.001 ~ "***",
-      fdr < 0.01  ~ "**",
-      fdr < 0.05  ~ "*",
-      TRUE        ~ ""
+      fdr < 0.05 ~ "*",
+      TRUE       ~ ""
     )
   }
 
@@ -1213,13 +1211,15 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     labs(x = NULL, y = "Log-normalized expression", title = title) +
     theme_classic(base_size = 8) +
     theme(
-      axis.text.x     = element_text(color = "#3a3a3a"),
+      axis.text.x     = element_text(color = "#3a3a3a", size = 8),
       axis.ticks.x    = element_blank(),
       axis.text.y     = element_blank(),
       axis.ticks.y    = element_blank(),
-      axis.title      = element_text(color = "#2e2e2e"),
+      axis.title      = element_text(color = "#2e2e2e", size = 8),
       axis.line       = element_line(color = "#aaaaaa", linewidth = 0.4),
       axis.ticks      = element_line(color = "#aaaaaa", linewidth = 0.4),
+      legend.title    = element_text(size = 8),
+      legend.text     = element_text(size = 8),
       legend.key.size = unit(0.4, "cm")
     ) +
     guides(fill = guide_legend(reverse = TRUE))
