@@ -43,20 +43,20 @@ phyperOverlapSets <- function(table1, table2, background){
   colnames(table1) = c("Gene","Group")
   tab1_groups = unique(table1$Group)
   tab1_list = list()
-  
+
   for(group in tab1_groups){
-    tab1_list[[group]] = table1 %>%
-      filter(Group == group)
+    tab1_list[[as.character(group)]] = table1 %>%
+      dplyr::filter(Group == group)
   }
-  
+
   # make table2 into a list divided by group
   colnames(table2) = c("Gene","Group")
   tab2_groups = unique(table2$Group)
   tab2_list = list()
-  
+
   for(group in tab2_groups){
-    tab2_list[[group]] = table2 %>%
-      filter(Group == group)
+    tab2_list[[as.character(group)]] = table2 %>%
+      dplyr::filter(Group == group)
   }
   
   # make a list of dfs with the names of genes shared between
@@ -77,15 +77,13 @@ phyperOverlapSets <- function(table1, table2, background){
                         z
                       })
     
-    for(i in 1:length(INT_list)){
-      INT_list[[i]]$Group2 = names(INT_list)[i]
-    }
+    INT_list = Map(function(df, nm) { df$Group2 <- nm; df }, INT_list, names(INT_list))
     
     INT[[group]] = do.call(rbind,INT_list)
     INT[[group]]$Group1 = group
     
     INT[[group]] = INT[[group]] %>%
-      select(Group1, Group2, SharedGene)
+      dplyr::select(Group1, Group2, SharedGene)
     
     nINT_list = lapply(tab2_list, 
                        function(x){
