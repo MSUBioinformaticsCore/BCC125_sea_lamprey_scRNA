@@ -1421,8 +1421,13 @@ plot_tsne <- function(df,
   }
   fg_color <- .contrast_color(bg_color)
 
-  if (!is.null(color_levels))
-    df[[color_col]] <- factor(df[[color_col]], levels = color_levels)
+  # build count-labeled levels for the legend
+  count_tab <- table(df[[color_col]])
+  levels_base <- if (!is.null(color_levels)) color_levels else
+    names(sort(count_tab, decreasing = TRUE))
+  levels_n <- paste0(levels_base, " (n=", count_tab[levels_base], ")")
+  label_map <- setNames(levels_n, levels_base)
+  df[[color_col]] <- factor(label_map[as.character(df[[color_col]])], levels = levels_n)
 
   p <- ggplot(df, aes(x = TSNE1, y = TSNE2, color = .data[[color_col]])) +
     geom_point(size = point_size, stroke = 0) +
@@ -1443,10 +1448,11 @@ plot_tsne <- function(df,
     )
 
   if (!is.null(palette)) {
-    if (!is.null(color_levels) && is.null(names(palette)))
-      palette <- setNames(palette[seq_along(color_levels)], color_levels)
-    p <- p + scale_color_manual(values = palette,
-                                breaks = if (!is.null(color_levels)) color_levels else waiver())
+    if (is.null(names(palette)))
+      palette <- setNames(palette[seq_along(levels_n)], levels_n)
+    else
+      names(palette) <- label_map[names(palette)]
+    p <- p + scale_color_manual(values = palette, breaks = levels_n)
   }
 
   if (!is.null(label_col)) {
