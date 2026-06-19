@@ -39,17 +39,10 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir = paste0(params$project_dir, "/results")
-# results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results"
+results_dir = paste0(params$project_dir, "/results/UND2_QC")
+# results_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results/UND2_QC"
 data_dir = paste0(params$project_dir, "/data")
 # data_dir = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data"
-```
-
-```{r, include=FALSE}
-sampleID        <- params$sampleID
-cds             <- readRDS(paste0(data_dir, "/", sampleID, "_cds.Rds"))
-sig_barcodes    <- colnames(cds)
-marker_test_res <- read.csv(paste0(results_dir, "/", sampleID, "_cluster_marker_genes.csv"))
 ```
 
 ```{r}
@@ -58,10 +51,16 @@ mat = readMM(paste0(data_dir, "/", sampleID, "/raw_matrix/matrix.mtx.gz"))
 barcodes = read.delim(paste0(data_dir, "/", sampleID, "/raw_matrix/barcodes.tsv.gz"), header=F)
 barcodes$V1 = paste0(sampleID, "_", barcodes$V1)
 
-genes = read.delim(paste0(data_dir,"/", sampleID, "/raw_matrix/features.tsv.gz"), header=F)  
+genes = read.delim(paste0(data_dir,"/", sampleID, "/raw_matrix/features.tsv.gz"), header=F)
 
 rownames(mat) = genes$V1
 colnames(mat) = barcodes$V1
+```
+
+```{r, include=FALSE}
+cds             <- readRDS(paste0(data_dir, "/", sampleID, "/", sampleID, "_cds.Rds"))
+sig_barcodes    <- colnames(cds)
+marker_test_res <- read.csv(paste0(results_dir, "/", sampleID, "_cluster_marker_genes.csv"))
 ```
 
 ```{r}
@@ -369,7 +368,7 @@ ggsave(file = paste0(results_dir, "/", sampleID, "_cluster_mito_filtered_UMAP.pn
 ```
 
 ```{r}
-cds <- readRDS(paste0(data_dir, "/", sampleID, "_cds_mito_filter.Rds"))
+cds <- readRDS(paste0(data_dir, "/", sampleID, "/", sampleID, "_cds_mito_filter.Rds"))
 plot_cells(cds)
 ggsave(file = paste0(results_dir, "/", sampleID, "_cluster_mito_filtered_UMAP.png"))
 ```
