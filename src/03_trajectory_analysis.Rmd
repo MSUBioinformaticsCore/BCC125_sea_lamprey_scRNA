@@ -218,7 +218,7 @@ saveRDS(pseudo, file = paste0(results_dir, "/no.support.merged.sex.pseudo.Rds"))
 
 Top: Pie charts show the proportion of cells from each sample per node. Bottom: Node color corresponds to pseudotim.e
 
-```{r, fig.width=10, fig.height=8}
+```{r, fig.width=8, fig.height=7}
 meta_df = as.data.frame(colData(merged.sex.sce))
 
 sample_tally =
@@ -304,7 +304,7 @@ gr_pseudo =
 
 (gr_plot + coord_fixed()) / (gr_pseudo + coord_fixed())
 
-ggsave(file = paste0(results_dir, "/germ.only_pseudo_mst.pdf"), width = 10, height = 10)
+ggsave(file = paste0(results_dir, "/germ.only_pseudo_mst.pdf"), width = 8, height = 7)
 ```
 
 # Pseudotime-associated genes
