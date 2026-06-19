@@ -1194,7 +1194,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     mutate(
       stars   = fdr_to_stars(FDR),
       Feature = WangGeneID,
-      X       = .to_celltype(cluster)
+      X       = factor(.to_celltype(cluster), levels = levels(plot_df$X))
     ) %>%
     filter(stars != "") %>%
     left_join(y_max_df, by = c("Feature", "X"))
@@ -1247,12 +1247,13 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
 
 plot_expr_proportion <- function(sce,
                                   gene,
-                                  gene_symbol  = NULL,
-                                  celltype_col = "celltype",
-                                  batch_col    = "batch",
-                                  assay_name   = "counts",
-                                  threshold    = 0,
-                                  ncol         = 3) {
+                                  gene_symbol   = NULL,
+                                  celltype_col  = "celltype",
+                                  batch_col     = "batch",
+                                  assay_name    = "counts",
+                                  threshold     = 0,
+                                  ncol          = 3,
+                                  celltype_order = NULL) {
 
   stopifnot(gene %in% rownames(sce))
   stopifnot(celltype_col %in% names(colData(sce)))
@@ -1272,7 +1273,11 @@ plot_expr_proportion <- function(sce,
       proportion = mean(expressed),
       n_cells    = n(),
       .groups    = "drop"
-    )
+    ) %>%
+    mutate(celltype = if (!is.null(celltype_order))
+      factor(celltype, levels = celltype_order)
+    else
+      factor(celltype))
 
   ggplot(prop_df, aes(x = batch, y = proportion, fill = batch)) +
     geom_bar(stat = "identity", width = 0.7) +
