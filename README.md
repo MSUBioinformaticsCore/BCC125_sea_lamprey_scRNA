@@ -20,7 +20,7 @@ Raw and processed data are deposited in GEO: [GSE334273](https://www.ncbi.nlm.ni
 
 ### PIP-seq Preprocessing & QC
 
-- [Female transformer sample QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/female_sample_qc.html)
+- [Female transformer sample QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/TF_sample_qc.html)
 - [Male transformer sample QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/TM_sample_qc.html)
 - [Undetermined larvae sample 1 QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/UND1_sample_qc.html)
 - [Undetermined larvae sample 2 QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/UND2_sample_qc.html)
