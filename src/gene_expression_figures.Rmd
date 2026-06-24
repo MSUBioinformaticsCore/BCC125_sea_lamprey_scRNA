@@ -219,16 +219,18 @@ cell_meta$label = factor(cell_meta$label, levels = level_order)
 cell_meta <- cell_meta %>%
   mutate(CellType = anno_order[as.integer(label)])
 
-plot_tsne(df           = cell_meta,
-          color_col    = "CellType",
-          label_col    = "label",
-          palette      = publication_palette,
-          color_levels = anno_order,
-          point_size   = 0.5,
-          text_color   = "white",
-          bg_color     = "black",
-          text_size    = 2)
+p_fig1 <- plot_tsne(df           = cell_meta,
+                    color_col    = "CellType",
+                    label_col    = "label",
+                    palette      = publication_palette,
+                    color_levels = anno_order,
+                    point_size   = 0.5,
+                    text_color   = "black",
+                    bg_color     = "white",
+                    text_size    = 2) +
+  theme(panel.background = element_rect(fill = "black", color = NA))
 
+p_fig1
 ggsave(paste0(results_dir, "/Fig1_tsne.png"), width = 8, height = 5)
 ```
 
