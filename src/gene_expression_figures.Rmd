@@ -127,7 +127,7 @@ anno = c(
   "19. Spermatocytes (GPCR-activated)"
 )
 
-level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)
+level_order = 1:19
 combined.sce$label <- factor(combined.sce$label, levels = level_order)
 
 anno_order = c(
@@ -163,25 +163,12 @@ batch_map <- c(
 
 combined.sce$Sample <- batch_map[combined.sce$batch]
 
-# Define a visible light blue and a deep dark blue from the Blues palette
-start_blue <- brewer.pal(9, "Blues")[3] # #9ECAE1 (skips the two whitest shades)
-end_blue   <- brewer.pal(9, "Blues")[9] # #08306B
-
-# Generate 12 sequential shades starting from the darker base
-color1_shades <- colorRampPalette(c(start_blue, end_blue))(13)
-
-# Generate 6 distinct shades of Oranges
-# Define custom boundaries for Orange to completely block the brown tones
-start_org     <- "#FDBE85" # A highly visible, crisp light orange
-end_org       <- "#A62B00" # A rich, intense burnt orange/terracotta (replaces the brown)
-
-# Generate your 7 distinct, non-brown orange shades
-color2_shades <- colorRampPalette(c(start_org, end_org))(6)
-
-
-# Merge into your publication-ready master palette
-publication_palette <- c(color1_shades, color2_shades)
-publication_palette  <- setNames(publication_palette, anno)
+all_label_colors <- c("#1F77B4", "#AEC7E8", "#FF7F0E", "#FFBB78",
+                      "#2CA02C", "#98DF8A", "#D62728", "#FF9896",
+                      "#9467BD", "#C5B0D5", "#8C564B", "#C49C94",
+                      "#E377C2", "#F7B6D2", "#7F7F7F", "#C7C7C7",
+                      "#BCBD22", "#DBDB8D", "#17BECF")
+publication_palette <- setNames(all_label_colors, anno_order)
 ```
 
 Germ cells 
@@ -226,17 +213,17 @@ three_group_palette  <- setNames(three_group_palette, germ_anno)
 ### Fig.1: All cell tSNE
 
 ```{r, fig.width=8, fig.height=5}
-level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)
+level_order = 1:19
 cell_meta$label = factor(cell_meta$label, levels = level_order)
 
 cell_meta <- cell_meta %>%
-  mutate(CellType = anno[as.integer(label)])  
+  mutate(CellType = anno_order[as.integer(label)])
 
 plot_tsne(df           = cell_meta,
           color_col    = "CellType",
           label_col    = "label",
           palette      = publication_palette,
-          color_levels = anno,
+          color_levels = anno_order,
           point_size   = 0.5,
           text_color   = "black",
           bg_color     = "white",
@@ -309,10 +296,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = goi,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -333,10 +320,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = cuzd1_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -350,10 +337,10 @@ plot_violin_goi_single(sce              = combined.sce,
                        markers          = scatter_markers,
                        goi              = "DDX4",
                        gene_description = gene_descriptions,
-                       anno             = anno,
+                       anno             = anno_order,
                        palette          = publication_palette,
                        title            = "DDX4",
-                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+                       level_order = 1:19)
 
   
 ggsave(paste0(results_dir, "/S7_DDX4.png"), width = 5, height = 3)
@@ -366,10 +353,10 @@ plot_violin_goi_single(sce              = combined.sce,
                        markers          = scatter_markers,
                        goi              = "PIWIL1",
                        gene_description = gene_descriptions,
-                       anno             = anno,
+                       anno             = anno_order,
                        palette          = publication_palette,
                        title            = "PIWIL1",
-                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+                       level_order = 1:19)
 
   
 ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3)
@@ -382,10 +369,10 @@ plot_violin_goi_single(sce              = combined.sce,
                        markers          = scatter_markers,
                        goi              = "SYCP3",
                        gene_description = gene_descriptions,
-                       anno             = anno,
+                       anno             = anno_order,
                        palette          = publication_palette,
                        title            = "SYCP3",
-                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+                       level_order = 1:19)
 
   
 ggsave(paste0(results_dir, "/S9_SYCP3.png"), width = 5, height = 3)
@@ -402,10 +389,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = fig_s11_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -440,10 +427,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = wnt5_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -462,10 +449,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = immune_dev_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -484,10 +471,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = growth_factor_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -506,10 +493,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = tgfb_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -529,10 +516,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = sex_steroid_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 2)
 
@@ -574,10 +561,10 @@ plot_violin_goi_single(sce              = combined.sce,
                        markers          = scatter_markers,
                        goi              = "sox9-a",
                        gene_description = gene_descriptions,
-                       anno             = anno,
+                       anno             = anno_order,
                        palette          = publication_palette,
                        title            = "sox9-a",
-                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+                       level_order = 1:19)
 
 ggsave(paste0(results_dir, "/S21_sox9-a_violin.png"), width = 5, height = 3)
 
@@ -585,10 +572,10 @@ plot_violin_goi_single(sce              = combined.sce,
                        markers          = scatter_markers,
                        goi              = "SOX9",
                        gene_description = gene_descriptions,
-                       anno             = anno,
+                       anno             = anno_order,
                        palette          = publication_palette,
                        title            = "SOX9",
-                       level_order = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19))
+                       level_order = 1:19)
 
 ggsave(paste0(results_dir, "/S21_SOX9_violin.png"), width = 5, height = 3)
 
@@ -605,10 +592,10 @@ plot_violin_goi(sce              = combined.sce,
                 markers          = scatter_markers,
                 goi              = germ_fate_genes,
                 gene_description = gene_descriptions,
-                anno             = anno,
+                anno             = anno_order,
                 palette          = publication_palette,
                 label_col        = "label",
-                level_order      = c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19),
+                level_order      = 1:19,
                 title            = NULL,
                 ncol             = 1)
 
