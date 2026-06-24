@@ -225,8 +225,8 @@ plot_tsne(df           = cell_meta,
           palette      = publication_palette,
           color_levels = anno_order,
           point_size   = 0.5,
-          text_color   = "black",
-          bg_color     = "white",
+          text_color   = "white",
+          bg_color     = "black",
           text_size    = 2)
 
 ggsave(paste0(results_dir, "/Fig1_tsne.png"), width = 8, height = 5)
