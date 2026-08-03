@@ -129,6 +129,70 @@ ggsave(file = paste0(results_dir,"/", sampleID, "_kneeplot.png"))
  sce <- sce[,sig_barcodes]
 ```
 
+## Score doublets with `scDblFinder`
+
+No doublet detection was performed in the original analysis, so it is added here as a diagnostic that characterizes the data. It is not used as a filtering step.
+
+```{r}
+library(scDblFinder)
+set.seed(100)
+sce <- scDblFinder(sce)
+```
+
+`scDblFinder` simulates artificial doublets from this library's own cells and scores every real cell by its transcriptional similarity to those simulated doublets. It is run here on this sample alone, without a `samples =` argument, since each document already covers a single library.
+
+Several features of this dataset resemble the signature `scDblFinder` looks for -- a mixture of two distinct cell states -- without being technical doublets:
+
+  * Germ cell differentiation here is an explicit trajectory, so transcriptional intermediates between clusters are the object of study, not artifacts.
+  * Oocytes have naturally high RNA content, which inflates library size -- the same feature `scDblFinder` and other doublet callers use as a primary signal.
+
+For these reasons, the scores below are reported as a diagnostic only. **No cells were removed on the basis of `scDblFinder` scores.**
+
+```{r}
+n_doublet    <- sum(sce$scDblFinder.class == "doublet")
+pct_doublet  <- 100 * n_doublet / ncol(sce)
+score_median <- median(sce$scDblFinder.score)
+score_iqr    <- IQR(sce$scDblFinder.score)
+```
+
+`scDblFinder` called `r n_doublet` of `r ncol(sce)` cells (`r round(pct_doublet, 2)`%) as doublets. The median `scDblFinder.score` was `r round(score_median, 3)` (IQR `r round(score_iqr, 3)`).
+
+```{r}
+dbl_df <- as.data.frame(colData(sce))
+
+ggplot(dbl_df, aes(x = scDblFinder.score)) +
+  geom_histogram(bins = 50) +
+  xlab("scDblFinder score") +
+  ylab("Number of cells")
+
+ggsave(file = paste0(results_dir, "/", sampleID, "_scDblFinder_score_hist.png"))
+```
+
+The table below gives the median UMI count and median genes detected, split by `scDblFinder.class`.
+
+```{r}
+dbl_df$lib_size <- colSums(counts(sce))
+dbl_df$n_genes  <- colSums(counts(sce) > 0)
+
+dbl_summary <-
+  dbl_df %>%
+  group_by(scDblFinder.class) %>%
+  summarize(n_cells = n(),
+            median_UMI = median(lib_size),
+            median_genes_detected = median(n_genes))
+
+knitr::kable(dbl_summary)
+```
+
+```{r}
+med_singlet <- dbl_summary$median_UMI[dbl_summary$scDblFinder.class == "singlet"]
+med_doublet <- dbl_summary$median_UMI[dbl_summary$scDblFinder.class == "doublet"]
+```
+
+Median library size is `r med_singlet` UMIs for singlets and `r med_doublet` UMIs for cells called doublet. `r if (length(med_doublet) > 0 && med_doublet > med_singlet) "Doublet-called cells do show elevated library size here, consistent with a true doublet signal." else "Doublet-called cells do NOT show elevated library size here -- given the biological confounds noted above (the germ cell trajectory, cytokinetic bridge cells, and high-RNA-content oocytes), the score is not simply tracking library size and should be interpreted with that in mind."`
+
+`scDblFinder.score` and `scDblFinder.class` are added to `colData(sce)` above, and carried into `stats` below so that they are present in `colData(cds)` once `cds` is built. If this object is rebuilt later, these columns should be re-attached by matching `colnames()` -- the cell barcode, prefixed with the sample ID as assigned above. This matters especially at the integration step: `fastMNN` returns a new `SingleCellExperiment` holding only the batch-corrected values, so these columns will not survive integration automatically and must be re-joined from this document's saved `cds` object by barcode.
+
 ## Identifying low quality cells
 
 Common metrics include for identifying low quality cells include:
@@ -161,6 +225,10 @@ is.mito = which(rownames(sce) %in% mito_genes)
 # get the per cell stats
 stats <- perCellQCMetrics(sce,
                           subsets=list(Mito=is.mito))
+
+# carry the doublet scores forward so they end up in colData(cds)
+stats$scDblFinder.score <- sce$scDblFinder.score
+stats$scDblFinder.class <- sce$scDblFinder.class
 ```
 
 ### Summarize the stats
