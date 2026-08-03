@@ -96,8 +96,10 @@ if (length(only_B) > 0) {
 ```{r}
 label_df = data.frame(
   barcode = common_cells,
-  label_A = as.integer(as.character(colData(merged.sce.A)[common_cells, "label"])),
-  label_B = as.integer(as.character(colData(merged.sce.B)[common_cells, "label"]))
+  label_A = as.integer(as.character(
+    colData(merged.sce.A)$label[match(common_cells, colnames(merged.sce.A))])),
+  label_B = as.integer(as.character(
+    colData(merged.sce.B)$label[match(common_cells, colnames(merged.sce.B))]))
 )
 
 contingency = label_df %>%
