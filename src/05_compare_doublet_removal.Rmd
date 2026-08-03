@@ -142,12 +142,28 @@ datatable(best_match %>% mutate(pct_of_A_cluster = round(pct_of_A_cluster, 1)),
 Each tile is the percent of a with-doublets cluster's cells (rows) that fall
 into a given no-doublets cluster (columns). Rows sum to 100%.
 
+Every cluster pair gets a tile, including pairs sharing no cells, so that an
+empty tile is unambiguous. A blank tile means no cells are shared. A tile
+labeled `<1` means cells are shared but they are under 0.5% of that
+with-doublets cluster, which would otherwise round to a misleading `0`.
+
 ```{r, fig.width=8, fig.height=6}
-ggplot(contingency, aes(x = factor(label_B), y = factor(label_A))) +
+# dplyr::count only returns observed combinations, so fill in the cluster
+# pairs with no shared cells before plotting
+contingency_plot = contingency %>%
+  tidyr::complete(label_A, label_B, fill = list(n_cells = 0, pct_of_A_cluster = 0)) %>%
+  mutate(tile_label = case_when(
+    n_cells == 0          ~ "",
+    pct_of_A_cluster < .5 ~ "<1",
+    TRUE                  ~ as.character(round(pct_of_A_cluster))
+  ))
+
+ggplot(contingency_plot, aes(x = factor(label_B), y = factor(label_A))) +
   geom_tile(aes(fill = pct_of_A_cluster), color = "light gray") +
   scale_fill_gradientn(colors = c("white", "#fd9668", "#f1605d", "#de4968", "#9e2f7f"),
+                       limits = c(0, 100),
                        name = "% of with-doublets\ncluster's cells") +
-  geom_text(aes(label = round(pct_of_A_cluster)), size = 2) +
+  geom_text(aes(label = tile_label), size = 2) +
   xlab("No-doublets cluster") +
   ylab("With-doublets cluster") +
   coord_fixed()
