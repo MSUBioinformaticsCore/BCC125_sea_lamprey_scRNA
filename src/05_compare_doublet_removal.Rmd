@@ -1,0 +1,258 @@
+---
+title: "05_compare_doublet_removal"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+This document compares the with-doublets analysis
+(`01_all_cells_clustering_annotation.Rmd`) to the doublet-filtered reanalysis
+(`01_all_cells_clustering_annotation_no_doublets.Rmd`), using two independent
+lines of evidence: whether individual cells common to both analyses land in
+the same or different clusters, and whether each analysis's cluster marker
+genes overlap. These two lines of evidence are meant to resolve the `TODO`
+notes left in `02_sex_cell_subanalysis_no_doublets.Rmd` and
+`03_trajectory_analysis_no_doublets.Rmd` about which no-doublets cluster
+numbers correspond to which with-doublets cluster numbers.
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir       = paste0(params$project_dir, "/results/20260803_comparison")
+with_dbl_robjects = paste0(params$project_dir, "/results/20260312/Robjects")
+with_dbl_results  = paste0(params$project_dir, "/results/20260615")
+no_dbl_dir        = paste0(params$project_dir, "/results/20260803_no_doublets")
+if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
+```
+
+With-doublets `merged.sce`/`combined.sce` come from `results/20260312/Robjects`,
+the same source `04_doublet_qc.Rmd` treats as canonical, and with-doublets
+marker gene tables come from `results/20260615`, where
+`01_all_cells_clustering_annotation.Rmd` currently writes them. No-doublets
+objects and tables all come from the single directory
+`results/20260803_no_doublets`.
+
+```{r}
+merged.sce.A   = readRDS(paste0(with_dbl_robjects, "/merged.sce.Rds"))
+combined.sce.A = readRDS(paste0(with_dbl_robjects, "/combined.sce.Rds"))
+
+merged.sce.B   = readRDS(paste0(no_dbl_dir, "/merged.sce.Rds"))
+combined.sce.B = readRDS(paste0(no_dbl_dir, "/combined.sce.Rds"))
+
+gene_description = read.csv(paste0(with_dbl_results, "/gene_descritption.csv"))
+```
+
+# Cell-level cluster correspondence
+
+For cells present in both analyses, this cross-tabulates the with-doublets
+cluster label against the no-doublets cluster label. Cells only in the
+with-doublets object are candidates for having been removed as doublets (or
+otherwise dropped); cells only in the no-doublets object would indicate a
+barcode mismatch and are investigated rather than assumed away.
+
+```{r}
+common_cells    = intersect(colnames(merged.sce.A), colnames(merged.sce.B))
+only_A          = setdiff(colnames(merged.sce.A), colnames(merged.sce.B))
+only_B          = setdiff(colnames(merged.sce.B), colnames(merged.sce.A))
+```
+
+* `r length(common_cells)` cells are common to both analyses.
+* `r length(only_A)` cells are in the with-doublets analysis only (candidates for having been removed as doublets).
+* `r length(only_B)` cells are in the no-doublets analysis only.
+
+```{r}
+if (length(only_B) > 0) {
+  warning(paste0(length(only_B), " cell(s) appear in the no-doublets analysis ",
+                 "but not the with-doublets analysis. This should not happen if ",
+                 "the no-doublets pipeline only removes cells from the same ",
+                 "starting set; investigate before trusting the comparison below."))
+}
+```
+
+```{r}
+label_df = data.frame(
+  barcode = common_cells,
+  label_A = as.integer(as.character(colData(merged.sce.A)[common_cells, "label"])),
+  label_B = as.integer(as.character(colData(merged.sce.B)[common_cells, "label"]))
+)
+
+contingency = label_df %>%
+  count(label_A, label_B, name = "n_cells") %>%
+  group_by(label_A) %>%
+  mutate(pct_of_A_cluster = 100 * n_cells / sum(n_cells)) %>%
+  ungroup()
+
+write.csv(contingency, file = paste0(results_dir, "/cluster_contingency_table.csv"),
+          row.names = FALSE)
+
+datatable(contingency %>% mutate(pct_of_A_cluster = round(pct_of_A_cluster, 1)),
+          filter = "top", rownames = FALSE)
+```
+
+## Best-matching no-doublets cluster per with-doublets cluster
+
+For each with-doublets cluster, the no-doublets cluster that captures the
+largest share of its cells. A low `pct_of_A_cluster` means that
+with-doublets cluster's cells are split across several no-doublets clusters,
+rather than mapping cleanly to one.
+
+```{r}
+best_match = contingency %>%
+  group_by(label_A) %>%
+  slice_max(order_by = n_cells, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  arrange(label_A) %>%
+  rename(best_match_label_B = label_B)
+
+write.csv(best_match, file = paste0(results_dir, "/cluster_best_match_by_cells.csv"),
+          row.names = FALSE)
+
+datatable(best_match %>% mutate(pct_of_A_cluster = round(pct_of_A_cluster, 1)),
+          rownames = FALSE)
+```
+
+## Heatmap
+
+Each tile is the percent of a with-doublets cluster's cells (rows) that fall
+into a given no-doublets cluster (columns). Rows sum to 100%.
+
+```{r, fig.width=8, fig.height=6}
+ggplot(contingency, aes(x = factor(label_B), y = factor(label_A))) +
+  geom_tile(aes(fill = pct_of_A_cluster), color = "light gray") +
+  scale_fill_gradientn(colors = c("white", "#fd9668", "#f1605d", "#de4968", "#9e2f7f"),
+                       name = "% of with-doublets\ncluster's cells") +
+  geom_text(aes(label = round(pct_of_A_cluster)), size = 2) +
+  xlab("No-doublets cluster") +
+  ylab("With-doublets cluster") +
+  coord_fixed()
+
+ggsave(file = paste0(results_dir, "/cluster_contingency_heatmap.png"), width = 8, height = 6)
+```
+
+# Marker gene overlap between cluster marker sets
+
+Independent of cell-level correspondence: does each with-doublets cluster's
+top marker genes overlap significantly with a no-doublets cluster's top
+marker genes. This still works if the two analyses have different numbers of
+clusters, and it is a check on the cell-level correspondence above: the same
+cluster pairing should generally show up both by shared cells and by shared
+marker genes. Where the two disagree, that pairing is worth a closer look
+rather than trusting either line of evidence alone.
+
+```{r}
+markers_A = read.csv(paste0(with_dbl_results, "/scatter_cluster_marker_genes.csv"))
+markers_B = read.csv(paste0(no_dbl_dir,       "/scatter_cluster_marker_genes.csv"))
+
+top100_A = markers_A %>% group_by(cluster) %>% slice_min(FDR, n = 100, with_ties = TRUE) %>% ungroup()
+top100_B = markers_B %>% group_by(cluster) %>% slice_min(FDR, n = 100, with_ties = TRUE) %>% ungroup()
+
+genes_A = top100_A %>% transmute(Gene, Group = paste0("wDbl_", cluster))
+genes_B = top100_B %>% transmute(Gene, Group = paste0("noDbl_", cluster))
+```
+
+```{r}
+shared_genes = intersect(rownames(combined.sce.A), rownames(combined.sce.B))
+background_n = length(shared_genes)
+```
+
+Background gene universe for the overlap test is the `r background_n` genes
+shared by both analyses' combined, uncorrected count matrices (the same
+universe `findMarkers` was run over in each analysis).
+
+```{r, fig.width=10, fig.height=8}
+plot_marker_overlap_heatmap(
+  known_markers    = genes_A,
+  test_genes       = genes_B,
+  background_n     = background_n,
+  gene_description = gene_description,
+  overlaps_file    = paste0(results_dir, "/cluster_marker_gene_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/cluster_marker_overlap_pvalues.csv"),
+  plot_file        = paste0(results_dir, "/cluster_marker_overlap_heatmap.png")
+)
+```
+
+## Significant marker gene overlaps (FDR < 0.01)
+
+```{r}
+overlap_scores = read.csv(paste0(results_dir, "/cluster_marker_overlap_pvalues.csv")) %>%
+  filter(FDR < .01) %>%
+  arrange(CellTypes, FDR)
+
+datatable(overlap_scores %>% mutate(FDR = signif(FDR, 3), Pval = signif(Pval, 3)),
+          filter = "top", rownames = FALSE)
+```
+
+# Combined correspondence table
+
+Brings the two lines of evidence together per with-doublets cluster: the
+no-doublets cluster it shares the most cells with, and the no-doublets
+cluster its marker genes overlap most significantly with. Agreement between
+the two is reassurance that the pairing is real; disagreement means the
+cluster likely changed substantially (e.g. split, merged with a different
+cell type, or lost its defining markers after doublets were removed) and
+should not be assumed to correspond to anything one-to-one.
+
+```{r}
+best_by_markers = overlap_scores %>%
+  group_by(CellTypes) %>%
+  slice_min(FDR, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(label_A = as.integer(gsub("wDbl_", "", CellTypes)),
+            best_match_by_markers = gsub("noDbl_", "", Clusters),
+            marker_overlap_FDR = FDR)
+
+combined_correspondence = best_match %>%
+  select(label_A, best_match_by_cells = best_match_label_B, pct_of_A_cluster) %>%
+  full_join(best_by_markers, by = "label_A") %>%
+  mutate(agree = as.character(best_match_by_cells) == as.character(best_match_by_markers)) %>%
+  arrange(label_A)
+
+write.csv(combined_correspondence,
+          file = paste0(results_dir, "/cluster_combined_correspondence.csv"),
+          row.names = FALSE)
+
+datatable(combined_correspondence %>% mutate(pct_of_A_cluster = round(pct_of_A_cluster, 1),
+                                              marker_overlap_FDR = signif(marker_overlap_FDR, 3)),
+          rownames = FALSE)
+```
+
+`r sum(!combined_correspondence$agree, na.rm = TRUE)` of `r nrow(combined_correspondence)`
+with-doublets clusters have a disagreement between the cell-overlap best
+match and the marker-overlap best match; those rows are the ones to inspect
+manually before filling in the `TODO`s in
+`02_sex_cell_subanalysis_no_doublets.Rmd` and
+`03_trajectory_analysis_no_doublets.Rmd`. A blank
+`best_match_by_markers`/`marker_overlap_FDR` means that with-doublets
+cluster had no no-doublets cluster with a significant (FDR < 0.01) marker
+overlap at all, which is itself worth noting rather than a disagreement to
+resolve.
+
+# Session info
+
+```{r}
+sessionInfo()
+```
