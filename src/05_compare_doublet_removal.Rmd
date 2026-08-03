@@ -201,16 +201,82 @@ Background gene universe for the overlap test is the `r background_n` genes
 shared by both analyses' combined, uncorrected count matrices (the same
 universe `findMarkers` was run over in each analysis).
 
+`phyperOverlapSets` is called directly here rather than through
+`plot_marker_overlap_heatmap`. Comparing an analysis to a near-identical
+reanalysis produces overlaps so significant that the hypergeometric p-values
+underflow to exactly 0, making `-log10(FDR)` infinite and breaking the
+`hclust` row and column ordering inside that helper. The output files are the
+same ones the helper would have written, so the sections below are unaffected.
+
+```{r}
+cluster_ol = phyperOverlapSets(genes_A, genes_B, background_n)
+
+shared_desc = gene_description %>% dplyr::rename(SharedGene = "Gene")
+
+write.csv(cluster_ol$intersecting.genes %>% left_join(shared_desc, by = "SharedGene"),
+          file = paste0(results_dir, "/cluster_marker_gene_overlaps.csv"),
+          row.names = FALSE)
+
+overlap_scores_all = cluster_ol$pval.scores %>%
+  dplyr::rename(CellTypes = "Group1", Clusters = "Group2") %>%
+  group_by(CellTypes) %>%
+  mutate(FDR = p.adjust(Pval, "BH")) %>%
+  ungroup()
+
+write.csv(overlap_scores_all,
+          file = paste0(results_dir, "/cluster_marker_overlap_pvalues.csv"),
+          row.names = FALSE)
+
+n_underflow = sum(overlap_scores_all$FDR == 0)
+```
+
+`r n_underflow` of `r nrow(overlap_scores_all)` cluster pairs have an FDR that
+underflowed to 0. For plotting only, these are capped at the largest finite
+`-log10(FDR)` observed, so they are shown as the most significant color rather
+than dropped. The exported p-value table keeps the raw values.
+
 ```{r, fig.width=10, fig.height=8}
-plot_marker_overlap_heatmap(
-  known_markers    = genes_A,
-  test_genes       = genes_B,
-  background_n     = background_n,
-  gene_description = gene_description,
-  overlaps_file    = paste0(results_dir, "/cluster_marker_gene_overlaps.csv"),
-  pvals_file       = paste0(results_dir, "/cluster_marker_overlap_pvalues.csv"),
-  plot_file        = paste0(results_dir, "/cluster_marker_overlap_heatmap.png")
-)
+plot_scores = overlap_scores_all %>% mutate(logFDR = -log10(FDR))
+
+finite_max = suppressWarnings(max(plot_scores$logFDR[is.finite(plot_scores$logFDR)]))
+if (!is.finite(finite_max)) finite_max = 300
+
+plot_scores = plot_scores %>%
+  mutate(logFDR = ifelse(is.finite(logFDR), logFDR, finite_max))
+
+FDR_wide = plot_scores %>%
+  tidyr::pivot_wider(id_cols = CellTypes, names_from = Clusters, values_from = logFDR)
+
+CellTypes          = FDR_wide$CellTypes
+FDR_wide$CellTypes = NULL
+FDR_mat            = as.matrix(FDR_wide)
+rownames(FDR_mat)  = CellTypes
+FDR_mat[!is.finite(FDR_mat)] = 0
+
+# hclust needs at least 3 items and cannot take NA/Inf; fall back to the
+# existing order when there are too few clusters to cluster
+ord_row = if (nrow(FDR_mat) > 2) hclust(dist(FDR_mat),    method = "ward.D")$order else seq_len(nrow(FDR_mat))
+ord_col = if (ncol(FDR_mat) > 2) hclust(dist(t(FDR_mat)), method = "ward.D")$order else seq_len(ncol(FDR_mat))
+
+plot_scores$CellTypes = factor(plot_scores$CellTypes, levels = rownames(FDR_mat)[ord_row])
+plot_scores$Clusters  = factor(plot_scores$Clusters,  levels = colnames(FDR_mat)[ord_col])
+
+ggplot(plot_scores, aes(Clusters, CellTypes)) +
+  geom_tile(aes(fill = logFDR), color = "light gray") +
+  guides(fill = guide_colorbar(title = "-log10(FDR)",
+                               barheight = 10, barwidth = 2,
+                               default.unit = "mm")) +
+  scale_fill_gradientn(colors = c("white", "#fd9668", "#f1605d", "#de4968", "#9e2f7f"),
+                       guide = "colorbar") +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1)) +
+  theme(text = element_text(size = 7), axis.text = element_text(size = 7)) +
+  geom_text(aes(label = nSharedGenes), size = 1) +
+  xlab("No-doublets cluster") +
+  ylab("With-doublets cluster") +
+  coord_fixed()
+
+ggsave(file = paste0(results_dir, "/cluster_marker_overlap_heatmap.png"),
+       width = 10, height = 8)
 ```
 
 ## Significant marker gene overlaps (FDR < 0.01)
@@ -235,13 +301,17 @@ cell type, or lost its defining markers after doublets were removed) and
 should not be assumed to correspond to anything one-to-one.
 
 ```{r}
+# many FDRs tie at 0 after underflow, so break ties on the number of shared
+# genes rather than letting slice_min pick arbitrarily
 best_by_markers = overlap_scores %>%
   group_by(CellTypes) %>%
-  slice_min(FDR, n = 1, with_ties = FALSE) %>%
+  arrange(FDR, desc(nSharedGenes), .by_group = TRUE) %>%
+  slice_head(n = 1) %>%
   ungroup() %>%
   transmute(label_A = as.integer(gsub("wDbl_", "", CellTypes)),
             best_match_by_markers = gsub("noDbl_", "", Clusters),
-            marker_overlap_FDR = FDR)
+            marker_overlap_FDR = FDR,
+            marker_overlap_nSharedGenes = nSharedGenes)
 
 combined_correspondence = best_match %>%
   dplyr::select(label_A, best_match_by_cells = best_match_label_B, pct_of_A_cluster) %>%
