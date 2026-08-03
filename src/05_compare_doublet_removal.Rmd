@@ -103,7 +103,7 @@ label_df = data.frame(
 )
 
 contingency = label_df %>%
-  count(label_A, label_B, name = "n_cells") %>%
+  dplyr::count(label_A, label_B, name = "n_cells") %>%
   group_by(label_A) %>%
   mutate(pct_of_A_cluster = 100 * n_cells / sum(n_cells)) %>%
   ungroup()
