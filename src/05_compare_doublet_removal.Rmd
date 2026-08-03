@@ -128,7 +128,7 @@ best_match = contingency %>%
   slice_max(order_by = n_cells, n = 1, with_ties = FALSE) %>%
   ungroup() %>%
   arrange(label_A) %>%
-  rename(best_match_label_B = label_B)
+  dplyr::rename(best_match_label_B = label_B)
 
 write.csv(best_match, file = paste0(results_dir, "/cluster_best_match_by_cells.csv"),
           row.names = FALSE)
@@ -228,7 +228,7 @@ best_by_markers = overlap_scores %>%
             marker_overlap_FDR = FDR)
 
 combined_correspondence = best_match %>%
-  select(label_A, best_match_by_cells = best_match_label_B, pct_of_A_cluster) %>%
+  dplyr::select(label_A, best_match_by_cells = best_match_label_B, pct_of_A_cluster) %>%
   full_join(best_by_markers, by = "label_A") %>%
   mutate(agree = as.character(best_match_by_cells) == as.character(best_match_by_markers)) %>%
   arrange(label_A)
