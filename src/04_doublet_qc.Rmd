@@ -1,0 +1,352 @@
+---
+title: "04_doublet_qc"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+This document adds `scDblFinder` doublet scores to the existing merged, clustered
+object. It does not rerun clustering, integration or trajectory analysis, and it
+does not modify any upstream script or result. See the per-sample QC documents
+(`TF_sample_qc.Rmd`, `TM_sample_qc.Rmd`, `UND1_sample_qc.Rmd`, `UND2_sample_qc.Rmd`)
+for doublet scoring at the single-library level; this document works on the
+combined, integrated object so that scores can be examined alongside final
+cluster assignments.
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(monocle3)
+library(scDblFinder)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir     = paste0(params$project_dir, "/results/20260803")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+```
+
+```{r, echo=FALSE}
+# load the existing merged/clustered objects. These are not modified in place;
+# updated copies are saved to Robject_out_dir below.
+Robject_dir  = paste0(params$project_dir, "/results/20260312/Robjects")
+all.sce      = readRDS(paste0(Robject_dir, "/all.sce.Rds"))
+merged.sce   = readRDS(paste0(Robject_dir, "/merged.sce.Rds"))
+merged.cds   = readRDS(paste0(Robject_dir, "/merged.cds.Rds"))
+combined.sce = readRDS(paste0(Robject_dir, "/combined.sce.Rds"))
+```
+
+```{r, echo=FALSE}
+# load pre-computed doublet scores for rendering; produced by the eval=FALSE
+# chunk below.
+dbl_df = readRDS(paste0(Robject_out_dir, "/dbl_df.Rds"))
+```
+
+# Score doublets per sample
+
+`scDblFinder` is run separately on each element of `all.sce`, i.e. per library,
+without a `samples =` argument, since each list element already is one library.
+`sum` and `detected` (library size and genes detected, computed during per-sample
+QC) are carried along from each element's existing `colData` so they can be
+used in the diagnostic tables below.
+
+```{r, eval=FALSE}
+set.seed(100)
+all.sce = lapply(all.sce, scDblFinder)
+
+dbl_df_list = lapply(names(all.sce), function(s) {
+  cd = colData(all.sce[[s]])
+  data.frame(
+    sample            = s,
+    barcode           = colnames(all.sce[[s]]),
+    scDblFinder.score = cd$scDblFinder.score,
+    scDblFinder.class = cd$scDblFinder.class,
+    sum               = cd$sum,
+    detected          = cd$detected,
+    stringsAsFactors  = FALSE
+  )
+})
+dbl_df = do.call(rbind, dbl_df_list)
+
+saveRDS(all.sce, file = paste0(Robject_out_dir, "/all.sce.dbl.Rds"))
+saveRDS(dbl_df,  file = paste0(Robject_out_dir, "/dbl_df.Rds"))
+write.csv(dbl_df, file = paste0(results_dir, "/doublet_scores_per_sample.csv"),
+          row.names = FALSE)
+```
+
+# Join doublet scores to `merged.sce`
+
+Barcodes are not trusted to be unique across samples on their own, so the join
+key is the sample and barcode pair, not the barcode alone.
+
+```{r}
+merged_barcodes_unique = !anyDuplicated(colnames(merged.sce))
+
+all_sce_barcodes = unlist(lapply(all.sce, colnames), use.names = FALSE)
+same_order = identical(colnames(merged.sce), all_sce_barcodes)
+
+dbl_df$sample_barcode = paste(dbl_df$sample, dbl_df$barcode, sep = "__")
+merged_key = paste(colData(merged.sce)$batch, colnames(merged.sce), sep = "__")
+
+match_idx = match(merged_key, dbl_df$sample_barcode)
+
+n_matched          = sum(!is.na(match_idx))
+n_unmatched_merged  = sum(is.na(match_idx))
+n_unmatched_dbl     = sum(!dbl_df$sample_barcode %in% merged_key)
+```
+
+* `colnames(merged.sce)` are `r if (merged_barcodes_unique) "unique" else "NOT unique"`.
+* `colnames(merged.sce)` `r if (same_order) "match" else "do NOT match"` the barcodes of the concatenated `all.sce` elements, in the same order.
+* `r n_matched` of `r ncol(merged.sce)` cells in `merged.sce` matched a doublet score.
+* `r n_unmatched_merged` cells in `merged.sce` had no matching doublet score.
+* `r n_unmatched_dbl` scored cells had no matching cell in `merged.sce`.
+
+```{r}
+if (n_unmatched_merged > 0 || n_unmatched_dbl > 0) {
+  stop(paste0(
+    n_unmatched_merged, " cell(s) in merged.sce have no matching doublet score, and ",
+    n_unmatched_dbl, " scored cell(s) have no matching cell in merged.sce. ",
+    "Stopping here rather than attaching a partial or misaligned join."
+  ))
+}
+
+dbl_ordered = dbl_df[match_idx, ]
+row_order_ok = identical(dbl_ordered$sample_barcode, merged_key)
+```
+
+Row order after joining is `r if (row_order_ok) "identical" else "NOT identical"` to the column order of `merged.sce`.
+
+```{r}
+stopifnot(row_order_ok)
+
+colData(merged.sce)$scDblFinder.score = dbl_ordered$scDblFinder.score
+colData(merged.sce)$scDblFinder.class = dbl_ordered$scDblFinder.class
+
+colData(merged.cds)$scDblFinder.score = dbl_ordered$scDblFinder.score
+colData(merged.cds)$scDblFinder.class = dbl_ordered$scDblFinder.class
+```
+
+# Save updated objects
+
+Updated `merged.sce` and `merged.cds` are saved to a new results directory. The
+originals in `results/20260312/Robjects` are not touched.
+
+```{r}
+saveRDS(merged.sce, file = paste0(Robject_out_dir, "/merged.sce.Rds"))
+saveRDS(merged.cds, file = paste0(Robject_out_dir, "/merged.cds.Rds"))
+```
+
+# Diagnostics
+
+No cells or clusters are removed anywhere in this document; every step below is
+descriptive. Cluster identity is referred to only by number (`merged.sce$label`),
+not by the cell-type annotation assigned in `01_all_cells_clustering_annotation.Rmd`.
+Those names come from marker expression and GO enrichment and describe a
+transcriptional program, not observed cell morphology, so a name that mentions
+cytokinesis or cysts is not used here as evidence that a cluster contains
+multiplets.
+
+Two features of this dataset resemble doublets without being technical
+multiplets: the germ cell clusters form a differentiation trajectory, so
+transcriptional intermediates between them genuinely resemble a mixture of
+neighboring states; and oocytes have high RNA content, so elevated library size
+in an oocyte cluster is expected biology, not evidence of doublets.
+
+## Overall and per-sample doublet rate
+
+```{r}
+overall_pct = 100 * mean(colData(merged.sce)$scDblFinder.class == "doublet")
+
+sample_summary = dbl_df %>%
+  group_by(sample) %>%
+  summarize(n_cells      = n(),
+            pct_doublet  = 100 * mean(scDblFinder.class == "doublet"),
+            median_score = median(scDblFinder.score))
+```
+
+Across the merged dataset, `r round(overall_pct, 2)`% of cells are called doublets.
+
+```{r}
+datatable(sample_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+## Per-cluster summary
+
+```{r}
+qc_df = data.frame(
+  cluster            = as.integer(as.character(colData(merged.sce)$label)),
+  scDblFinder.score  = colData(merged.sce)$scDblFinder.score,
+  scDblFinder.class  = colData(merged.sce)$scDblFinder.class,
+  sum                = dbl_ordered$sum,
+  detected           = dbl_ordered$detected
+)
+
+cluster_summary = qc_df %>%
+  group_by(cluster) %>%
+  summarize(n_cells               = n(),
+            median_score          = median(scDblFinder.score),
+            pct_doublet           = 100 * mean(scDblFinder.class == "doublet"),
+            median_UMI            = median(sum),
+            median_genes_detected = median(detected)) %>%
+  arrange(desc(pct_doublet))
+
+write.csv(cluster_summary, file = paste0(results_dir, "/doublet_cluster_summary.csv"),
+          row.names = FALSE)
+
+datatable(cluster_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+## Discriminating test: doublet rate versus library size
+
+A cluster with both an elevated doublet rate and elevated library size is
+consistent with true multiplets. A cluster with an elevated doublet rate but
+ordinary library size is more consistent with a transitional state along the
+germ cell trajectory. Elevated is defined here, relative to the whole dataset,
+as more than twice the overall doublet rate, or more than 1.5x the overall
+median UMI count.
+
+```{r}
+overall_median_UMI = median(qc_df$sum)
+
+cluster_summary = cluster_summary %>%
+  mutate(elevated_doublet_rate = pct_doublet > 2 * overall_pct,
+         elevated_library_size = median_UMI > 1.5 * overall_median_UMI)
+
+flagged = cluster_summary %>% filter(elevated_doublet_rate)
+```
+
+```{r, results="asis"}
+if (nrow(flagged) == 0) {
+  cat("No cluster has a doublet rate more than twice the dataset-wide rate.\n")
+} else {
+  for (i in seq_len(nrow(flagged))) {
+    cl      = flagged$cluster[i]
+    pattern = if (flagged$elevated_library_size[i]) {
+      "combines an elevated doublet rate with elevated library size, consistent with true multiplets."
+    } else {
+      "has an elevated doublet rate without elevated library size, more consistent with a transitional state than with technical multiplets."
+    }
+    cat("* Cluster", cl, pattern, "\n")
+  }
+}
+```
+
+## Marker co-expression in flagged clusters
+
+Genuine doublets are expected to co-express markers of incompatible lineages;
+genuine transitional cells are expected to shift within one lineage.
+Germ cell markers: `DDX4`, `PIWIL1`, `SYCP3`. Somatic markers: `FOXL2`,
+`S100A1`, `SOX18`, `RBPMS`. Symbols are checked against `rownames(combined.sce)`
+before use; the count matrix uses the same gene identifiers as the per-sample
+QC documents, which may not be human gene symbols.
+
+```{r}
+germ_markers    = c("DDX4", "PIWIL1", "SYCP3")
+somatic_markers = c("FOXL2", "S100A1", "SOX18", "RBPMS")
+
+germ_present    = germ_markers[germ_markers %in% rownames(combined.sce)]
+somatic_present = somatic_markers[somatic_markers %in% rownames(combined.sce)]
+
+germ_missing    = setdiff(germ_markers, germ_present)
+somatic_missing = setdiff(somatic_markers, somatic_present)
+```
+
+* Germ cell markers found in `rownames(combined.sce)`: `r if (length(germ_present) > 0) paste(germ_present, collapse = ", ") else "none"`.
+* Germ cell markers not found: `r if (length(germ_missing) > 0) paste(germ_missing, collapse = ", ") else "none"`.
+* Somatic markers found in `rownames(combined.sce)`: `r if (length(somatic_present) > 0) paste(somatic_present, collapse = ", ") else "none"`.
+* Somatic markers not found: `r if (length(somatic_missing) > 0) paste(somatic_missing, collapse = ", ") else "none"`.
+
+```{r}
+if (nrow(flagged) > 0 && length(germ_present) > 0 && length(somatic_present) > 0) {
+
+  stopifnot(!anyDuplicated(colnames(combined.sce)))
+  stopifnot(all(colnames(merged.sce) %in% colnames(combined.sce)))
+  combined.sce.ord = combined.sce[, colnames(merged.sce)]
+
+  expr_assay = if ("logcounts" %in% assayNames(combined.sce.ord)) {
+    logcounts(combined.sce.ord)
+  } else {
+    counts(combined.sce.ord)
+  }
+
+  coexpr_list = lapply(flagged$cluster, function(cl) {
+    idx = which(qc_df$cluster == cl)
+    germ_expr    = colSums(expr_assay[germ_present, idx, drop = FALSE] > 0) > 0
+    somatic_expr = colSums(expr_assay[somatic_present, idx, drop = FALSE] > 0) > 0
+    data.frame(cluster        = cl,
+               n_cells        = length(idx),
+               pct_coexpressing = 100 * mean(germ_expr & somatic_expr))
+  })
+
+  coexpr_df = do.call(rbind, coexpr_list)
+  datatable(coexpr_df %>% mutate(across(where(is.numeric), ~round(., 2))),
+            rownames = FALSE)
+
+} else if (nrow(flagged) > 0) {
+  cat("Co-expression could not be checked: at least one marker set is entirely absent from rownames(combined.sce).\n")
+}
+```
+
+## Figures
+
+Doublet score on the existing TSNE.
+
+```{r, fig.width=6, fig.height=6}
+plotTSNE(merged.sce, colour_by = "scDblFinder.score", point_size = .05)
+ggsave(file = paste0(results_dir, "/doublet_score_tsne.png"))
+```
+
+Doublet score distribution per cluster.
+
+```{r, fig.width=8, fig.height=5}
+ggplot(qc_df, aes(x = factor(cluster), y = scDblFinder.score)) +
+  geom_violin() +
+  xlab("Cluster") +
+  ylab("scDblFinder score")
+
+ggsave(file = paste0(results_dir, "/doublet_score_violin_per_cluster.png"))
+```
+
+# Summary for the manuscript
+
+**Methods.** `scDblFinder` (v`r as.character(packageVersion("scDblFinder"))`) was
+run independently on each of the four per-sample `SingleCellExperiment` objects,
+prior to integration, to score each cell's similarity to simulated intra-sample
+doublets. Scores and classifications were joined to the integrated,
+batch-corrected object by matching sample and cell barcode, verifying a
+complete, uniquely ordered match before attaching the columns. No cells were
+removed or excluded from downstream analysis on the basis of these scores.
+
+**Reviewer response.** We assessed potential doublets using `scDblFinder`, run
+per library prior to integration. `r round(overall_pct, 2)`% of cells were
+called doublets overall. `r if (nrow(flagged) == 0) "No cluster showed both an elevated doublet rate and elevated library size, the combined signature expected of true multiplets." else paste0(nrow(flagged), " cluster(s) showed an elevated doublet rate; see the discriminating test above for whether library size and marker co-expression in each case are consistent with true multiplets or with transitional germ cell states.")` We did not remove any cells based on these scores: this dataset contains an explicit germ cell differentiation trajectory, so transcriptional intermediates between states are expected, and oocytes have naturally high RNA content, so elevated library size in an oocyte cluster is expected biology. Both resemble the doublet signature without being technical artifacts, so `scDblFinder` scores are reported here as a diagnostic, not a filter.
+
+# Session info
+
+```{r}
+sessionInfo()
+```
