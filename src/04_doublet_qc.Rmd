@@ -58,21 +58,15 @@ merged.cds   = readRDS(paste0(Robject_dir, "/merged.cds.Rds"))
 combined.sce = readRDS(paste0(Robject_dir, "/combined.sce.Rds"))
 ```
 
-```{r, echo=FALSE}
-# load pre-computed doublet scores for rendering; produced by the eval=FALSE
-# chunk below.
-dbl_df = readRDS(paste0(Robject_out_dir, "/dbl_df.Rds"))
-```
-
 # Score doublets per sample
 
-`scDblFinder` is run separately on each element of `all.sce`, i.e. per library,
-without a `samples =` argument, since each list element already is one library.
-`sum` and `detected` (library size and genes detected, computed during per-sample
-QC) are carried along from each element's existing `colData` so they can be
-used in the diagnostic tables below.
+`scDblFinder` is run here, directly on the loaded `all.sce`, separately on each
+element, i.e. per library, without a `samples =` argument, since each list
+element already is one library. `sum` and `detected` (library size and genes
+detected, computed during per-sample QC) are carried along from each element's
+existing `colData` so they can be used in the diagnostic tables below.
 
-```{r, eval=FALSE}
+```{r}
 set.seed(100)
 all.sce = lapply(all.sce, scDblFinder)
 
