@@ -1,0 +1,884 @@
+---
+title: "06_stage_composition"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+A reviewer noted that developmental stage is confounded with collection date,
+season and technical batch: the two larval libraries were collected in July 2023
+and the two transformer libraries in November 2023.
+
+**What does not discriminate.** Finding that early trajectory positions are
+larval and late positions transformer does not settle the question, because two
+different explanations predict it equally well. One is a residual batch effect.
+The other is that the underlying populations genuinely do not co-occur, if
+primordial germ cells are largely absent from transformers and differentiated
+germ cells largely absent from larvae. Whether that is true of sea lamprey is a
+biological question this dataset was not designed to answer, and it is treated
+here as an open possibility rather than an established fact. Either way, the
+consequence for the analysis is the same: observed segregation along pseudotime
+is uninformative, because it is what both explanations predict.
+
+The reverse is not symmetric. Cells of both stages occupying the *same* state is
+not predicted by a batch effect, so overlap, where it occurs, does carry
+information. Section 4 is that comparison, and it also bears on the biological
+question above: if larval and transformer cells are found in the same germ cell
+populations, then those states are not stage-exclusive.
+
+Sections 1 to 3 report the pseudotime distribution descriptively, for
+transparency about how the libraries sit in the data. No argument is drawn from
+segregation in either direction.
+
+**What does discriminate.** Two things, in sections 4 and 5:
+
+  * Which populations are shared between stages. A cell state occupied by both
+    larval and transformer cells is not predicted by a batch effect. If the
+    shared population is a germ cell state, that is considerably stronger than
+    a shared somatic one, and stronger still if the same genes mark that
+    population when larval and transformer cells are examined separately.
+  * How annotation markers behave along pseudotime, in uncorrected expression.
+    If a marker rises or falls monotonically along the inferred ordering, and
+    does so within individual libraries rather than only across them, that
+    ordering carries biological signal that does not come from the library of
+    origin.
+
+Nothing is recomputed here. The clustering, integration and trajectory objects
+are loaded as produced by `01_all_cells_clustering_annotation.Rmd`,
+`02_sex_cell_subanalysis.Rmd` and `03_trajectory_analysis.Rmd`.
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(monocle3)
+library(TSCAN)
+library(readxl)
+library(rtracklayer)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir     = paste0(params$project_dir, "/results/20260804_stage_composition")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+data_dir        = paste0(params$project_dir, "/data")
+```
+
+```{r, echo=FALSE}
+# load pre-computed objects for rendering
+Robject_dir    = paste0(params$project_dir, "/results/20260312/Robjects")
+all.sex.sce    = readRDS(paste0(Robject_dir, "/no.support.sex.sce.Rds"))
+merged.sex.sce = readRDS(paste0(Robject_dir, "/no.support.merged.sex.sce.Rds"))
+pseudo         = readRDS(paste0(Robject_dir, "/no.support.merged.sex.pseudo.Rds"))
+merged.sce     = readRDS(paste0(Robject_dir, "/merged.sce.Rds"))
+combined.sce   = readRDS(paste0(Robject_dir, "/combined.sce.Rds"))
+```
+
+```{r}
+# broad annotations, as assigned in 02 and 03. These are the MST node names.
+anno_germ = c(
+  "FGC.migrating",
+  "PGC",
+  "Oogonia.stem.cells",
+  "Oocytes",
+  "Cyst.epithelial.cells",
+  "Oogonia",
+  "SPC.cytokinetic",
+  "MGC.SPC.group2",
+  "MGC.SPC.group1",
+  "MGC.SPC.group3",
+  "MGC.SPC.group2",
+  "MGC.SPC.group1",
+  "MGC.SPC.group3",
+  "MGC.SPC.group2",
+  "MGC.SPC.group3"
+)
+
+narrow_germ = c(
+  "Female germ cells (migrating)",
+  "Primordial germ cells (migrating, differentiated, cyst)",
+  "Oogonia (mitotic, cyst, stem cells)",
+  "Oocytes",
+  "Cyst epithelial cells",
+  "Oogonia (mitotic, cyst, cell fate committed)",
+  "Spermatocytes (cytokinetic)",
+  "Male germ cells (migrating, cell fate committed, differentiated)",
+  "Spermatocytes (meiosis arrested)",
+  "Spermatocytes (migrating, S-phase, cyst connected with cell bridges, cell fate committed, GPCR-activated)",
+  "Spermatocytes (apoptotic, meiosis arrested)",
+  "Male germ cells (migrating, differentiated)",
+  "Spermatocytes (angiogenic, cell fate committed, GPCR-activated)",
+  "Spermatocytes (cell fate committed)",
+  "Male germ cells (migrating, cell fate committed, differentiated, wounded)"
+)
+
+colData(merged.sex.sce)$broad  = anno_germ[colData(merged.sex.sce)$label]
+colData(merged.sex.sce)$narrow = narrow_germ[colData(merged.sex.sce)$label]
+
+# all-cells annotations, as assigned in 01
+anno_all = c(
+  "1. Fibroblasts (migrating)",
+  "2. Mesonephric cells",
+  "3. Granulosa cells (migrating)",
+  "4. Granulosa cells",
+  "5. Oogonia/Oocytes",
+  "6. Endothelial cells",
+  "7. Primordial germ cells (migrating)",
+  "8. Erythrocytes",
+  "9. Pre-granulosa cells (migrating)",
+  "10. Leukocytes",
+  "11. Hemopoietic stem cells",
+  "12. Podocytes",
+  "13. Macrophages",
+  "14. Pre-granulosa cells (mitotic)",
+  "15. Immune cells (migrating, mitotic)",
+  "16. Spermatocytes (cytokinetic)",
+  "17. Male germ cells (migrating)",
+  "18. Spermatocytes (apoptotic)",
+  "19. Spermatocytes (GPCR-activated)"
+)
+```
+
+# Library and stage assignment
+
+Library identifiers are read from the objects rather than assumed. The mapping
+below is checked against what is actually present, and the document stops if they
+disagree.
+
+```{r}
+library_meta = data.frame(
+  batch      = c("UND1_C00004336", "UND2_C00004362", "TF_C00004337", "TM_C00004374"),
+  library    = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male"),
+  stage      = c("larva", "larva", "transformer", "transformer"),
+  collection = c("July 2023", "July 2023", "November 2023", "November 2023"),
+  stringsAsFactors = FALSE
+)
+
+observed_germ = sort(unique(as.character(colData(merged.sex.sce)$batch)))
+observed_all  = sort(unique(as.character(colData(merged.sce)$batch)))
+
+unexpected = setdiff(union(observed_germ, observed_all), library_meta$batch)
+missing_germ = setdiff(library_meta$batch, observed_germ)
+```
+
+* Libraries in `merged.sex.sce`: `r paste(observed_germ, collapse = ", ")`
+* Libraries in `merged.sce`: `r paste(observed_all, collapse = ", ")`
+* Identifiers present in the objects but not in the mapping: `r if (length(unexpected) > 0) paste(unexpected, collapse = ", ") else "none"`
+* Libraries in the mapping with no cells in the germ cell object: `r if (length(missing_germ) > 0) paste(missing_germ, collapse = ", ") else "none"`
+
+```{r}
+if (length(unexpected) > 0) {
+  stop(paste0("Library identifier(s) found in the objects that are not in ",
+              "library_meta: ", paste(unexpected, collapse = ", "),
+              ". Add them before proceeding, rather than silently dropping cells."))
+}
+
+datatable(library_meta, rownames = FALSE)
+```
+
+Stage is derived from the library, and the library identifier is kept as a
+separate variable throughout. This matters because the male and female branches
+each come from a single library, so a population that is stage-pure is also
+library-pure by construction, and the two facts are not independent evidence.
+
+```{r}
+germ_meta = as.data.frame(colData(merged.sex.sce))
+germ_meta$barcode = rownames(germ_meta)
+germ_meta = germ_meta %>% left_join(library_meta, by = "batch")
+
+common.pseudo = averagePseudotime(pseudo$ordering)
+stopifnot(length(common.pseudo) == nrow(germ_meta))
+germ_meta$Pseudotime = common.pseudo
+
+pseudo_mat = pathStat(pseudo$ordering)
+barcodes_match = identical(rownames(pseudo_mat), colnames(merged.sex.sce))
+```
+
+Pseudotime matrix row names `r if (barcodes_match) "match" else "do NOT match"` the
+column names of `merged.sex.sce`, in the same order.
+
+```{r}
+stopifnot(barcodes_match)
+branch_names = colnames(pseudo_mat)
+```
+
+Branches returned by `quickPseudotime`: `r paste(branch_names, collapse = ", ")`.
+
+```{r}
+all_meta = as.data.frame(colData(merged.sce))
+all_meta$barcode = rownames(all_meta)
+all_meta = all_meta %>% left_join(library_meta, by = "batch")
+all_meta$CellType = anno_all[all_meta$label]
+```
+
+# Descriptive: how the libraries are distributed
+
+Sections 1 to 3 are descriptive only. As stated above, the pattern they show is
+predicted equally by a developmental trajectory and by a corrected batch effect,
+so nothing is concluded from them. They are included so the distribution is on
+the record rather than left implicit in Figure 7A.
+
+## 1. Composition of each MST node
+
+The MST nodes are the broad annotation groups the trajectory was built over.
+Figure 7A shows these as pie charts; the underlying numbers are tabulated here.
+Every node is reported, sorted by percentage larval, descending.
+
+```{r}
+node_lib = germ_meta %>%
+  dplyr::count(broad, library, name = "n") %>%
+  group_by(broad) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+node_stage = germ_meta %>%
+  dplyr::count(broad, stage, name = "n") %>%
+  group_by(broad) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+node_lib_wide = node_lib %>%
+  tidyr::pivot_wider(id_cols = broad, names_from = library,
+                     values_from = c(n, pct), values_fill = 0)
+
+node_stage_wide = node_stage %>%
+  tidyr::pivot_wider(id_cols = broad, names_from = stage,
+                     values_from = c(n, pct), values_fill = 0)
+
+node_pseudo = germ_meta %>%
+  group_by(broad) %>%
+  summarize(n_cells = n(),
+            mean_pseudotime   = mean(Pseudotime, na.rm = TRUE),
+            median_pseudotime = median(Pseudotime, na.rm = TRUE),
+            .groups = "drop")
+
+node_dominant = node_lib %>%
+  group_by(broad) %>%
+  slice_max(pct, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(broad,
+            dominant_library = library,
+            dominant_library_pct = pct,
+            single_library_dominated = pct >= 90)
+
+node_comp = node_pseudo %>%
+  left_join(node_stage_wide, by = "broad") %>%
+  left_join(node_lib_wide,   by = "broad") %>%
+  left_join(node_dominant,   by = "broad") %>%
+  arrange(desc(pct_larva))
+
+write.csv(node_comp, file = paste0(results_dir, "/SuppTable_node_composition.csv"),
+          row.names = FALSE)
+
+datatable(node_comp %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r}
+dominated = node_comp %>% filter(single_library_dominated)
+```
+
+`r if (nrow(dominated) == 0) "No node draws 90% or more of its cells from a single library." else paste0("Nodes drawing 90% or more of their cells from a single library: ", paste0(dominated$broad, " (", round(dominated$dominant_library_pct, 1), "% ", dominated$dominant_library, ")", collapse = "; "), ".")`
+
+```{r, fig.width=9, fig.height=5}
+node_order = node_comp %>% arrange(mean_pseudotime) %>% pull(broad)
+
+p_node = ggplot(node_stage %>% mutate(broad = factor(broad, levels = node_order)),
+                aes(x = broad, y = pct, fill = stage)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c(larva = "#009292", transformer = "#FF6DB6")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("MST node, ordered by mean pseudotime") +
+  ylab("Percent of cells")
+
+p_node
+ggsave(p_node, file = paste0(results_dir, "/node_stage_composition.png"),
+       width = 9, height = 5)
+```
+
+## 2. Stage composition along pseudotime, per branch
+
+```{r}
+branch_long =
+  as.data.frame(pseudo_mat) %>%
+  tibble::rownames_to_column("barcode") %>%
+  tidyr::pivot_longer(-barcode, names_to = "branch", values_to = "pseudotime") %>%
+  filter(!is.na(pseudotime)) %>%
+  left_join(germ_meta %>% dplyr::select(barcode, library, stage, broad, label),
+            by = "barcode")
+
+branch_summary = branch_long %>%
+  group_by(branch, stage) %>%
+  summarize(n_cells = n(),
+            min     = min(pseudotime),
+            p10     = quantile(pseudotime, 0.10),
+            median  = median(pseudotime),
+            p90     = quantile(pseudotime, 0.90),
+            max     = max(pseudotime),
+            .groups = "drop")
+
+overlap_tab = branch_summary %>%
+  dplyr::select(branch, stage, p10, p90) %>%
+  tidyr::pivot_wider(id_cols = branch, names_from = stage,
+                     values_from = c(p10, p90)) %>%
+  mutate(overlap_lo       = pmax(p10_larva, p10_transformer),
+         overlap_hi       = pmin(p90_larva, p90_transformer),
+         overlap_width    = pmax(0, overlap_hi - overlap_lo),
+         union_width      = pmax(p90_larva, p90_transformer) -
+                            pmin(p10_larva, p10_transformer),
+         overlap_fraction = overlap_width / union_width)
+
+pseudotime_table = branch_summary %>%
+  left_join(overlap_tab %>%
+              dplyr::select(branch, overlap_width, union_width, overlap_fraction),
+            by = "branch")
+
+write.csv(pseudotime_table,
+          file = paste0(results_dir, "/SuppTable_pseudotime_by_stage.csv"),
+          row.names = FALSE)
+
+datatable(pseudotime_table %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+```{r, fig.width=10, fig.height=4}
+p_density = ggplot(branch_long, aes(x = pseudotime, fill = stage, color = stage)) +
+  geom_density(alpha = 0.4) +
+  scale_fill_manual(values  = c(larva = "#009292", transformer = "#FF6DB6")) +
+  scale_color_manual(values = c(larva = "#009292", transformer = "#FF6DB6")) +
+  facet_wrap(~ branch, scales = "free") +
+  xlab("Pseudotime") + ylab("Density")
+
+p_density
+ggsave(p_density, file = paste0(results_dir, "/pseudotime_density_by_stage.png"),
+       width = 10, height = 4)
+```
+
+Pseudotime binned into ten equal-count bins per branch.
+
+```{r}
+decile_long = branch_long %>%
+  group_by(branch) %>%
+  mutate(decile = ntile(pseudotime, 10)) %>%
+  ungroup() %>%
+  dplyr::count(branch, decile, stage, name = "n") %>%
+  group_by(branch, decile) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+decile_wide = decile_long %>%
+  tidyr::pivot_wider(id_cols = c(branch, decile), names_from = stage,
+                     values_from = c(n, pct), values_fill = 0) %>%
+  arrange(branch, decile)
+
+write.csv(decile_wide,
+          file = paste0(results_dir, "/SuppTable_pseudotime_deciles.csv"),
+          row.names = FALSE)
+
+datatable(decile_wide %>% mutate(across(where(is.numeric), ~round(., 2))),
+          rownames = FALSE)
+```
+
+```{r, fig.width=10, fig.height=4}
+p_decile = ggplot(decile_long, aes(x = factor(decile), y = pct, fill = stage)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = c(larva = "#009292", transformer = "#FF6DB6")) +
+  facet_wrap(~ branch) +
+  xlab("Pseudotime decile") + ylab("Percent of cells")
+
+p_decile
+ggsave(p_decile, file = paste0(results_dir, "/pseudotime_decile_by_stage.png"),
+       width = 10, height = 4)
+```
+
+## 3. Subcluster composition
+
+```{r}
+germ_sub = germ_meta %>%
+  dplyr::count(label, library, stage, name = "n") %>%
+  group_by(label) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(clustering = "germ_subcluster", label = as.character(label))
+
+all_sub = all_meta %>%
+  dplyr::count(label, library, stage, name = "n") %>%
+  group_by(label) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup() %>%
+  mutate(clustering = "all_cells_cluster", label = as.character(label))
+
+subcluster_comp = bind_rows(germ_sub, all_sub) %>%
+  dplyr::select(clustering, label, library, stage, n, pct)
+
+write.csv(subcluster_comp,
+          file = paste0(results_dir, "/SuppTable_subcluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(subcluster_comp %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r, fig.width=9, fig.height=5}
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+
+p_sub = ggplot(germ_sub, aes(x = factor(label, levels = sort(unique(as.numeric(label)))),
+                             y = pct, fill = library)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = lib_cols) +
+  xlab("Germ cell subcluster") + ylab("Percent of cells")
+
+p_sub
+ggsave(p_sub, file = paste0(results_dir, "/subcluster_composition_by_library.png"),
+       width = 9, height = 5)
+```
+
+```{r, fig.width=9, fig.height=5}
+p_sub_all = ggplot(all_sub, aes(x = factor(label, levels = sort(unique(as.numeric(label)))),
+                                y = pct, fill = library)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = lib_cols) +
+  xlab("All-cells cluster") + ylab("Percent of cells")
+
+p_sub_all
+ggsave(p_sub_all, file = paste0(results_dir, "/all_cluster_composition_by_library.png"),
+       width = 9, height = 5)
+```
+
+# 4. Which populations are shared between stages
+
+A batch effect moves cells apart; it does not create a population occupied by
+both batches. Populations holding a substantial share of cells from both stages
+are therefore evidence that the integration is aligning real common biology.
+
+This also gives an empirical read on the assumption discussed at the top of the
+document. If germ cell populations turn out to be shared, then those states are
+not stage-exclusive, and the segregation seen along pseudotime is not simply a
+consequence of the populations existing at only one stage. If instead every germ
+cell population is stage-dominated, that is consistent both with stage-exclusive
+biology and with a batch effect, and the two remain unseparated by this evidence.
+
+Each cluster is classified as shared (at least 10% of its cells from each stage),
+larva-dominated (over 90% larval), transformer-dominated (over 90% transformer),
+or intermediate where it meets none of those thresholds.
+
+```{r}
+# germ or somatic, from the annotation text
+classify_population = function(x) {
+  x_l = tolower(x)
+  ifelse(grepl("germ|oogonia|oocyte|spermatocyt|spermatogon|pgc|fgc|mgc|spc", x_l),
+         "germ", "somatic")
+}
+
+stage_share = function(meta, label_col, name_col, clustering) {
+  meta %>%
+    dplyr::count(.data[[label_col]], .data[[name_col]], stage, name = "n") %>%
+    dplyr::rename(label = 1, population = 2) %>%
+    group_by(label, population) %>%
+    mutate(pct = 100 * n / sum(n)) %>%
+    ungroup() %>%
+    tidyr::pivot_wider(id_cols = c(label, population), names_from = stage,
+                       values_from = c(n, pct), values_fill = 0) %>%
+    mutate(clustering      = clustering,
+           n_cells         = n_larva + n_transformer,
+           population_type = classify_population(population),
+           sharing = case_when(
+             pct_larva >= 10 & pct_transformer >= 10 ~ "shared",
+             pct_larva > 90                          ~ "larva-dominated",
+             pct_transformer > 90                    ~ "transformer-dominated",
+             TRUE                                    ~ "intermediate"))
+}
+
+share_germ = stage_share(germ_meta %>% mutate(label_chr = as.character(label)),
+                         "label_chr", "narrow", "germ_subcluster")
+share_all  = stage_share(all_meta %>% mutate(label_chr = as.character(label)),
+                         "label_chr", "CellType", "all_cells_cluster")
+
+population_sharing = bind_rows(share_germ, share_all) %>%
+  dplyr::select(clustering, label, population, population_type, n_cells,
+                n_larva, n_transformer, pct_larva, pct_transformer, sharing)
+```
+
+```{r}
+sharing_counts = population_sharing %>%
+  dplyr::count(clustering, population_type, sharing, name = "n_populations")
+
+datatable(sharing_counts, rownames = FALSE)
+```
+
+```{r}
+shared_pops      = population_sharing %>% filter(sharing == "shared")
+shared_germ_pops = shared_pops %>% filter(population_type == "germ")
+shared_som_pops  = shared_pops %>% filter(population_type == "somatic")
+```
+
+`r nrow(shared_pops)` populations are shared, of which `r nrow(shared_germ_pops)`
+are germ cell populations and `r nrow(shared_som_pops)` are somatic.
+
+**Shared germ cell populations:**
+`r if (nrow(shared_germ_pops) == 0) "none." else paste0(paste0(shared_germ_pops$population, " (", shared_germ_pops$clustering, " ", shared_germ_pops$label, ", ", round(shared_germ_pops$pct_larva, 1), "% larval, ", shared_germ_pops$n_cells, " cells)"), collapse = "; ")`
+
+**Shared somatic populations:**
+`r if (nrow(shared_som_pops) == 0) "none." else paste0(paste0(shared_som_pops$population, " (", round(shared_som_pops$pct_larva, 1), "% larval)"), collapse = "; ")`
+
+## Do shared populations have the same markers in each stage?
+
+For each shared population, marker genes are computed twice: once using only
+larval cells and once using only transformer cells, in each case comparing that
+population against all other cells of the same stage in the same clustering.
+Uncorrected expression is used. If the two gene lists agree, the population is
+being aligned on common biology rather than merged by the correction.
+
+This step is expensive, so it is run once and saved.
+
+```{r, eval=FALSE}
+stage_split_markers = function(sce, labels, stage_vec, min_cells = 20) {
+  out = list()
+  for (st in unique(stage_vec)) {
+    keep = stage_vec == st
+    lab  = droplevels(factor(labels[keep]))
+    ok   = names(table(lab))[table(lab) >= min_cells]
+    if (length(ok) < 2) next
+    keep2 = keep
+    keep2[keep] = lab %in% ok
+    out[[st]] = findMarkers(sce[, keep2],
+                            droplevels(factor(labels[keep2])),
+                            test.type = "t",
+                            direction = "up",
+                            pval.type = "some")
+  }
+  out
+}
+
+# germ cell subclusters, uncorrected
+universe        = Reduce(intersect, lapply(all.sex.sce, rownames))
+all.sex.sce2    = lapply(all.sex.sce, "[", i = universe, )
+all.sex.sce2[["TM_C00004374"]]@colData$cluster = "noclust"
+combined.sex.sce = do.call(cbind, all.sex.sce2)
+stopifnot(identical(colnames(combined.sex.sce), colnames(merged.sex.sce)))
+
+germ_markers_by_stage = stage_split_markers(
+  combined.sex.sce, colData(merged.sex.sce)$label, germ_meta$stage)
+
+all_markers_by_stage = stage_split_markers(
+  combined.sce, colData(merged.sce)$label, all_meta$stage)
+
+saveRDS(combined.sex.sce,
+        file = paste0(Robject_out_dir, "/combined.sex.sce.Rds"))
+saveRDS(list(germ = germ_markers_by_stage, all = all_markers_by_stage),
+        file = paste0(Robject_out_dir, "/stage_split_markers.Rds"))
+```
+
+```{r, echo=FALSE}
+combined.sex.sce   = readRDS(paste0(Robject_out_dir, "/combined.sex.sce.Rds"))
+stage_split        = readRDS(paste0(Robject_out_dir, "/stage_split_markers.Rds"))
+```
+
+```{r}
+top_markers_for = function(marker_list, lab, n = 50) {
+  if (is.null(marker_list)) return(character(0))
+  if (!lab %in% names(marker_list)) return(character(0))
+  rownames(marker_list[[lab]])[seq_len(min(n, nrow(marker_list[[lab]])))]
+}
+
+marker_agreement = shared_pops %>%
+  rowwise() %>%
+  mutate(
+    ml = list(if (clustering == "germ_subcluster") stage_split$germ[["larva"]]
+              else stage_split$all[["larva"]]),
+    mt = list(if (clustering == "germ_subcluster") stage_split$germ[["transformer"]]
+              else stage_split$all[["transformer"]]),
+    top_larva       = list(top_markers_for(ml, as.character(label))),
+    top_transformer = list(top_markers_for(mt, as.character(label))),
+    n_top_larva       = length(top_larva),
+    n_top_transformer = length(top_transformer),
+    n_shared_markers  = length(intersect(top_larva, top_transformer)),
+    pct_shared_markers = ifelse(min(n_top_larva, n_top_transformer) > 0,
+                                100 * n_shared_markers /
+                                  min(n_top_larva, n_top_transformer), NA_real_),
+    shared_marker_genes = paste(intersect(top_larva, top_transformer),
+                                collapse = ";")) %>%
+  ungroup() %>%
+  dplyr::select(-ml, -mt, -top_larva, -top_transformer)
+
+population_sharing = population_sharing %>%
+  left_join(marker_agreement %>%
+              dplyr::select(clustering, label, n_top_larva, n_top_transformer,
+                            n_shared_markers, pct_shared_markers,
+                            shared_marker_genes),
+            by = c("clustering", "label"))
+
+write.csv(population_sharing,
+          file = paste0(results_dir, "/SuppTable_population_sharing.csv"),
+          row.names = FALSE)
+
+datatable(population_sharing %>%
+            dplyr::select(-shared_marker_genes) %>%
+            mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r}
+germ_agree = marker_agreement %>%
+  filter(population_type == "germ", !is.na(pct_shared_markers))
+```
+
+`r if (nrow(germ_agree) == 0) "No shared germ cell population had enough cells of both stages to compute stage-split markers, so marker agreement could not be assessed." else paste0("Across ", nrow(germ_agree), " shared germ cell population(s), the top 50 markers computed within larval cells and within transformer cells overlap by ", round(min(germ_agree$pct_shared_markers), 1), "% to ", round(max(germ_agree$pct_shared_markers), 1), "% (median ", round(median(germ_agree$pct_shared_markers), 1), "%).")`
+
+# 5. Marker behavior along pseudotime
+
+Uncorrected, per-library normalized log-expression is used here, not the
+`fastMNN` output, so any trend cannot be an artifact of the correction. Each
+marker is plotted against pseudotime per branch and colored by library, so it is
+visible whether a trend is carried by one sample or holds within several.
+
+Note that normalization is per library (`logNormCounts` applied to each sample in
+`02`), so absolute levels are not strictly comparable across libraries. The
+within-library trend, reported separately below, does not depend on that
+comparability; the pooled trend does.
+
+```{r}
+gene_description =
+  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip = 1) %>%
+  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
+                Gene        = "NCBI_GTF_GENEID",
+                description = "NCBI_GTF_ProteinInfo") %>%
+  dplyr::select(Gene, WangGeneID, description) %>%
+  filter(!is.na(Gene))
+
+markers_wide = read.csv(paste0(data_dir, "/Cell_Type_Marker_Genes_12-12-25.csv"))
+markers_wide = markers_wide[, 2:ncol(markers_wide)]
+
+markers_long = markers_wide %>%
+  pivot_longer(cols = everything(), names_to = "CellType", values_to = "Gene",
+               values_drop_na = TRUE) %>%
+  mutate(main_part = str_remove(Gene, "\\s*\\(.*\\)")) %>%
+  tidyr::separate_rows(main_part, sep = "/") %>%
+  mutate(main_part = trimws(main_part)) %>%
+  filter(main_part != "")
+
+germ_cell_types = c("Migrating.germ.cells", "Primordial.germ.cells", "Oocyte",
+                    "Oogonia", "Spermatogonia", "Spermatocytes",
+                    "Spermatogonial.stem.cells")
+
+requested = unique(c("DDX4", "PIWIL1", "SYCP3", "BOLL",
+                     markers_long %>%
+                       filter(CellType %in% germ_cell_types) %>%
+                       pull(main_part)))
+
+resolve_marker = function(symbol, sce_rownames, gd) {
+  if (symbol %in% sce_rownames) return(symbol)
+  g = gd$Gene[gd$WangGeneID == symbol]
+  g = g[g %in% sce_rownames]
+  if (length(g) > 0) return(g[1])
+  NA_character_
+}
+
+marker_map = data.frame(symbol = requested, stringsAsFactors = FALSE) %>%
+  rowwise() %>%
+  mutate(gene_id = resolve_marker(symbol, rownames(combined.sex.sce),
+                                  gene_description)) %>%
+  ungroup()
+
+resolved   = marker_map %>% filter(!is.na(gene_id))
+unresolved = marker_map %>% filter(is.na(gene_id))
+```
+
+* Annotation markers requested: `r nrow(marker_map)`
+* Resolved in `rownames(combined.sex.sce)`: `r nrow(resolved)`
+* Not found, and therefore excluded: `r if (nrow(unresolved) == 0) "none" else paste(unresolved$symbol, collapse = ", ")`
+
+```{r}
+stopifnot(identical(colnames(combined.sex.sce), colnames(merged.sex.sce)))
+
+expr_long =
+  as.matrix(logcounts(combined.sex.sce)[resolved$gene_id, , drop = FALSE]) %>%
+  t() %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("barcode") %>%
+  tidyr::pivot_longer(-barcode, names_to = "gene_id", values_to = "logexpr") %>%
+  left_join(resolved, by = "gene_id")
+
+expr_branch = branch_long %>%
+  dplyr::select(barcode, branch, pseudotime, library, stage) %>%
+  inner_join(expr_long, by = "barcode")
+```
+
+```{r}
+safe_rho = function(x, y) {
+  if (length(x) < 10) return(NA_real_)
+  if (length(unique(x)) < 2 || length(unique(y)) < 2) return(NA_real_)
+  suppressWarnings(cor(x, y, method = "spearman"))
+}
+
+safe_slope = function(x, y) {
+  if (length(x) < 10 || length(unique(x)) < 2) return(NA_real_)
+  unname(coef(lm(y ~ x))[2])
+}
+
+trend_overall = expr_branch %>%
+  group_by(symbol, gene_id, branch) %>%
+  summarize(n_cells        = n(),
+            pct_expressing = 100 * mean(logexpr > 0),
+            mean_logexpr   = mean(logexpr),
+            spearman_rho   = safe_rho(pseudotime, logexpr),
+            slope_per_unit_pseudotime = safe_slope(pseudotime, logexpr),
+            .groups = "drop") %>%
+  mutate(direction = case_when(
+    is.na(spearman_rho)     ~ "undetermined",
+    spearman_rho >=  0.10   ~ "increases",
+    spearman_rho <= -0.10   ~ "decreases",
+    TRUE                    ~ "flat"))
+
+trend_by_library = expr_branch %>%
+  group_by(symbol, branch, library) %>%
+  summarize(n_cells = n(),
+            rho     = safe_rho(pseudotime, logexpr),
+            .groups = "drop") %>%
+  filter(!is.na(rho), n_cells >= 20)
+
+trend_consistency = trend_by_library %>%
+  left_join(trend_overall %>% dplyr::select(symbol, branch, spearman_rho),
+            by = c("symbol", "branch")) %>%
+  filter(!is.na(spearman_rho)) %>%
+  group_by(symbol, branch) %>%
+  summarize(n_libraries_tested = n(),
+            n_libraries_same_sign = sum(sign(rho) == sign(spearman_rho)),
+            min_library_rho = min(rho),
+            max_library_rho = max(rho),
+            .groups = "drop") %>%
+  mutate(consistent_within_libraries =
+           n_libraries_tested >= 2 & n_libraries_same_sign == n_libraries_tested)
+
+marker_trends = trend_overall %>%
+  left_join(trend_consistency, by = c("symbol", "branch")) %>%
+  arrange(branch, desc(abs(spearman_rho)))
+
+write.csv(marker_trends,
+          file = paste0(results_dir, "/SuppTable_marker_trends.csv"),
+          row.names = FALSE)
+
+datatable(marker_trends %>% mutate(across(where(is.numeric), ~round(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r, fig.width=11, fig.height=8}
+core_markers = intersect(c("DDX4", "PIWIL1", "SYCP3", "BOLL"), resolved$symbol)
+
+p_marker = ggplot(expr_branch %>% filter(symbol %in% core_markers),
+                  aes(x = pseudotime, y = logexpr, color = library)) +
+  geom_point(size = 0.2, alpha = 0.25) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.6) +
+  scale_color_manual(values = lib_cols) +
+  facet_grid(symbol ~ branch, scales = "free") +
+  xlab("Pseudotime") + ylab("Uncorrected log-expression")
+
+p_marker
+ggsave(p_marker, file = paste0(results_dir, "/marker_expression_vs_pseudotime.png"),
+       width = 11, height = 8)
+```
+
+```{r, fig.width=11, fig.height=9}
+p_marker_all = ggplot(expr_branch, aes(x = pseudotime, y = logexpr, color = library)) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 0.5) +
+  scale_color_manual(values = lib_cols) +
+  facet_grid(branch ~ symbol, scales = "free") +
+  theme(strip.text.x = element_text(size = 6)) +
+  xlab("Pseudotime") + ylab("Uncorrected log-expression")
+
+p_marker_all
+ggsave(p_marker_all,
+       file = paste0(results_dir, "/all_marker_expression_vs_pseudotime.png"),
+       width = 11, height = 9)
+```
+
+# 6. Summary
+
+```{r}
+n_shared       = nrow(shared_pops)
+n_shared_germ  = nrow(shared_germ_pops)
+n_shared_som   = nrow(shared_som_pops)
+
+n_directional  = sum(marker_trends$direction %in% c("increases", "decreases"))
+n_flat         = sum(marker_trends$direction == "flat")
+n_tested       = nrow(marker_trends)
+n_consistent   = sum(marker_trends$consistent_within_libraries, na.rm = TRUE)
+
+germ_markers_ok = n_shared_germ > 0
+markers_ok      = n_directional > 0 && n_consistent > 0
+```
+
+**Population sharing.** `r n_shared` of `r nrow(population_sharing)` populations
+hold at least 10% of their cells from each stage: `r n_shared_germ` germ cell
+populations and `r n_shared_som` somatic populations.
+
+`r if (n_shared_germ == 0) "**No germ cell population is shared between stages.** Every germ cell cluster and subcluster is dominated by one stage. Sharing among somatic populations shows the integration can align cells collected on different dates, but it says nothing about whether the germ cell ordering is developmental, because no germ cell state is jointly occupied. On this evidence the trajectory claim is not supported." else paste0("Germ cell populations occupied by both stages are the strongest evidence available here, because a batch effect does not create a jointly occupied state. ", if (nrow(germ_agree) > 0) paste0("Markers computed separately within each stage for these populations overlap by a median of ", round(median(germ_agree$pct_shared_markers), 1), "% in the top 50, indicating the populations are defined by the same genes in both stages rather than merged by the correction.") else "Marker agreement could not be assessed for these populations because at least one stage had too few cells.")`
+
+**Marker behavior.** Of `r n_tested` marker and branch combinations tested,
+`r n_directional` show a directional trend along pseudotime (Spearman |rho| >=
+0.10), `r n_flat` are flat, and `r n_consistent` have a trend of consistent sign
+within every library tested separately.
+
+`r if (!markers_ok) "**Marker expression does not support the inferred ordering.** Either no marker changes monotonically along pseudotime, or no trend holds within individual libraries, meaning any apparent trend is carried by differences between samples rather than by position along the trajectory." else "Trends that hold within individual libraries cannot be produced by the library of origin, since they are computed inside a single sample. These are the trends that support the inferred ordering independently of the confound."`
+
+`r if (germ_markers_ok && markers_ok) "Taken together, shared germ cell populations and within-library marker trends provide evidence for the ordering that does not reduce to collection batch." else "Taken together, the evidence needed to separate development from collection batch is incomplete. State this limitation explicitly rather than resting the trajectory claim on the pseudotime composition, which cannot distinguish the two."`
+
+## For the reviewer response
+
+```{r, results="asis"}
+cat(paste0(
+  "We agree that developmental stage is confounded with collection date and ",
+  "batch, and that the distribution of libraries along the trajectory cannot ",
+  "by itself address this. Segregation of larval and transformer cells along ",
+  "pseudotime is predicted both by a residual batch effect and by the ",
+  "possibility that the underlying populations do not co-occur across stages, ",
+  "so it does not distinguish them. We therefore report that distribution ",
+  "descriptively ",
+  "(Supplementary Tables 1 to 3) and base our argument on two analyses that ",
+  "do distinguish the possibilities. First, ", n_shared,
+  " populations contain at least 10% of their cells from each stage, of which ",
+  n_shared_germ, " are germ cell populations",
+  if (nrow(germ_agree) > 0) paste0(
+    "; markers computed separately within larval and within transformer cells ",
+    "for these populations overlap by a median of ",
+    round(median(germ_agree$pct_shared_markers), 1), "% in the top 50") else "",
+  ". Second, of ", n_tested, " marker and branch combinations, ", n_directional,
+  " show a directional trend along pseudotime and ", n_consistent,
+  " retain a consistent trend within every individual library, computed on ",
+  "uncorrected expression. ",
+  if (germ_markers_ok && markers_ok) {
+    "Trends internal to a single library cannot arise from differences between libraries, so these support the inferred ordering independently of the confound."
+  } else {
+    "We note that this evidence is weaker than we would like, and we have revised the strength of our trajectory claim accordingly."
+  }))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
