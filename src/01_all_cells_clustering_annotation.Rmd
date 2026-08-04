@@ -166,6 +166,31 @@ ggplot(sample_tally, aes(fill = batch, y = label, x = n)) +
   xlab("Proportion of cells")
 ```
 
+The same data as cell counts rather than proportions, saved in
+`cells_per_cluster_per_sample.csv`.
+
+```{r}
+sample_tally_wide =
+  sample_tally %>%
+  tidyr::pivot_wider(names_from = batch, values_from = n, values_fill = 0) %>%
+  ungroup() %>%
+  mutate(label = as.character(label))
+
+sample_tally_wide$Total = rowSums(sample_tally_wide[, -1])
+
+sample_tally_wide =
+  bind_rows(sample_tally_wide,
+            sample_tally_wide %>%
+              summarize(across(where(is.numeric), sum)) %>%
+              mutate(label = "Total"))
+
+write.csv(sample_tally_wide,
+          file = paste0(results_dir, "/cells_per_cluster_per_sample.csv"),
+          row.names = FALSE)
+
+datatable(sample_tally_wide, rownames = FALSE)
+```
+
 ```{r, eval=FALSE}
 # build uncorrected combined SCE and monocle CDS for downstream plotting
 all.dec  <- lapply(all.sce, modelGeneVar)

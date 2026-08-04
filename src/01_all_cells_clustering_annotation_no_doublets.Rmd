@@ -204,6 +204,31 @@ ggplot(sample_tally, aes(fill = batch, y = label, x = n)) +
   xlab("Proportion of cells")
 ```
 
+The same data as cell counts rather than proportions, saved in
+`cells_per_cluster_per_sample.csv`.
+
+```{r}
+sample_tally_wide =
+  sample_tally %>%
+  tidyr::pivot_wider(names_from = batch, values_from = n, values_fill = 0) %>%
+  ungroup() %>%
+  mutate(label = as.character(label))
+
+sample_tally_wide$Total = rowSums(sample_tally_wide[, -1])
+
+sample_tally_wide =
+  bind_rows(sample_tally_wide,
+            sample_tally_wide %>%
+              summarize(across(where(is.numeric), sum)) %>%
+              mutate(label = "Total"))
+
+write.csv(sample_tally_wide,
+          file = paste0(results_dir, "/cells_per_cluster_per_sample.csv"),
+          row.names = FALSE)
+
+datatable(sample_tally_wide, rownames = FALSE)
+```
+
 ```{r, eval=FALSE}
 # build uncorrected combined SCE and monocle CDS for downstream plotting
 all.dec  <- lapply(all.sce, modelGeneVar)
@@ -452,14 +477,39 @@ plot_cells(merged.cds, reduction_method = "tSNE",
 
 ## Annotations
 
-**This annotation list is copied from `01_all_cells_clustering_annotation.Rmd`
-and is almost certainly wrong here.** Removing doublets changes cell counts
-per cluster and can change the number, order and composition of clusters
-returned by Louvain clustering above, so a given cluster number no longer
-necessarily corresponds to the same cell type as in the with-doublets
-analysis. Re-derive this list from the marker gene and GO enrichment results
-above (computed on the doublet-filtered clusters) before trusting or reporting
-it.
+Cluster numbering here does not match `01_all_cells_clustering_annotation.Rmd`.
+Doublet removal yields 20 clusters rather than 19, and the numbering is
+reassigned by Louvain, so the labels below were re-derived rather than copied.
+
+Each was assigned from two independent criteria computed in
+`05_compare_doublet_removal.Rmd`: which with-doublets cluster contributed the
+most cells, and which with-doublets cluster shares the most top-100 marker
+genes. The two criteria agree for 19 of the 20 clusters. Cluster 13 is the
+exception and is discussed below.
+
+Three labels differ from the with-doublets analysis in substance, not just in
+number:
+
+  * **Cluster 11 and cluster 12** are both hemopoietic stem cells. The single
+    HSC cluster in the with-doublets analysis divides roughly evenly here
+    (1,302 and 1,224 cells), each essentially pure. What distinguishes them has
+    not been established.
+  * **Cluster 7** is podocyte-dominated by marker overlap (49 shared genes
+    against 37 for the next-best match), but it also absorbed 321 cells from
+    the cluster previously annotated "Primordial germ cells (migrating)". It is
+    a genuine mixture and is labeled as such.
+  * **Cluster 13** holds 72% of the cells from that same previously-annotated
+    PGC cluster, but shares almost no markers with it (9 genes, against 40 with
+    the erythrocyte cluster). Its own top markers are globins, ferritin and
+    PCLAF, it draws cells from 12 different with-doublets clusters, and it has
+    the lowest purity of any cluster. It carries no germline markers at all. It
+    is labeled unresolved rather than given a cell type.
+
+No cluster in this analysis carries an early germline program. Canonical PGC
+markers (PRDM14, DND1, TFAP2C, SOX17, NANOG) are absent or negligible
+throughout. Germline identity is confined to cluster 8 (ZP3 and ZP4 family,
+logFC up to 3.9) and clusters 17 to 20 (PIWIL1, SYCP3, SYCP2, BOLL, TDRD7,
+TDRD9, MAEL, TEX15).
 
 ```{r}
 anno = c(
@@ -467,43 +517,47 @@ anno = c(
   "2. Mesonephric cells",
   "3. Granulosa cells (migrating)",
   "4. Granulosa cells",
-  "5. Oogonia/Oocytes",
+  "5. Pre-granulosa cells (migrating)",
   "6. Endothelial cells",
-  "7. Primordial germ cells (migrating)",
-  "8. Erythrocytes",
-  "9. Pre-granulosa cells (migrating)",
+  "7. Podocytes (mixed)",
+  "8. Oogonia/Oocytes",
+  "9. Erythrocytes",
   "10. Leukocytes",
-  "11. Hemopoietic stem cells",
-  "12. Podocytes",
-  "13. Macrophages",
-  "14. Pre-granulosa cells (mitotic)",
-  "15. Immune cells (migrating, mitotic)",
-  "16. Spermatocytes (cytokinetic)",
-  "17. Male germ cells (migrating)",
-  "18. Spermatocytes (apoptotic)",
-  "19. Spermatocytes (GPCR-activated)"
+  "11. Hemopoietic stem cells (1)",
+  "12. Hemopoietic stem cells (2)",
+  "13. Unresolved (globin-high, mixed origin)",
+  "14. Macrophages",
+  "15. Pre-granulosa cells (mitotic)",
+  "16. Immune cells (migrating, mitotic)",
+  "17. Spermatocytes (cytokinetic)",
+  "18. Male germ cells (migrating)",
+  "19. Spermatocytes (apoptotic)",
+  "20. Spermatocytes (GPCR-activated)"
 )
 ```
 
-1. Fibroblasts (migrating)
-2. Mesonephric cells
-3. Granulosa cells (migrating)
-4. Granulosa cells
-5. Oogonia/Oocytes
-6. Endothelial cells
-7. Primordial germ cells (migrating)
-8. Erythrocytes
-9. Pre-granulosa cells (migrating)
-10. Leukocytes
-11. Hemopoietic stem cells
-12. Podocytes
-13. Macrophages
-14. Pre-granulosa cells (mitotic)
-15. Immune cells (migrating, mitotic)
-16. Spermatocytes (cytokinetic)
-17. Male germ cells (migrating)
-18. Spermatocytes (apoptotic)
-19. Spermatocytes (GPCR-activated)
+| no-doublets cluster | best match by cells | purity | annotation |
+| --- | --- | --- | --- |
+| 1 | 1 | 99.7% | Fibroblasts (migrating) |
+| 2 | 2 | 100.0% | Mesonephric cells |
+| 3 | 3 | 94.9% | Granulosa cells (migrating) |
+| 4 | 4 | 98.5% | Granulosa cells |
+| 5 | 9 | 95.5% | Pre-granulosa cells (migrating) |
+| 6 | 6 | 99.8% | Endothelial cells |
+| 7 | 12 + 7 | mixed | Podocytes (mixed) |
+| 8 | 5 | 99.7% | Oogonia/Oocytes |
+| 9 | 8 | 99.5% | Erythrocytes |
+| 10 | 10 | 99.8% | Leukocytes |
+| 11 | 11 | 100.0% | Hemopoietic stem cells (1) |
+| 12 | 11 | 99.9% | Hemopoietic stem cells (2) |
+| 13 | 7 (markers disagree) | 72.4% | Unresolved (globin-high, mixed origin) |
+| 14 | 13 | 99.8% | Macrophages |
+| 15 | 14 | 92.7% | Pre-granulosa cells (mitotic) |
+| 16 | 15 | 97.1% | Immune cells (migrating, mitotic) |
+| 17 | 16 | 98.9% | Spermatocytes (cytokinetic) |
+| 18 | 17 | 94.3% | Male germ cells (migrating) |
+| 19 | 18 | 96.9% | Spermatocytes (apoptotic) |
+| 20 | 19 | 93.8% | Spermatocytes (GPCR-activated) |
 
 ```{r, fig.width=8, fig.height=6}
 ct = anno[colData(merged.sce)$label]
