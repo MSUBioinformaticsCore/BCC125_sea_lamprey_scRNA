@@ -725,6 +725,26 @@ datatable(excluded, rownames = FALSE)
 
 `r if (nrow(excluded) == 0) "No cluster was excluded; every cluster met the cell threshold in both stages." else paste0(nrow(excluded), " cluster(s) were excluded from the marker comparison because they fall below the cell threshold in at least one stage.")`
 
+### Two metrics, and why a control is needed
+
+Top 50 overlap is easy to read but unstable: marker rankings shuffle between
+random halves of identical data, so a raw overlap percentage cannot be judged
+without knowing how much overlap is achievable at all. Two things are added
+here.
+
+  * **A split-half control.** Within a single stage, the cells of the shared
+    clusters are split at random into two halves, markers are computed on each
+    half, and the top 50 overlap is calculated by the identical function. This
+    establishes the ceiling. Cross-stage overlap should be read against it, not
+    on its own.
+  * **A rank correlation across all genes.** Spearman correlation between the
+    larval and transformer test statistics over every tested gene. It uses all
+    the information rather than an arbitrary cutoff, and is far less sensitive
+    to differences in cell number.
+
+Both metrics are computed identically for the cross-stage comparison and for
+the split-half control.
+
 ```{r}
 top_markers_for = function(marker_list, lab, n = 50) {
   if (is.null(marker_list)) return(character(0))
@@ -732,6 +752,38 @@ top_markers_for = function(marker_list, lab, n = 50) {
   rownames(marker_list[[lab]])[seq_len(min(n, nrow(marker_list[[lab]])))]
 }
 
+# the statistic findMarkers returns for the relevant comparison
+pick_stat = function(df) {
+  if ("summary.logFC" %in% colnames(df)) return("summary.logFC")
+  lf = grep("^logFC", colnames(df), value = TRUE)
+  if (length(lf) > 0) return(lf[1])
+  NA_character_
+}
+
+top_overlap_pct = function(m1, m2, lab, n = 50) {
+  t1 = top_markers_for(m1, lab, n)
+  t2 = top_markers_for(m2, lab, n)
+  denom = min(length(t1), length(t2))
+  if (denom == 0) return(NA_real_)
+  100 * length(intersect(t1, t2)) / denom
+}
+
+stat_rank_cor = function(m1, m2, lab) {
+  if (is.null(m1) || is.null(m2))            return(NA_real_)
+  if (!lab %in% names(m1) || !lab %in% names(m2)) return(NA_real_)
+  d1 = m1[[lab]]; d2 = m2[[lab]]
+  s1 = pick_stat(d1); s2 = pick_stat(d2)
+  if (is.na(s1) || is.na(s2)) return(NA_real_)
+  g = intersect(rownames(d1), rownames(d2))
+  if (length(g) < 10) return(NA_real_)
+  suppressWarnings(cor(as.numeric(d1[g, s1]), as.numeric(d2[g, s2]),
+                       method = "spearman"))
+}
+```
+
+### Cross-stage agreement
+
+```{r}
 marker_agreement = shared_pops %>%
   rowwise() %>%
   mutate(
@@ -745,21 +797,161 @@ marker_agreement = shared_pops %>%
     n_top_larva       = length(top_larva),
     n_top_transformer = length(top_transformer),
     n_shared_markers  = length(intersect(top_larva, top_transformer)),
-    pct_shared_markers = ifelse(in_common &
-                                  min(n_top_larva, n_top_transformer) > 0,
-                                100 * n_shared_markers /
-                                  min(n_top_larva, n_top_transformer), NA_real_),
+    cross_stage_overlap_pct = ifelse(in_common,
+                                     top_overlap_pct(grp$markers[["larva"]],
+                                                     grp$markers[["transformer"]],
+                                                     as.character(label)),
+                                     NA_real_),
+    cross_stage_rank_cor = ifelse(in_common,
+                                  stat_rank_cor(grp$markers[["larva"]],
+                                                grp$markers[["transformer"]],
+                                                as.character(label)),
+                                  NA_real_),
     shared_marker_genes = paste(intersect(top_larva, top_transformer),
                                 collapse = ";")) %>%
   ungroup() %>%
   dplyr::select(-grp, -top_larva, -top_transformer)
+```
+
+### Split-half control
+
+Cells are split within each cluster, so both halves contain every cluster at
+roughly half size and the comparison background is unchanged. The same
+`findMarkers` arguments and the same overlap and correlation functions are used.
+This is the expensive step in the document and is cached separately; delete
+`split_half_control.Rds` to recompute.
+
+```{r}
+split_half_control = function(sce, labels, stage_vec, common, stage,
+                              n_splits = 10, n_top = 50, seed = 1) {
+  labels    = as.character(labels)
+  stage_vec = as.character(stage_vec)
+
+  in_stage = which(stage_vec == stage & labels %in% common)
+  lab_s    = labels[in_stage]
+  if (length(unique(lab_s)) < 2) return(NULL)
+
+  set.seed(seed)
+  res = list()
+
+  for (r in seq_len(n_splits)) {
+    # stratified 50/50 split within each cluster
+    by_clust = split(seq_along(lab_s), lab_s)
+    pick     = unlist(lapply(by_clust, function(ii) {
+      ii[sample(length(ii), floor(length(ii) / 2))]
+    }), use.names = FALSE)
+
+    is_half1 = rep(FALSE, length(lab_s))
+    is_half1[pick] = TRUE
+
+    lab1 = droplevels(factor(lab_s[is_half1]))
+    lab2 = droplevels(factor(lab_s[!is_half1]))
+    if (nlevels(lab1) < 2 || nlevels(lab2) < 2) next
+    if (min(table(lab1)) < 2 || min(table(lab2)) < 2) next
+
+    m1 = findMarkers(sce[, in_stage[is_half1]],  lab1,
+                     test.type = "t", direction = "up", pval.type = "some")
+    m2 = findMarkers(sce[, in_stage[!is_half1]], lab2,
+                     test.type = "t", direction = "up", pval.type = "some")
+
+    res[[r]] = data.frame(
+      stage       = stage,
+      replicate   = r,
+      label       = common,
+      overlap_pct = vapply(common, function(lb) top_overlap_pct(m1, m2, lb, n_top),
+                           numeric(1)),
+      rank_cor    = vapply(common, function(lb) stat_rank_cor(m1, m2, lb),
+                           numeric(1)),
+      stringsAsFactors = FALSE)
+  }
+
+  out = do.call(rbind, res)
+  if (!is.null(out)) rownames(out) = NULL
+  out
+}
+```
+
+```{r}
+split_half_file = paste0(Robject_out_dir, "/split_half_control.Rds")
+
+if (file.exists(split_half_file)) {
+  split_half = readRDS(split_half_file)
+} else {
+  message("Running the split-half control. This is the slowest step in the ",
+          "document; the result is cached in ", split_half_file, ".")
+  split_half = bind_rows(
+    bind_rows(lapply(c("larva", "transformer"), function(st)
+      split_half_control(combined.sex.sce, colData(merged.sex.sce)$label,
+                         germ_meta$stage, stage_split$germ$common, st))) %>%
+      mutate(clustering = "germ_subcluster"),
+    bind_rows(lapply(c("larva", "transformer"), function(st)
+      split_half_control(combined.sce, colData(merged.sce)$label,
+                         all_meta$stage, stage_split$all$common, st))) %>%
+      mutate(clustering = "all_cells_cluster"))
+  saveRDS(split_half, file = split_half_file)
+}
+```
+
+```{r}
+split_half_summary = split_half %>%
+  group_by(clustering, label, stage) %>%
+  summarize(n_replicates      = dplyr::n(),
+            splithalf_overlap_median = median(overlap_pct, na.rm = TRUE),
+            splithalf_overlap_min    = min(overlap_pct, na.rm = TRUE),
+            splithalf_overlap_max    = max(overlap_pct, na.rm = TRUE),
+            splithalf_rankcor_median = median(rank_cor, na.rm = TRUE),
+            .groups = "drop")
+
+datatable(split_half_summary %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+Overall, across all replicates and clusters:
+
+```{r}
+split_half_overall = split_half %>%
+  left_join(population_sharing %>%
+              dplyr::select(clustering, label, population_type),
+            by = c("clustering", "label")) %>%
+  group_by(clustering, population_type, stage) %>%
+  summarize(n_obs = dplyr::n(),
+            overlap_median = median(overlap_pct, na.rm = TRUE),
+            overlap_min    = min(overlap_pct, na.rm = TRUE),
+            overlap_max    = max(overlap_pct, na.rm = TRUE),
+            rankcor_median = median(rank_cor, na.rm = TRUE),
+            .groups = "drop")
+
+datatable(split_half_overall %>% mutate(across(where(is.numeric), ~round(., 2))),
+          rownames = FALSE)
+```
+
+### Cross-stage agreement against the ceiling
+
+```{r}
+sh_wide = split_half_summary %>%
+  tidyr::pivot_wider(id_cols = c(clustering, label),
+                     names_from = stage,
+                     values_from = c(splithalf_overlap_median,
+                                     splithalf_overlap_min,
+                                     splithalf_overlap_max,
+                                     splithalf_rankcor_median))
 
 population_sharing = population_sharing %>%
   left_join(marker_agreement %>%
               dplyr::select(clustering, label, in_common, n_top_larva,
                             n_top_transformer, n_shared_markers,
-                            pct_shared_markers, shared_marker_genes),
-            by = c("clustering", "label"))
+                            cross_stage_overlap_pct, cross_stage_rank_cor,
+                            shared_marker_genes),
+            by = c("clustering", "label")) %>%
+  left_join(sh_wide, by = c("clustering", "label")) %>%
+  mutate(ceiling_overlap = pmin(splithalf_overlap_median_larva,
+                                splithalf_overlap_median_transformer,
+                                na.rm = TRUE),
+         overlap_vs_ceiling = ifelse(!is.na(ceiling_overlap) & ceiling_overlap > 0,
+                                     cross_stage_overlap_pct / ceiling_overlap,
+                                     NA_real_),
+         min_stage_n = pmin(n_larva, n_transformer),
+         low_cell_flag = min_stage_n < 50)
 
 write.csv(population_sharing,
           file = paste0(results_dir, "/SuppTable_population_sharing.csv"),
@@ -771,12 +963,98 @@ datatable(population_sharing %>%
           filter = "top", rownames = FALSE)
 ```
 
-```{r}
-germ_agree = marker_agreement %>%
-  filter(population_type == "germ", !is.na(pct_shared_markers))
+```{r, fig.width=10, fig.height=6}
+plot_df = population_sharing %>%
+  filter(in_common, !is.na(cross_stage_overlap_pct)) %>%
+  mutate(pop_label = paste0(clustering, " ", label, ": ", population))
+
+sh_points = split_half_summary %>%
+  inner_join(plot_df %>% dplyr::select(clustering, label, pop_label,
+                                       population_type),
+             by = c("clustering", "label"))
+
+p_ceiling = ggplot() +
+  geom_linerange(data = sh_points,
+                 aes(x = pop_label, ymin = splithalf_overlap_min,
+                     ymax = splithalf_overlap_max, color = stage),
+                 position = position_dodge(width = 0.5), linewidth = 0.6) +
+  geom_point(data = sh_points,
+             aes(x = pop_label, y = splithalf_overlap_median, color = stage),
+             position = position_dodge(width = 0.5), size = 2) +
+  geom_point(data = plot_df,
+             aes(x = pop_label, y = cross_stage_overlap_pct),
+             shape = 4, size = 3, stroke = 1.2, color = "black") +
+  scale_color_manual(values = c(larva = "#009292", transformer = "#FF6DB6")) +
+  coord_flip() +
+  facet_wrap(~ population_type, scales = "free_y", ncol = 1) +
+  ylab("Top 50 marker overlap (%)") +
+  xlab(NULL) +
+  labs(color = "Split-half within stage",
+       caption = "Cross (x) is the cross-stage overlap. Dots and bars are the within-stage split-half median and range.")
+
+p_ceiling
+ggsave(p_ceiling, file = paste0(results_dir, "/overlap_vs_splithalf_ceiling.png"),
+       width = 10, height = 6)
 ```
 
-`r if (nrow(germ_agree) == 0) "No shared germ cell population had enough cells of both stages to compute stage-split markers, so marker agreement could not be assessed." else paste0("Across ", nrow(germ_agree), " shared germ cell population(s), the top 50 markers computed within larval cells and within transformer cells overlap by ", round(min(germ_agree$pct_shared_markers), 1), "% to ", round(max(germ_agree$pct_shared_markers), 1), "% (median ", round(median(germ_agree$pct_shared_markers), 1), "%).")`
+```{r}
+germ_agree = population_sharing %>%
+  filter(population_type == "germ", !is.na(cross_stage_overlap_pct))
+
+germ_ceiling = germ_agree %>% filter(!is.na(ceiling_overlap))
+```
+
+`r if (nrow(germ_agree) == 0) "No shared germ cell population had enough cells of both stages to compute stage-split markers, so marker agreement could not be assessed." else paste0("Across ", nrow(germ_agree), " shared germ cell population(s), cross-stage top 50 overlap ranges from ", round(min(germ_agree$cross_stage_overlap_pct), 1), "% to ", round(max(germ_agree$cross_stage_overlap_pct), 1), "% (median ", round(median(germ_agree$cross_stage_overlap_pct), 1), "%). The within-stage split-half ceiling for the same clusters has a median of ", if (nrow(germ_ceiling) > 0) round(median(germ_ceiling$ceiling_overlap), 1) else NA, "%, so cross-stage overlap reaches a median of ", if (nrow(germ_ceiling) > 0) round(100 * median(germ_ceiling$overlap_vs_ceiling, na.rm = TRUE), 0) else NA, "% of what is achievable within a single stage. Cross-stage rank correlation across all tested genes has a median of ", round(median(germ_agree$cross_stage_rank_cor, na.rm = TRUE), 2), ".")`
+
+```{r}
+ceiling_low = nrow(germ_ceiling) > 0 && median(germ_ceiling$ceiling_overlap) < 50
+```
+
+`r if (nrow(germ_ceiling) == 0) "" else if (ceiling_low) "**The ceiling is low.** Marker lists do not reproduce well even between random halves of the same cells, so top 50 overlap is not a usable measure of agreement in this dataset. Read the rank correlation across all genes instead, which does not depend on an arbitrary cutoff." else "The ceiling is high enough that top 50 overlap is interpretable here, and the cross-stage figure should be read as a fraction of it rather than in absolute terms."`
+
+### The lowest-agreement population
+
+```{r}
+worst = germ_agree %>% slice_min(cross_stage_overlap_pct, n = 1, with_ties = FALSE)
+
+worst_sh = split_half_summary %>%
+  filter(clustering == worst$clustering, label == worst$label)
+
+worst_sh_min = if (nrow(worst_sh) > 0) min(worst_sh$splithalf_overlap_median, na.rm = TRUE) else NA_real_
+
+# low cross-stage overlap is a power or instability artifact if the same cluster
+# also fails to reproduce within a single stage, or if one stage is thin
+worst_is_artifact = (!is.na(worst_sh_min) && worst_sh_min < 2 * worst$cross_stage_overlap_pct) ||
+                     worst$min_stage_n < 50
+```
+
+The shared germ cell population with the lowest cross-stage agreement is
+**`r worst$population`** (`r worst$clustering` `r worst$label`), with
+`r worst$n_larva` larval and `r worst$n_transformer` transformer cells, and a
+cross-stage top 50 overlap of `r round(worst$cross_stage_overlap_pct, 1)`%.
+
+```{r}
+datatable(worst_sh %>% mutate(across(where(is.numeric), ~round(., 2))),
+          rownames = FALSE)
+```
+
+`r if (nrow(worst_sh) == 0) "No split-half control is available for this cluster, so the low overlap cannot be attributed." else if (worst_is_artifact) paste0("Its own split-half overlap is only ", round(worst_sh_min, 1), "% within a single stage, and the sparser stage contributes ", worst$min_stage_n, " cells. Its markers therefore do not reproduce even between random halves of the same cells, so the low cross-stage figure reflects instability and limited power rather than a biological difference between stages. It should be described that way and not used as evidence that the population differs between stages.") else paste0("Its split-half overlap is ", round(worst_sh_min, 1), "% within a single stage, and both stages contribute ample cells (minimum ", worst$min_stage_n, "). Markers reproduce within a stage but not across stages, which is a substantive finding: the cells assigned to this cluster are not defined by the same genes in larvae and in transformers, and the identity of this cluster is questionable.")`
+
+### Cell counts for every shared population
+
+Overlap percentages are not interpretable without them. Populations where one
+stage contributes fewer than 50 cells are flagged.
+
+```{r}
+datatable(population_sharing %>%
+            filter(sharing == "shared") %>%
+            dplyr::select(clustering, label, population, population_type,
+                          n_larva, n_transformer, min_stage_n, low_cell_flag,
+                          cross_stage_overlap_pct, ceiling_overlap,
+                          overlap_vs_ceiling, cross_stage_rank_cor) %>%
+            mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
 
 # 5. Marker behavior along pseudotime
 
@@ -915,34 +1193,92 @@ datatable(marker_trends %>% mutate(across(where(is.numeric), ~round(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
-```{r, fig.width=11, fig.height=8}
+## Core markers
+
+Points are individual cells, lines are loess fits per library. One row per
+marker, one column per branch.
+
+```{r, fig.width=10, fig.height=8}
 core_markers = intersect(c("DDX4", "PIWIL1", "SYCP3", "BOLL"), resolved$symbol)
 
 p_marker = ggplot(expr_branch %>% filter(symbol %in% core_markers),
                   aes(x = pseudotime, y = logexpr, color = library)) +
-  geom_point(size = 0.2, alpha = 0.25) +
-  geom_smooth(method = "loess", se = FALSE, linewidth = 0.6) +
+  geom_point(size = 0.15, alpha = 0.12) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
   scale_color_manual(values = lib_cols) +
   facet_grid(symbol ~ branch, scales = "free") +
+  theme(legend.position = "top") +
+  guides(color = guide_legend(override.aes = list(alpha = 1, linewidth = 2))) +
   xlab("Pseudotime") + ylab("Uncorrected log-expression")
 
 p_marker
 ggsave(p_marker, file = paste0(results_dir, "/marker_expression_vs_pseudotime.png"),
-       width = 11, height = 8)
+       width = 10, height = 8)
 ```
 
-```{r, fig.width=11, fig.height=9}
-p_marker_all = ggplot(expr_branch, aes(x = pseudotime, y = logexpr, color = library)) +
-  geom_smooth(method = "loess", se = FALSE, linewidth = 0.5) +
-  scale_color_manual(values = lib_cols) +
-  facet_grid(branch ~ symbol, scales = "free") +
-  theme(strip.text.x = element_text(size = 6)) +
-  xlab("Pseudotime") + ylab("Uncorrected log-expression")
+## All annotation markers, as a trend heatmap
 
-p_marker_all
-ggsave(p_marker_all,
-       file = paste0(results_dir, "/all_marker_expression_vs_pseudotime.png"),
-       width = 11, height = 9)
+Plotting every marker as its own panel is unreadable once there are more than a
+handful, so the full set is shown as the statistic itself. Each tile is the
+Spearman correlation between expression and pseudotime, computed within a single
+library. Red is increasing, blue is decreasing, white is flat, and a blank tile
+means that library had fewer than 20 cells on that branch.
+
+A marker whose row is the same color across libraries has a trend that holds
+within each sample separately. A marker whose row changes color between
+libraries does not, and its pooled trend is likely a difference between samples.
+
+```{r, fig.width=9, fig.height=10}
+marker_order = trend_by_library %>%
+  group_by(symbol) %>%
+  summarize(m = mean(rho, na.rm = TRUE), .groups = "drop") %>%
+  arrange(m) %>%
+  pull(symbol)
+
+p_rho = ggplot(trend_by_library %>%
+                 mutate(symbol = factor(symbol, levels = marker_order)),
+               aes(x = library, y = symbol, fill = rho)) +
+  geom_tile(color = "grey90") +
+  geom_text(aes(label = sprintf("%.2f", rho)), size = 1.9) +
+  scale_fill_gradient2(low = "#2166ac", mid = "white", high = "#b2182b",
+                       midpoint = 0, limits = c(-1, 1)) +
+  facet_wrap(~ branch) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab("Library") + ylab("Marker") +
+  labs(fill = "Spearman rho")
+
+p_rho
+ggsave(p_rho, file = paste0(results_dir, "/marker_trend_heatmap.png"),
+       width = 9, height = 10)
+```
+
+## All annotation markers, expression against pseudotime
+
+The same markers as curves, split across pages of six so each panel stays large
+enough to read. Points are omitted here; only the per-library loess fits are
+drawn.
+
+```{r, fig.width=10, fig.height=7}
+# markers with no library passing the cell threshold are absent from
+# marker_order, so append them rather than dropping them from the figures
+ordered_symbols = c(marker_order, setdiff(resolved$symbol, marker_order))
+marker_pages    = split(ordered_symbols,
+                        ceiling(seq_along(ordered_symbols) / 6))
+
+for (i in seq_along(marker_pages)) {
+  p_page = ggplot(expr_branch %>% filter(symbol %in% marker_pages[[i]]),
+                  aes(x = pseudotime, y = logexpr, color = library)) +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 0.8) +
+    scale_color_manual(values = lib_cols) +
+    facet_grid(symbol ~ branch, scales = "free") +
+    theme(legend.position = "top") +
+    xlab("Pseudotime") + ylab("Uncorrected log-expression")
+
+  print(p_page)
+  ggsave(p_page,
+         file = paste0(results_dir, "/marker_trends_page", i, ".png"),
+         width = 10, height = 7)
+}
 ```
 
 # 6. Summary
@@ -965,14 +1301,28 @@ markers_ok      = n_directional > 0 && n_consistent > 0
 hold at least 10% of their cells from each stage: `r n_shared_germ` germ cell
 populations and `r n_shared_som` somatic populations.
 
-`r if (n_shared_germ == 0) "**No germ cell population is shared between stages.** Every germ cell cluster and subcluster is dominated by one stage. Sharing among somatic populations shows the integration can align cells collected on different dates, but it says nothing about whether the germ cell ordering is developmental, because no germ cell state is jointly occupied. On this evidence the trajectory claim is not supported." else paste0("Germ cell populations occupied by both stages are the strongest evidence available here, because a batch effect does not create a jointly occupied state. ", if (nrow(germ_agree) > 0) paste0("Markers computed separately within each stage for these populations overlap by a median of ", round(median(germ_agree$pct_shared_markers), 1), "% in the top 50, indicating the populations are defined by the same genes in both stages rather than merged by the correction.") else "Marker agreement could not be assessed for these populations because at least one stage had too few cells.")`
+`r if (n_shared_germ == 0) "**No germ cell population is shared between stages.** Every germ cell cluster and subcluster is dominated by one stage. Sharing among somatic populations shows the integration can align cells collected on different dates, but it says nothing about whether the germ cell ordering is developmental, because no germ cell state is jointly occupied. On this evidence the trajectory claim is not supported." else paste0("Germ cell populations occupied by both stages are the strongest evidence available here, because a batch effect does not create a jointly occupied state. ", if (nrow(germ_ceiling) > 0) paste0("Markers computed separately within each stage overlap across stages by a median of ", round(median(germ_agree$cross_stage_overlap_pct), 1), "% in the top 50. That figure is only interpretable against the within-stage split-half ceiling, which is ", round(median(germ_ceiling$ceiling_overlap), 1), "%: cross-stage agreement therefore reaches ", round(100 * median(germ_ceiling$overlap_vs_ceiling, na.rm = TRUE), 0), "% of what is achievable between random halves of the same cells. Rank correlation of the test statistic across all tested genes has a median of ", round(median(germ_agree$cross_stage_rank_cor, na.rm = TRUE), 2), ".") else if (nrow(germ_agree) > 0) "Marker agreement was computed but no split-half control was available, so the overlap figures cannot be placed against a ceiling." else "Marker agreement could not be assessed for these populations because at least one stage had too few cells.")`
 
 **Marker behavior.** Of `r n_tested` marker and branch combinations tested,
 `r n_directional` show a directional trend along pseudotime (Spearman |rho| >=
 0.10), `r n_flat` are flat, and `r n_consistent` have a trend of consistent sign
 within every library tested separately.
 
-`r if (!markers_ok) "**Marker expression does not support the inferred ordering.** Either no marker changes monotonically along pseudotime, or no trend holds within individual libraries, meaning any apparent trend is carried by differences between samples rather than by position along the trajectory." else "Trends that hold within individual libraries cannot be produced by the library of origin, since they are computed inside a single sample. These are the trends that support the inferred ordering independently of the confound."`
+A trend computed inside a single library holds the confound constant. Every cell
+in that calculation came from the same animal, the same collection date and the
+same capture, so none of those can be what produces the trend. If a marker rises
+with pseudotime among the cells of one library alone, that rise is not the July
+to November difference, because there is no July to November difference inside
+one library. Trends of that kind bear on the ordering independently of the
+confound; a trend seen only when libraries are pooled does not, since it may
+just be a difference between libraries.
+
+Note the asymmetry when reading the table. A library may occupy only part of the
+pseudotime range, in which case its within-library correlation is computed over a
+short stretch and will be attenuated. A strong within-library trend is therefore
+good evidence for the ordering, but a weak one is not strong evidence against it.
+
+`r if (!markers_ok) "**On these numbers, marker expression does not support the inferred ordering.** Either no marker changes monotonically along pseudotime, or no trend survives within individual libraries, meaning any apparent trend is carried by differences between samples rather than by position along the trajectory." else "**On these numbers, marker behavior supports the inferred ordering**, at least for the markers and branches where a within-library trend was detected."`
 
 `r if (germ_markers_ok && markers_ok) "Taken together, shared germ cell populations and within-library marker trends provide evidence for the ordering that does not reduce to collection batch." else "Taken together, the evidence needed to separate development from collection batch is incomplete. State this limitation explicitly rather than resting the trajectory claim on the pseudotime composition, which cannot distinguish the two."`
 
@@ -991,16 +1341,24 @@ cat(paste0(
   "do distinguish the possibilities. First, ", n_shared,
   " populations contain at least 10% of their cells from each stage, of which ",
   n_shared_germ, " are germ cell populations",
-  if (nrow(germ_agree) > 0) paste0(
+  if (nrow(germ_ceiling) > 0) paste0(
     "; markers computed separately within larval and within transformer cells ",
     "for these populations overlap by a median of ",
-    round(median(germ_agree$pct_shared_markers), 1), "% in the top 50") else "",
+    round(median(germ_agree$cross_stage_overlap_pct), 1),
+    "% in the top 50, against a within-stage split-half ceiling of ",
+    round(median(germ_ceiling$ceiling_overlap), 1),
+    "%, that is ",
+    round(100 * median(germ_ceiling$overlap_vs_ceiling, na.rm = TRUE), 0),
+    "% of the agreement achievable between random halves of the same cells, ",
+    "with a median rank correlation of the test statistic across all tested ",
+    "genes of ", round(median(germ_agree$cross_stage_rank_cor, na.rm = TRUE), 2))
+  else "",
   ". Second, of ", n_tested, " marker and branch combinations, ", n_directional,
   " show a directional trend along pseudotime and ", n_consistent,
   " retain a consistent trend within every individual library, computed on ",
   "uncorrected expression. ",
   if (germ_markers_ok && markers_ok) {
-    "Trends internal to a single library cannot arise from differences between libraries, so these support the inferred ordering independently of the confound."
+    "Because these trends are computed within a single library, collection date and batch are held constant by construction, so the trends cannot be produced by the difference between the July and the November samples."
   } else {
     "We note that this evidence is weaker than we would like, and we have revised the strength of our trajectory claim accordingly."
   }))
