@@ -236,10 +236,18 @@ all_meta$CellType = anno_all[all_meta$label]
 
 # Descriptive: how the libraries are distributed
 
-Sections 1 to 3 are descriptive only. As stated above, the pattern they show is
-predicted equally by a developmental trajectory and by a corrected batch effect,
-so nothing is concluded from them. They are included so the distribution is on
-the record rather than left implicit in Figure 7A.
+These three sections report where each library's cells fall along the
+trajectory. They are included for transparency: Figure 7A shows this as pie
+charts, but the underlying numbers are not written down anywhere.
+
+They are not evidence for or against the reviewer's concern, in either
+direction. Suppose the cells do sort by stage, larval early and transformer
+late. That is what a real developmental ordering would produce. It is also what
+would happen if `fastMNN` did not fully remove the difference between the July
+and the November libraries, leaving enough residual structure for the July cells
+to sit at one end. Seeing the pattern therefore does not tell you which of the
+two you are looking at, so no conclusion is drawn from it here. The comparisons
+that can tell them apart are in sections 4 and 5.
 
 ## 1. Composition of each MST node
 
