@@ -354,10 +354,12 @@ sample_tally =
 ggplot(sample_tally, aes(fill = batch, y = broad, x = n)) +
   geom_bar(position = "fill", stat = "identity") +
   xlab("Proportion of cells")
+
+ggsave(file = paste0(results_dir, "/sex_cells_per_cluster_per_sample.png"))
 ```
 
 The same data as cell counts rather than proportions, saved in
-`cells_per_broad_annotation_per_sample.csv`.
+`sex_cells_per_broad_annotation_per_sample.csv`.
 
 ```{r}
 sample_tally_wide =
