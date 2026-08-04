@@ -224,6 +224,42 @@ connecting the female and male branches. With that population excluded, this
 subanalysis may yield two disconnected trajectories rather than one bifurcation.
 Resolve that before relying on `03_trajectory_analysis_no_doublets.Rmd`.
 
+### All-cells cluster numbering, with and without doublets
+
+Reproduced from `01_all_cells_clustering_annotation_no_doublets.Rmd`, derived in
+`05_compare_doublet_removal.Rmd`. This is the source of the cluster numbers used
+in the filter below. Germ cell clusters selected for this subanalysis are in
+bold.
+
+| no-doublets cluster | best match by cells | purity | annotation |
+| --- | --- | --- | --- |
+| 1 | 1 | 99.7% | Fibroblasts (migrating) |
+| 2 | 2 | 100.0% | Mesonephric cells |
+| 3 | 3 | 94.9% | Granulosa cells (migrating) |
+| 4 | 4 | 98.5% | Granulosa cells |
+| 5 | 9 | 95.5% | Pre-granulosa cells (migrating) |
+| 6 | 6 | 99.8% | Endothelial cells |
+| 7 | 12 + 7 | mixed | Podocytes (mixed) |
+| **8** | 5 | 99.7% | **Oogonia/Oocytes** |
+| 9 | 8 | 99.5% | Erythrocytes |
+| 10 | 10 | 99.8% | Leukocytes |
+| 11 | 11 | 100.0% | Hemopoietic stem cells (1) |
+| 12 | 11 | 99.9% | Hemopoietic stem cells (2) |
+| 13 | 7 (markers disagree) | 72.4% | Unresolved (globin-high, mixed origin) |
+| 14 | 13 | 99.8% | Macrophages |
+| 15 | 14 | 92.7% | Pre-granulosa cells (mitotic) |
+| 16 | 15 | 97.1% | Immune cells (migrating, mitotic) |
+| **17** | 16 | 98.9% | **Spermatocytes (cytokinetic)** |
+| **18** | 17 | 94.3% | **Male germ cells (migrating)** |
+| **19** | 18 | 96.9% | **Spermatocytes (apoptotic)** |
+| **20** | 19 | 93.8% | **Spermatocytes (GPCR-activated)** |
+
+**Note that this table describes the all-cells clustering only.** The sex
+subcluster mapping and annotation tables later in this document are still
+carried over from `02_sex_cell_subanalysis.Rmd` and will change once this
+document is rerun on the doublet-filtered data, since the subclustering has not
+yet been recomputed.
+
 ## Filter and re-cluster
 
 ```{r, eval=FALSE}
