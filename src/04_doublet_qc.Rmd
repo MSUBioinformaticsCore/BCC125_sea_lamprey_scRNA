@@ -154,14 +154,6 @@ saveRDS(merged.cds, file = paste0(Robject_out_dir, "/merged.cds.Rds"))
 
 # Diagnostics
 
-No cells or clusters are removed anywhere in this document; every step below is
-descriptive. Cluster identity is referred to only by number (`merged.sce$label`),
-not by the cell-type annotation assigned in `01_all_cells_clustering_annotation.Rmd`.
-Those names come from marker expression and GO enrichment and describe a
-transcriptional program, not observed cell morphology, so a name that mentions
-cytokinesis or cysts is not used here as evidence that a cluster contains
-multiplets.
-
 Two features of this dataset resemble doublets without being technical
 multiplets: the germ cell clusters form a differentiation trajectory, so
 transcriptional intermediates between them genuinely resemble a mixture of

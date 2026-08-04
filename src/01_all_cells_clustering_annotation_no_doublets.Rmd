@@ -54,6 +54,7 @@ with the same seed, if package versions differ between runs.
 
 ```{r}
 results_dir = paste0(params$project_dir, "/results/20260803_no_doublets")
+if(!dir.exists(results_dir)){dir.create(results_dir)} 
 data_dir    = paste0(params$project_dir, "/data")
 ```
 
@@ -71,6 +72,7 @@ combined.sce = readRDS(paste0(results_dir, "/combined.sce.Rds"))
 
 ```{r, eval=FALSE}
 sample_dirs  = list.dirs(data_dir, full.names = TRUE, recursive = FALSE)
+sample_dirs = sample_dirs[grep("smith_annotation", sample_dirs, invert = TRUE)]
 sample_names = basename(sample_dirs)
 
 cds_list = list()
@@ -91,10 +93,7 @@ for (cds in names(cds_list)) {
 
 ## Remove cells called doublets
 
-`scDblFinder` is run separately on each sample, i.e. per library, without a
-`samples =` argument, since each list element already is one library. Doublets
-are removed here, per sample, before any normalization, HVG selection or PCA,
-and before the samples are merged.
+Doublets are removed here, per sample, before any normalization, HVG selection or PCA, and before the samples are merged.
 
 ```{r, eval=FALSE}
 set.seed(100)
@@ -484,26 +483,6 @@ anno = c(
   "19. Spermatocytes (GPCR-activated)"
 )
 ```
-
-1. Fibroblasts (migrating)
-2. Mesonephric cells
-3. Granulosa cells (migrating)
-4. Granulosa cells
-5. Oogonia/Oocytes
-6. Endothelial cells
-7. Primordial germ cells (migrating)
-8. Erythrocytes
-9. Pre-granulosa cells (migrating)
-10. Leukocytes
-11. Hemopoietic stem cells
-12. Podocytes
-13. Macrophages
-14. Pre-granulosa cells (mitotic)
-15. Immune cells (migrating, mitotic)
-16. Spermatocytes (cytokinetic)
-17. Male germ cells (migrating)
-18. Spermatocytes (apoptotic)
-19. Spermatocytes (GPCR-activated)
 
 ```{r, fig.width=8, fig.height=6}
 ct = anno[colData(merged.sce)$label]
