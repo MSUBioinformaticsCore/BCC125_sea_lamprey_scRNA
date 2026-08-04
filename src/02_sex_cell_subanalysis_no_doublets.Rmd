@@ -203,10 +203,26 @@ colData(merged.sex.sce)$narrow = narrow[colData(merged.sex.sce)$label]
 
 # Sex cell cluster analysis
 
-Cells from all-cell clusters 5, 7, 16, 17, 18, 19 were re-extracted and re-clustered
-in the with-doublets analysis. **These cluster numbers must be re-identified from
-the doublet-filtered all-cells clustering before running the chunk below**; they
-are not expected to still refer to germ cells after doublet removal and re-clustering.
+The with-doublets analysis extracted all-cell clusters 5, 7, 16, 17, 18, 19.
+The equivalent germ cell clusters in the doublet-filtered clustering are
+**8, 17, 18, 19, 20**: the oocyte cluster and the four meiotic male clusters,
+all confirmed by canonical germline markers (ZP3/ZP4 for cluster 8; PIWIL1,
+SYCP3, SYCP2, BOLL, TDRD7/9, MAEL, TEX15 for 17 to 20).
+
+The set is one cluster smaller than before, because former cluster 7
+("Primordial germ cells (migrating)") has no germline counterpart after doublet
+removal. Its cells now sit in filtered clusters 13 (globin-high, no germline
+markers) and 7 (podocyte-dominated), neither of which belongs in a germ cell
+subanalysis. Filtered cluster 7 does contain 321 cells from that population,
+so including it would import podocytes to recover cells with no demonstrated
+germline identity.
+
+**Consequence for the trajectory:** the with-doublets germ cell trajectory was
+rooted at a PGC subcluster derived from all-cells cluster 7, and subclusters 2,
+3 and 5 all came from it. Those subclusters were also the only material
+connecting the female and male branches. With that population excluded, this
+subanalysis may yield two disconnected trajectories rather than one bifurcation.
+Resolve that before relying on `03_trajectory_analysis_no_doublets.Rmd`.
 
 ## Filter and re-cluster
 

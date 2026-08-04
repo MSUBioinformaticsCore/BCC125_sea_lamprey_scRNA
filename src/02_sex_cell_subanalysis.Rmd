@@ -356,6 +356,31 @@ ggplot(sample_tally, aes(fill = batch, y = broad, x = n)) +
   xlab("Proportion of cells")
 ```
 
+The same data as cell counts rather than proportions, saved in
+`cells_per_broad_annotation_per_sample.csv`.
+
+```{r}
+sample_tally_wide =
+  sample_tally %>%
+  tidyr::pivot_wider(names_from = batch, values_from = n, values_fill = 0) %>%
+  ungroup() %>%
+  mutate(broad = as.character(broad))
+
+sample_tally_wide$Total = rowSums(sample_tally_wide[, -1])
+
+sample_tally_wide =
+  bind_rows(sample_tally_wide,
+            sample_tally_wide %>%
+              summarize(across(where(is.numeric), sum)) %>%
+              mutate(broad = "Total"))
+
+write.csv(sample_tally_wide,
+          file = paste0(results_dir, "/cells_per_broad_annotation_per_sample.csv"),
+          row.names = FALSE)
+
+datatable(sample_tally_wide, rownames = FALSE)
+```
+
 ## Build combined (uncorrected) sex cell SCE
 
 ```{r, eval=TRUE}

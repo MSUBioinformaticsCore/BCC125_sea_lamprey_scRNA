@@ -171,21 +171,71 @@ in an oocyte cluster is expected biology, not evidence of doublets.
 ## Overall and per-sample doublet rate
 
 ```{r}
-overall_pct = 100 * mean(colData(merged.sce)$scDblFinder.class == "doublet")
+overall_pct   = 100 * mean(colData(merged.sce)$scDblFinder.class == "doublet")
+overall_n_dbl = sum(colData(merged.sce)$scDblFinder.class == "doublet")
+score_median  = median(colData(merged.sce)$scDblFinder.score)
+score_iqr     = IQR(colData(merged.sce)$scDblFinder.score)
+score_q       = quantile(colData(merged.sce)$scDblFinder.score, c(.25, .75))
 
 sample_summary = dbl_df %>%
   group_by(sample) %>%
   summarize(n_cells      = n(),
+            n_doublet    = sum(scDblFinder.class == "doublet"),
             pct_doublet  = 100 * mean(scDblFinder.class == "doublet"),
-            median_score = median(scDblFinder.score))
+            median_score = median(scDblFinder.score),
+            IQR_score    = IQR(scDblFinder.score))
+
+write.csv(sample_summary, file = paste0(results_dir, "/doublet_sample_summary.csv"),
+          row.names = FALSE)
 ```
 
-Across the merged dataset, `r round(overall_pct, 2)`% of cells are called doublets.
+Across the merged dataset, `r overall_n_dbl` of `r ncol(merged.sce)` cells
+(`r round(overall_pct, 2)`%) are called doublets. The median `scDblFinder.score`
+is `r signif(score_median, 3)` (IQR `r signif(score_iqr, 3)`, quartiles
+`r signif(score_q[1], 3)` to `r signif(score_q[2], 3)`).
 
 ```{r}
 datatable(sample_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
           rownames = FALSE)
 ```
+
+## Library size by doublet class
+
+If cells called doublet do not have elevated library size, the scores are not
+simply tracking RNA content, which matters here because oocytes are expected to
+have high library size for biological reasons.
+
+```{r}
+class_summary = dbl_df %>%
+  group_by(scDblFinder.class) %>%
+  summarize(n_cells               = n(),
+            pct_of_cells          = 100 * n() / nrow(dbl_df),
+            median_UMI            = median(sum),
+            median_genes_detected = median(detected))
+
+write.csv(class_summary, file = paste0(results_dir, "/doublet_class_summary.csv"),
+          row.names = FALSE)
+
+datatable(class_summary %>% mutate(across(where(is.numeric), ~round(., 2))),
+          rownames = FALSE)
+```
+
+```{r}
+med_singlet = class_summary$median_UMI[class_summary$scDblFinder.class == "singlet"]
+med_doublet = class_summary$median_UMI[class_summary$scDblFinder.class == "doublet"]
+umi_ratio   = med_doublet / med_singlet
+
+# the true cell-level median, for comparing individual clusters against the
+# dataset as a whole further down
+dataset_median_UMI = median(dbl_df$sum)
+```
+
+Median library size is `r med_singlet` UMIs for singlets and `r med_doublet`
+UMIs for cells called doublet, a ratio of `r round(umi_ratio, 2)`.
+`r if (umi_ratio > 1.5) "Doublet-called cells do have substantially elevated library size, consistent with a true multiplet signal." else if (umi_ratio > 1.1) "Doublet-called cells have modestly elevated library size." else "Doublet-called cells do NOT have elevated library size, so the scores are not simply tracking RNA content."`
+
+The dataset-wide median UMI count is `r dataset_median_UMI`, used below as the
+reference for calling a cluster's library size elevated.
 
 ## Per-cluster summary
 
@@ -224,11 +274,15 @@ as more than twice the overall doublet rate, or more than 1.5x the overall
 median UMI count.
 
 ```{r}
-overall_median_UMI = median(qc_df$sum)
-
 cluster_summary = cluster_summary %>%
-  mutate(elevated_doublet_rate = pct_doublet > 2 * overall_pct,
-         elevated_library_size = median_UMI > 1.5 * overall_median_UMI)
+  mutate(x_dataset_median_UMI  = median_UMI / dataset_median_UMI,
+         elevated_doublet_rate = pct_doublet > 2 * overall_pct,
+         elevated_library_size = median_UMI > 1.5 * dataset_median_UMI)
+
+# overwrite the table exported above, now carrying the library size ratio and
+# the two flags used for the discriminating test
+write.csv(cluster_summary, file = paste0(results_dir, "/doublet_cluster_summary.csv"),
+          row.names = FALSE)
 
 flagged = cluster_summary %>% filter(elevated_doublet_rate)
 ```
