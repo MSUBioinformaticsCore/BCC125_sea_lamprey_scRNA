@@ -561,25 +561,78 @@ population against all other cells of the same stage in the same clustering.
 Uncorrected expression is used. If the two gene lists agree, the population is
 being aligned on common biology rather than merged by the correction.
 
+**The two calls must use the same set of competing clusters.** `findMarkers`
+scores a cluster against the other clusters present in the object it is given.
+If a cluster is dropped from one stage for having too few cells but retained in
+the other, the two stages are no longer being compared against the same
+background, and a gene can appear as a marker in one stage only because a
+competing cluster was missing there. That would inflate apparent disagreement
+between stages, which is precisely the quantity this section reports, so the
+eligible cluster set is computed as the intersection across stages and both
+calls are restricted to it.
+
+The asymmetry is expected to be real here: the meiotic male clusters and the
+differentiated oocyte cluster are likely sparse in larvae, so without this the
+larval background would be systematically smaller.
+
+Clusters excluded by the intersection are not discarded from the report. A
+cluster with cells in one stage and almost none in the other is a stage
+restricted population, which is a finding, so the exclusions are tabulated
+below.
+
+Markers are not blocked on library within stage. Each stage contains two
+libraries, and in the transformer stage cluster identity is heavily confounded
+with library, since the male and female clusters come from different animals.
+Blocking would therefore drop the comparisons of interest. Both stages are
+computed the same way, so the overlap comparison remains internally consistent.
+
 This step is expensive, so it is run once and saved.
 
 ```{r, eval=FALSE}
 stage_split_markers = function(sce, labels, stage_vec, min_cells = 20) {
-  out = list()
-  for (st in unique(stage_vec)) {
-    keep = stage_vec == st
-    lab  = droplevels(factor(labels[keep]))
-    ok   = names(table(lab))[table(lab) >= min_cells]
-    if (length(ok) < 2) next
-    keep2 = keep
-    keep2[keep] = lab %in% ok
-    out[[st]] = findMarkers(sce[, keep2],
-                            droplevels(factor(labels[keep2])),
-                            test.type = "t",
-                            direction = "up",
-                            pval.type = "some")
+  labels    = as.character(labels)
+  stage_vec = as.character(stage_vec)
+  stages    = sort(unique(stage_vec))
+
+  # cells per cluster per stage
+  counts  = table(labels, stage_vec)
+  elig_df = as.data.frame.matrix(counts)
+  colnames(elig_df) = paste0("n_", colnames(elig_df))
+  elig_df$label = rownames(elig_df)
+
+  # eligible clusters within each stage, then the intersection actually used
+  eligible = lapply(stages, function(st) rownames(counts)[counts[, st] >= min_cells])
+  names(eligible) = stages
+  common = Reduce(intersect, eligible)
+
+  for (st in stages) {
+    elig_df[[paste0("eligible_", st)]] = counts[elig_df$label, st] >= min_cells
   }
-  out
+  elig_mat = as.matrix(elig_df[, paste0("eligible_", stages), drop = FALSE])
+  elig_df$failed_in = apply(elig_mat, 1, function(r) paste(stages[!r], collapse = "; "))
+  elig_df$used_in_comparison = elig_df$label %in% common
+  rownames(elig_df) = NULL
+
+  markers = list()
+  if (length(common) < 2) {
+    warning(paste0("Fewer than two clusters are eligible in every stage, so ",
+                   "stage-split markers cannot be computed."))
+  } else {
+    for (st in stages) {
+      keep = stage_vec == st & labels %in% common
+      markers[[st]] = findMarkers(sce[, keep],
+                                  droplevels(factor(labels[keep])),
+                                  test.type = "t",
+                                  direction = "up",
+                                  pval.type = "some")
+    }
+  }
+
+  list(markers           = markers,
+       eligibility       = elig_df,
+       eligible_by_stage = eligible,
+       common            = common,
+       min_cells         = min_cells)
 }
 
 # germ cell subclusters, uncorrected
@@ -606,6 +659,51 @@ combined.sex.sce   = readRDS(paste0(Robject_out_dir, "/combined.sex.sce.Rds"))
 stage_split        = readRDS(paste0(Robject_out_dir, "/stage_split_markers.Rds"))
 ```
 
+### Which clusters were eligible in each stage
+
+```{r}
+eligibility = bind_rows(
+  stage_split$germ$eligibility %>% mutate(clustering = "germ_subcluster"),
+  stage_split$all$eligibility  %>% mutate(clustering = "all_cells_cluster")) %>%
+  dplyr::select(clustering, label, everything())
+
+write.csv(eligibility,
+          file = paste0(results_dir, "/SuppTable_marker_background_eligibility.csv"),
+          row.names = FALSE)
+
+datatable(eligibility, filter = "top", rownames = FALSE)
+```
+
+```{r, results="asis"}
+for (cl in c("germ", "all")) {
+  s   = stage_split[[cl]]
+  nm  = if (cl == "germ") "Germ cell subclusters" else "All-cells clusters"
+  cat("**", nm, "** (minimum ", s$min_cells, " cells per stage)\n\n", sep = "")
+  for (st in names(s$eligible_by_stage)) {
+    cat("* Eligible in ", st, ": ",
+        paste(sort(as.numeric(s$eligible_by_stage[[st]])), collapse = ", "),
+        "\n", sep = "")
+  }
+  cat("* Intersection used for both calls: ",
+      paste(sort(as.numeric(s$common)), collapse = ", "), "\n\n", sep = "")
+}
+```
+
+### Clusters excluded from the marker comparison
+
+A cluster excluded here has too few cells in at least one stage. That is a
+stage restricted population, and is reported rather than dropped silently.
+
+```{r}
+excluded = eligibility %>%
+  filter(!used_in_comparison) %>%
+  dplyr::select(clustering, label, starts_with("n_"), failed_in)
+
+datatable(excluded, rownames = FALSE)
+```
+
+`r if (nrow(excluded) == 0) "No cluster was excluded; every cluster met the cell threshold in both stages." else paste0(nrow(excluded), " cluster(s) were excluded from the marker comparison because they fall below the cell threshold in at least one stage.")`
+
 ```{r}
 top_markers_for = function(marker_list, lab, n = 50) {
   if (is.null(marker_list)) return(character(0))
@@ -616,28 +714,30 @@ top_markers_for = function(marker_list, lab, n = 50) {
 marker_agreement = shared_pops %>%
   rowwise() %>%
   mutate(
-    ml = list(if (clustering == "germ_subcluster") stage_split$germ[["larva"]]
-              else stage_split$all[["larva"]]),
-    mt = list(if (clustering == "germ_subcluster") stage_split$germ[["transformer"]]
-              else stage_split$all[["transformer"]]),
-    top_larva       = list(top_markers_for(ml, as.character(label))),
-    top_transformer = list(top_markers_for(mt, as.character(label))),
+    grp = list(if (clustering == "germ_subcluster") stage_split$germ
+               else stage_split$all),
+    in_common       = as.character(label) %in% grp$common,
+    top_larva       = list(top_markers_for(grp$markers[["larva"]],
+                                           as.character(label))),
+    top_transformer = list(top_markers_for(grp$markers[["transformer"]],
+                                           as.character(label))),
     n_top_larva       = length(top_larva),
     n_top_transformer = length(top_transformer),
     n_shared_markers  = length(intersect(top_larva, top_transformer)),
-    pct_shared_markers = ifelse(min(n_top_larva, n_top_transformer) > 0,
+    pct_shared_markers = ifelse(in_common &
+                                  min(n_top_larva, n_top_transformer) > 0,
                                 100 * n_shared_markers /
                                   min(n_top_larva, n_top_transformer), NA_real_),
     shared_marker_genes = paste(intersect(top_larva, top_transformer),
                                 collapse = ";")) %>%
   ungroup() %>%
-  dplyr::select(-ml, -mt, -top_larva, -top_transformer)
+  dplyr::select(-grp, -top_larva, -top_transformer)
 
 population_sharing = population_sharing %>%
   left_join(marker_agreement %>%
-              dplyr::select(clustering, label, n_top_larva, n_top_transformer,
-                            n_shared_markers, pct_shared_markers,
-                            shared_marker_genes),
+              dplyr::select(clustering, label, in_common, n_top_larva,
+                            n_top_transformer, n_shared_markers,
+                            pct_shared_markers, shared_marker_genes),
             by = c("clustering", "label"))
 
 write.csv(population_sharing,
