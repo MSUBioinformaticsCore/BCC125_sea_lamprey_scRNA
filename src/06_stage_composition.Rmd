@@ -561,9 +561,8 @@ population against all other cells of the same stage in the same clustering.
 Uncorrected expression is used. If the two gene lists agree, the population is
 being aligned on common biology rather than merged by the correction.
 
-This step is expensive, so it is run once and saved.
-
 ```{r, eval=FALSE}
+# This step is expensive, so it is run once and saved.
 stage_split_markers = function(sce, labels, stage_vec, min_cells = 20) {
   out = list()
   for (st in unique(stage_vec)) {
