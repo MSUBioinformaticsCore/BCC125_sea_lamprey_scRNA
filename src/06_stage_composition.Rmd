@@ -561,6 +561,7 @@ population against all other cells of the same stage in the same clustering.
 Uncorrected expression is used. If the two gene lists agree, the population is
 being aligned on common biology rather than merged by the correction.
 
+<<<<<<< HEAD
 **The two calls must use the same set of competing clusters.** `findMarkers`
 scores a cluster against the other clusters present in the object it is given.
 If a cluster is dropped from one stage for having too few cells but retained in
@@ -586,9 +587,8 @@ with library, since the male and female clusters come from different animals.
 Blocking would therefore drop the comparisons of interest. Both stages are
 computed the same way, so the overlap comparison remains internally consistent.
 
-This step is expensive, so it is run once and saved.
-
 ```{r, eval=FALSE}
+
 stage_split_markers = function(sce, labels, stage_vec, min_cells = 20) {
   labels    = as.character(labels)
   stage_vec = as.character(stage_vec)
