@@ -587,8 +587,28 @@ with library, since the male and female clusters come from different animals.
 Blocking would therefore drop the comparisons of interest. Both stages are
 computed the same way, so the overlap comparison remains internally consistent.
 
-```{r, eval=FALSE}
+The uncorrected germ cell object is rebuilt here rather than cached, as in `03`,
+since it is only a subset and a `cbind`. Rather than patching one sample's
+`colData` by name, the columns common to all samples are kept, which is all
+`cbind` requires and does not depend on which sample happens to be missing a
+field.
 
+```{r}
+universe     = Reduce(intersect, lapply(all.sex.sce, rownames))
+all.sex.sce2 = lapply(all.sex.sce, "[", i = universe, )
+
+common_cols  = Reduce(intersect, lapply(all.sex.sce2,
+                                        function(x) colnames(colData(x))))
+all.sex.sce2 = lapply(all.sex.sce2, function(x) {
+  colData(x) = colData(x)[, common_cols, drop = FALSE]
+  x
+})
+
+combined.sex.sce = do.call(cbind, all.sex.sce2)
+stopifnot(identical(colnames(combined.sex.sce), colnames(merged.sex.sce)))
+```
+
+```{r}
 stage_split_markers = function(sce, labels, stage_vec, min_cells = 20) {
   labels    = as.character(labels)
   stage_vec = as.character(stage_vec)
@@ -634,29 +654,30 @@ stage_split_markers = function(sce, labels, stage_vec, min_cells = 20) {
        common            = common,
        min_cells         = min_cells)
 }
-
-# germ cell subclusters, uncorrected
-universe        = Reduce(intersect, lapply(all.sex.sce, rownames))
-all.sex.sce2    = lapply(all.sex.sce, "[", i = universe, )
-all.sex.sce2[["TM_C00004374"]]@colData$cluster = "noclust"
-combined.sex.sce = do.call(cbind, all.sex.sce2)
-stopifnot(identical(colnames(combined.sex.sce), colnames(merged.sex.sce)))
-
-germ_markers_by_stage = stage_split_markers(
-  combined.sex.sce, colData(merged.sex.sce)$label, germ_meta$stage)
-
-all_markers_by_stage = stage_split_markers(
-  combined.sce, colData(merged.sce)$label, all_meta$stage)
-
-saveRDS(combined.sex.sce,
-        file = paste0(Robject_out_dir, "/combined.sex.sce.Rds"))
-saveRDS(list(germ = germ_markers_by_stage, all = all_markers_by_stage),
-        file = paste0(Robject_out_dir, "/stage_split_markers.Rds"))
 ```
 
-```{r, echo=FALSE}
-combined.sex.sce   = readRDS(paste0(Robject_out_dir, "/combined.sex.sce.Rds"))
-stage_split        = readRDS(paste0(Robject_out_dir, "/stage_split_markers.Rds"))
+The `findMarkers` calls are the expensive part, so they are computed once and
+cached. On the first run the chunk below computes and saves them; on later runs
+it loads the saved result. Delete `stage_split_markers.Rds` to force a
+recomputation.
+
+```{r}
+markers_file = paste0(Robject_out_dir, "/stage_split_markers.Rds")
+
+if (file.exists(markers_file)) {
+  stage_split = readRDS(markers_file)
+} else {
+  message("Computing stage-split markers. This is slow, and the result is ",
+          "cached in ", markers_file, " for later runs.")
+  stage_split = list(
+    germ = stage_split_markers(combined.sex.sce,
+                               colData(merged.sex.sce)$label,
+                               germ_meta$stage),
+    all  = stage_split_markers(combined.sce,
+                               colData(merged.sce)$label,
+                               all_meta$stage))
+  saveRDS(stage_split, file = markers_file)
+}
 ```
 
 ### Which clusters were eligible in each stage
