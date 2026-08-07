@@ -781,7 +781,374 @@ stat_rank_cor = function(m1, m2, lab) {
 }
 ```
 
-### Cross-stage agreement
+### Pairwise library discordance
+
+This is the primary comparison. Marker genes are computed separately within each
+single library, and the agreement between pairs of libraries is measured with the
+same top 50 overlap and Spearman rank correlation used elsewhere in this section.
+Three pairs are compared:
+
+  * **Undifferentiated.1 versus Undifferentiated.2.** Same stage, same
+    collection date, no sex difference. Whatever disagreement appears here is
+    produced by replicate animals and library preparation alone, so it is the
+    reference floor. Everything else is reported relative to it.
+  * **Female versus Male transformer.** Same stage and collection date,
+    different sex.
+  * **Larvae pooled versus transformers pooled.** The stage contrast, which is
+    also the collection date contrast.
+
+Cell numbers are matched across every group and every comparison, since
+disagreement between marker lists otherwise tracks statistical power rather than
+biology. Each cluster is subsampled to a common `n` in every group, and the whole
+procedure is repeated over independent draws. `findMarkers` arguments are
+identical to those used above, and library is deliberately not blocked, since
+library is the variable being measured.
+
+```{r}
+library_discordance = function(sce, labels, library_vec, min_cells = 20,
+                               n_draws = 10, n_top = 50, seed = 1) {
+  labels      = as.character(labels)
+  library_vec = as.character(library_vec)
+
+  singles = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male")
+  group_defs = list(
+    "Undifferentiated.1"  = "Undifferentiated.1",
+    "Undifferentiated.2"  = "Undifferentiated.2",
+    "Female"              = "Female",
+    "Male"                = "Male",
+    "larvae_pooled"       = c("Undifferentiated.1", "Undifferentiated.2"),
+    "transformers_pooled" = c("Female", "Male"))
+
+  comparisons = list(
+    UND1_vs_UND2           = c("Undifferentiated.1", "Undifferentiated.2"),
+    Female_vs_Male         = c("Female", "Male"),
+    larvae_vs_transformers = c("larvae_pooled", "transformers_pooled"))
+
+  clusters_all = sort(unique(labels))
+  cnt = sapply(singles, function(lb)
+    sapply(clusters_all, function(cl) sum(labels == cl & library_vec == lb)))
+  if (is.null(dim(cnt))) cnt = matrix(cnt, nrow = length(clusters_all),
+                                      dimnames = list(clusters_all, singles))
+  rownames(cnt) = clusters_all
+
+  eligibility = as.data.frame(cnt)
+  eligibility$label = clusters_all
+  eligibility$min_across_libraries = apply(cnt, 1, min)
+  eligibility$eligible = eligibility$min_across_libraries >= min_cells
+  rownames(eligibility) = NULL
+
+  eligible = clusters_all[eligibility$eligible]
+  if (length(eligible) < 2) {
+    warning("Fewer than two clusters have enough cells in every library; ",
+            "pairwise library discordance cannot be computed.")
+    return(list(results = NULL, eligibility = eligibility, n_used = NA_integer_,
+                eligible = eligible))
+  }
+
+  # every group, in every comparison, gets exactly this many cells per cluster
+  n_used = min(cnt[eligible, , drop = FALSE])
+
+  set.seed(seed)
+  res = list()
+
+  for (d in seq_len(n_draws)) {
+    markers_by_group = list()
+
+    for (gname in names(group_defs)) {
+      libs = group_defs[[gname]]
+      idx  = integer(0)
+      ok   = TRUE
+      for (cl in eligible) {
+        pool = which(labels == cl & library_vec %in% libs)
+        if (length(pool) < n_used) { ok = FALSE; break }
+        idx = c(idx, pool[sample(length(pool), n_used)])
+      }
+      if (!ok) next
+      markers_by_group[[gname]] = findMarkers(
+        sce[, idx], droplevels(factor(labels[idx])),
+        test.type = "t", direction = "up", pval.type = "some")
+    }
+
+    for (cmp in names(comparisons)) {
+      g1 = comparisons[[cmp]][1]
+      g2 = comparisons[[cmp]][2]
+      if (is.null(markers_by_group[[g1]]) || is.null(markers_by_group[[g2]])) next
+      res[[length(res) + 1]] = data.frame(
+        comparison  = cmp,
+        draw        = d,
+        label       = eligible,
+        overlap_pct = vapply(eligible, function(cl)
+          top_overlap_pct(markers_by_group[[g1]], markers_by_group[[g2]], cl, n_top),
+          numeric(1)),
+        rank_cor    = vapply(eligible, function(cl)
+          stat_rank_cor(markers_by_group[[g1]], markers_by_group[[g2]], cl),
+          numeric(1)),
+        stringsAsFactors = FALSE)
+    }
+  }
+
+  out = do.call(rbind, res)
+  if (!is.null(out)) rownames(out) = NULL
+  list(results = out, eligibility = eligibility, n_used = n_used,
+       eligible = eligible)
+}
+```
+
+```{r}
+discordance_file = paste0(Robject_out_dir, "/library_discordance.Rds")
+
+if (file.exists(discordance_file)) {
+  discordance = readRDS(discordance_file)
+} else {
+  message("Computing pairwise library discordance. Cached in ",
+          discordance_file, ".")
+  discordance = list(
+    germ = library_discordance(combined.sex.sce, colData(merged.sex.sce)$label,
+                               germ_meta$library),
+    all  = library_discordance(combined.sce, colData(merged.sce)$label,
+                               all_meta$library))
+  saveRDS(discordance, file = discordance_file)
+}
+```
+
+#### Cells used, and clusters excluded
+
+```{r}
+disc_eligibility = bind_rows(
+  discordance$germ$eligibility %>% mutate(clustering = "germ_subcluster"),
+  discordance$all$eligibility  %>% mutate(clustering = "all_cells_cluster")) %>%
+  dplyr::select(clustering, label, everything())
+
+write.csv(disc_eligibility,
+          file = paste0(results_dir, "/SuppTable_discordance_eligibility.csv"),
+          row.names = FALSE)
+
+datatable(disc_eligibility, filter = "top", rownames = FALSE)
+```
+
+* Germ cell subclusters: `r length(discordance$germ$eligible)` eligible, subsampled to **`r discordance$germ$n_used` cells per cluster per group**.
+* All-cells clusters: `r length(discordance$all$eligible)` eligible, subsampled to **`r discordance$all$n_used` cells per cluster per group**.
+
+```{r}
+disc_excluded = disc_eligibility %>% filter(!eligible)
+```
+
+`r if (nrow(disc_excluded) == 0) "No cluster was excluded; every cluster has enough cells in all four libraries." else paste0(nrow(disc_excluded), " cluster(s) were excluded for having fewer than the required cells in at least one library. A cluster confined to one sex, such as the oocyte and spermatocyte clusters, cannot appear in this analysis at all, since the Female versus Male comparison requires cells of that cluster in both transformer libraries.")`
+
+#### Discordance per cluster
+
+Both metrics are measures of agreement, so lower values mean greater
+discordance. The ratio columns express each comparison against the
+Undifferentiated.1 versus Undifferentiated.2 floor for the same cluster: a ratio
+below 1 means that comparison agrees less well than replicate libraries of the
+same stage do.
+
+```{r}
+disc_results = bind_rows(
+  if (!is.null(discordance$germ$results))
+    discordance$germ$results %>% mutate(clustering = "germ_subcluster"),
+  if (!is.null(discordance$all$results))
+    discordance$all$results  %>% mutate(clustering = "all_cells_cluster"))
+
+disc_per_cluster = disc_results %>%
+  group_by(clustering, label, comparison) %>%
+  summarize(n_draws        = dplyr::n(),
+            overlap_median = median(overlap_pct, na.rm = TRUE),
+            overlap_min    = min(overlap_pct, na.rm = TRUE),
+            overlap_max    = max(overlap_pct, na.rm = TRUE),
+            rankcor_median = median(rank_cor, na.rm = TRUE),
+            rankcor_min    = min(rank_cor, na.rm = TRUE),
+            rankcor_max    = max(rank_cor, na.rm = TRUE),
+            .groups = "drop")
+
+floor_per_cluster = disc_per_cluster %>%
+  filter(comparison == "UND1_vs_UND2") %>%
+  dplyr::select(clustering, label,
+                floor_overlap = overlap_median,
+                floor_rankcor = rankcor_median)
+
+disc_per_cluster = disc_per_cluster %>%
+  left_join(floor_per_cluster, by = c("clustering", "label")) %>%
+  mutate(overlap_ratio_to_floor = ifelse(!is.na(floor_overlap) & floor_overlap > 0,
+                                         overlap_median / floor_overlap, NA_real_),
+         rankcor_ratio_to_floor = ifelse(!is.na(floor_rankcor) & floor_rankcor > 0,
+                                         rankcor_median / floor_rankcor, NA_real_))
+
+write.csv(disc_per_cluster,
+          file = paste0(results_dir, "/SuppTable_library_discordance.csv"),
+          row.names = FALSE)
+
+datatable(disc_per_cluster %>% mutate(across(where(is.numeric), ~round(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+#### Overall
+
+```{r}
+disc_overall = disc_results %>%
+  group_by(clustering, comparison) %>%
+  summarize(n_obs          = dplyr::n(),
+            overlap_median = median(overlap_pct, na.rm = TRUE),
+            overlap_min    = min(overlap_pct, na.rm = TRUE),
+            overlap_max    = max(overlap_pct, na.rm = TRUE),
+            rankcor_median = median(rank_cor, na.rm = TRUE),
+            rankcor_min    = min(rank_cor, na.rm = TRUE),
+            rankcor_max    = max(rank_cor, na.rm = TRUE),
+            .groups = "drop")
+
+floor_overall = disc_overall %>%
+  filter(comparison == "UND1_vs_UND2") %>%
+  dplyr::select(clustering,
+                floor_overlap = overlap_median, floor_rankcor = rankcor_median,
+                floor_overlap_min = overlap_min, floor_overlap_max = overlap_max)
+
+disc_overall = disc_overall %>%
+  left_join(floor_overall, by = "clustering") %>%
+  mutate(overlap_ratio_to_floor = overlap_median / floor_overlap,
+         rankcor_ratio_to_floor = rankcor_median / floor_rankcor,
+         within_floor_range = overlap_median >= floor_overlap_min &
+                              overlap_median <= floor_overlap_max)
+
+datatable(disc_overall %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+```{r, fig.width=10, fig.height=6}
+cmp_cols = c(UND1_vs_UND2 = "#009292", Female_vs_Male = "#006ddb",
+             larvae_vs_transformers = "#9e2f7f")
+
+p_disc = ggplot(disc_per_cluster,
+                aes(x = factor(label), y = overlap_median, color = comparison)) +
+  geom_linerange(aes(ymin = overlap_min, ymax = overlap_max),
+                 position = position_dodge(width = 0.6), linewidth = 0.6) +
+  geom_point(position = position_dodge(width = 0.6), size = 2) +
+  scale_color_manual(values = cmp_cols) +
+  facet_wrap(~ clustering, scales = "free_x", ncol = 1) +
+  xlab("Cluster") +
+  ylab("Top 50 marker overlap (%)") +
+  labs(caption = paste0("Points are medians across draws, bars the range. ",
+                        "UND1 vs UND2 is the replicate floor."))
+
+p_disc
+ggsave(p_disc, file = paste0(results_dir, "/library_discordance_by_cluster.png"),
+       width = 10, height = 6)
+```
+
+```{r}
+disc_read = function(clust) {
+  d = disc_overall %>% filter(clustering == clust)
+  if (nrow(d) == 0) return(NULL)
+  list(
+    floor = d %>% filter(comparison == "UND1_vs_UND2"),
+    fm    = d %>% filter(comparison == "Female_vs_Male"),
+    lt    = d %>% filter(comparison == "larvae_vs_transformers"))
+}
+
+dg = disc_read("germ_subcluster")
+da = disc_read("all_cells_cluster")
+
+disc_sentence = function(x, what) {
+  if (is.null(x) || nrow(x$floor) == 0) return(paste0("No ", what, " result available."))
+  parts = c()
+  fl = x$floor
+  parts = c(parts, paste0(
+    "Replicate floor (Undifferentiated.1 versus Undifferentiated.2): median top 50 overlap ",
+    round(fl$overlap_median, 1), "% (range ", round(fl$overlap_min, 1), " to ",
+    round(fl$overlap_max, 1), "%), median rank correlation ",
+    round(fl$rankcor_median, 2), "."))
+  if (nrow(x$fm) > 0) {
+    parts = c(parts, paste0(
+      "Female versus Male, reported for completeness only: median overlap ",
+      round(x$fm$overlap_median, 1), "%, rank correlation ",
+      round(x$fm$rankcor_median, 2), "."))
+  }
+  if (nrow(x$lt) > 0) {
+    parts = c(parts, paste0(
+      "Larvae versus transformers: median overlap ", round(x$lt$overlap_median, 1),
+      "%, which is ", round(x$lt$overlap_ratio_to_floor, 2),
+      " times the floor, and rank correlation ", round(x$lt$rankcor_median, 2),
+      ". This ", if (isTRUE(x$lt$within_floor_range))
+        "falls inside the range of the larval replicate floor, so the stage contrast produces no more disagreement than replicate variation alone."
+      else if (x$lt$overlap_median < x$lt$floor_overlap_min)
+        "falls below the floor range, so the stage contrast produces more disagreement than replicate variation alone."
+      else "falls above the floor range."))
+  }
+  paste(parts, collapse = " ")
+}
+```
+
+**Germ cell subclusters.** `r disc_sentence(dg, "germ subcluster")`
+
+**All-cells clusters.** `r disc_sentence(da, "all-cells cluster")`
+
+```{r}
+lt_within = !is.null(dg) && nrow(dg$lt) > 0 && isTRUE(dg$lt$within_floor_range)
+```
+
+#### How to read these numbers
+
+The larvae versus transformers comparison is the one that bears on the
+reviewer's concern. Markers here are computed on uncorrected expression, so this
+comparison contains the July to November difference in full. If it does not
+exceed the replicate floor, then in these clusters the batch difference adds no
+more systematic variation than two animals of the same stage do, which is
+evidence that the batch effect is modest where it can be measured.
+
+The two outcomes are not symmetric. Exceeding the floor is ambiguous, since real
+stage biology and batch effect push in the same direction and this comparison
+cannot separate them. Not exceeding it is the informative outcome.
+
+Two limits on how far that generalizes:
+
+  * The testable clusters are those with enough cells in all four libraries,
+    which excludes any population confined to one stage or one sex. Most of the
+    germ cell states along the trajectory are of that kind. The batch effect is
+    therefore being measured in the populations where it can be measured, not in
+    the ones the trajectory claim depends on.
+  * A cluster containing cells from all four libraries is one that `fastMNN`
+    succeeded in merging. Clusters were defined on the corrected values, so
+    co-membership by itself is not evidence of a small batch effect: the
+    correction exists to produce it. What is evidence is that the *uncorrected*
+    marker profiles within those clusters agree across libraries, since the
+    correction never touched those values. The residual gap is populations where
+    the batch effect was large enough that correction failed and the libraries
+    formed separate clusters, which would be excluded here. That gap is
+    checkable, and is addressed immediately below.
+
+#### Are there clusters the correction failed to merge?
+
+If a batch effect were large, cells of the same type from different libraries
+would fail to merge and would appear as separate, library-dominated clusters.
+Those clusters would be excluded from the discordance analysis, hiding the worst
+cases. The check is whether any stage-dominated cluster lacks a biological
+explanation.
+
+```{r}
+stage_dominated = population_sharing %>%
+  filter(sharing %in% c("larva-dominated", "transformer-dominated")) %>%
+  dplyr::select(clustering, label, population, population_type,
+                n_larva, n_transformer, pct_larva, sharing)
+
+datatable(stage_dominated %>% mutate(across(where(is.numeric), ~round(., 1))),
+          filter = "top", rownames = FALSE)
+```
+
+`r if (nrow(stage_dominated) == 0) "No cluster is dominated by a single stage, so there is no population that the correction failed to merge, and the discordance analysis is not missing a set of high batch effect clusters." else paste0(nrow(stage_dominated), " cluster(s) are dominated by a single stage, of which ", sum(stage_dominated$population_type == "germ"), " are germ cell populations and ", sum(stage_dominated$population_type == "somatic"), " are somatic. Stage-restricted germ cell populations are expected on biological grounds, since oocytes and spermatocytes have no larval counterpart. A stage-dominated **somatic** cluster is the informative case: somatic cell types should be present at both stages, so if one is split by stage that is a candidate for a merge the correction did not achieve. Inspect the somatic rows above; if there are none, the discordance estimate is not missing a set of high batch effect clusters.")`
+
+The Female versus Male comparison is computed and included in the tables and
+figure for completeness, but nothing is concluded from it. The clusters testable
+here are largely somatic and need not differ between sexes, so it serves neither
+as a positive control nor as a result.
+
+`r if (lt_within) "**The larvae versus transformers comparison falls within the replicate floor.** In the clusters that can be tested, the stage and collection date contrast produces no more marker disagreement than two larval replicate libraries do. Since these markers are computed on uncorrected expression, that is direct evidence the batch effect is small in these populations, subject to the two limits above." else "**The larvae versus transformers comparison exceeds the replicate floor.** The stage and collection date contrast produces more marker disagreement than two larval replicate libraries do. This comparison cannot say how much of that excess is real stage biology and how much is batch, since both push in the same direction."`
+
+### Cross-stage agreement, as a supporting comparison
+
+The comparison below pools libraries by stage and asks whether the same genes
+mark each shared population in larvae and in transformers. It is reported after
+the pairwise analysis above because it cannot separate stage from library on its
+own: it has no reference floor built into it. Read it against the replicate floor
+established above.
 
 ```{r}
 marker_agreement = shared_pops %>%
@@ -831,11 +1198,13 @@ split_half_control = function(sce, labels, stage_vec, common, stage,
   lab_s    = labels[in_stage]
   if (length(unique(lab_s)) < 2) return(NULL)
 
+  # seeded once, outside the loop, so each of the n_splits iterations draws a
+  # different partition while the set as a whole stays reproducible
   set.seed(seed)
   res = list()
 
   for (r in seq_len(n_splits)) {
-    # stratified 50/50 split within each cluster
+    # a fresh stratified 50/50 split within each cluster on every replicate
     by_clust = split(seq_along(lab_s), lab_s)
     pick     = unlist(lapply(by_clust, function(ii) {
       ii[sample(length(ii), floor(length(ii) / 2))]
@@ -1296,6 +1665,11 @@ n_consistent   = sum(marker_trends$consistent_within_libraries, na.rm = TRUE)
 germ_markers_ok = n_shared_germ > 0
 markers_ok      = n_directional > 0 && n_consistent > 0
 ```
+
+**Pairwise library discordance, the primary result.**
+`r disc_sentence(dg, "germ subcluster")`
+
+`r if (lt_within) paste0("The stage and collection date contrast falls within the range produced by two larval replicate libraries. Because these markers are computed on uncorrected expression, and the correction never touched those values, that is evidence the batch effect is small in the clusters where it can be measured. ", if (sum(stage_dominated$population_type == "somatic") == 0) "No somatic cluster is stage-dominated, so there is no population that the correction failed to merge and no set of high batch effect clusters excluded from this estimate." else paste0(sum(stage_dominated$population_type == "somatic"), " somatic cluster(s) are stage-dominated and should be inspected, since a somatic type split by stage is a candidate for a merge the correction did not achieve."), " The result does not extend automatically to the germ cell states along the trajectory, most of which are confined to one stage and so cannot enter this comparison.") else "The stage and collection date contrast exceeds the replicate floor. This comparison cannot apportion that excess between real stage biology and batch, since both act in the same direction."`
 
 **Population sharing.** `r n_shared` of `r nrow(population_sharing)` populations
 hold at least 10% of their cells from each stage: `r n_shared_germ` germ cell
