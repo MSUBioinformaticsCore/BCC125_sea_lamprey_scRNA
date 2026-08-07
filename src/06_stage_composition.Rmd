@@ -555,194 +555,31 @@ are germ cell populations and `r nrow(shared_som_pops)` are somatic.
 
 ## Do shared populations have the same markers in each stage?
 
-For each shared population, marker genes are computed twice: once using only
-larval cells and once using only transformer cells, in each case comparing that
-population against all other cells of the same stage in the same clustering.
-Uncorrected expression is used. If the two gene lists agree, the population is
-being aligned on common biology rather than merged by the correction.
+Marker genes are computed separately in different groups of cells, and the
+agreement between those gene lists is measured. Two metrics are used throughout:
 
-**The two calls must use the same set of competing clusters.** `findMarkers`
-scores a cluster against the other clusters present in the object it is given.
-If a cluster is dropped from one stage for having too few cells but retained in
-the other, the two stages are no longer being compared against the same
-background, and a gene can appear as a marker in one stage only because a
-competing cluster was missing there. That would inflate apparent disagreement
-between stages, which is precisely the quantity this section reports, so the
-eligible cluster set is computed as the intersection across stages and both
-calls are restricted to it.
+  * **Top 50 overlap**, the percentage of each cluster's fifty strongest markers
+    shared between two groups. Easy to read, but it depends on an arbitrary
+    cutoff and marker rankings shuffle even between random halves of identical
+    data, so a raw percentage means nothing without a reference.
+  * **Spearman rank correlation across all tested genes.** It uses all the
+    information rather than a cutoff, and is far less sensitive to differences
+    in cell number.
 
-The asymmetry is expected to be real here: the meiotic male clusters and the
-differentiated oocyte cluster are likely sparse in larvae, so without this the
-larval background would be systematically smaller.
+Neither is interpretable in isolation, so every comparison is reported against a
+reference computed the same way. Two comparisons follow, at different coverage:
 
-Clusters excluded by the intersection are not discarded from the report. A
-cluster with cells in one stage and almost none in the other is a stage
-restricted population, which is a finding, so the exclusions are tabulated
-below.
+  * **Pairwise library discordance**, which requires cells in all four
+    libraries. Its reference is the two larval replicate libraries, which differ
+    only by animal and library preparation, so it is a true replicate floor.
+    This is the stronger design, but sex-restricted populations cannot enter it.
+  * **The two-stage comparison**, which requires cells in both stages only, and
+    so reaches the germ cell populations excluded above. Its reference is a
+    random split of each stage into halves, which measures sampling noise rather
+    than replicate variation and therefore sits higher than a true floor.
 
-Markers are not blocked on library within stage. Each stage contains two
-libraries, and in the transformer stage cluster identity is heavily confounded
-with library, since the male and female clusters come from different animals.
-Blocking would therefore drop the comparisons of interest. Both stages are
-computed the same way, so the overlap comparison remains internally consistent.
-
-The uncorrected germ cell object is rebuilt here rather than cached, as in `03`,
-since it is only a subset and a `cbind`. Rather than patching one sample's
-`colData` by name, the columns common to all samples are kept, which is all
-`cbind` requires and does not depend on which sample happens to be missing a
-field.
-
-```{r}
-universe     = Reduce(intersect, lapply(all.sex.sce, rownames))
-all.sex.sce2 = lapply(all.sex.sce, "[", i = universe, )
-
-common_cols  = Reduce(intersect, lapply(all.sex.sce2,
-                                        function(x) colnames(colData(x))))
-all.sex.sce2 = lapply(all.sex.sce2, function(x) {
-  colData(x) = colData(x)[, common_cols, drop = FALSE]
-  x
-})
-
-combined.sex.sce = do.call(cbind, all.sex.sce2)
-stopifnot(identical(colnames(combined.sex.sce), colnames(merged.sex.sce)))
-```
-
-```{r}
-stage_split_markers = function(sce, labels, stage_vec, min_cells = 20) {
-  labels    = as.character(labels)
-  stage_vec = as.character(stage_vec)
-  stages    = sort(unique(stage_vec))
-
-  # cells per cluster per stage
-  counts  = table(labels, stage_vec)
-  elig_df = as.data.frame.matrix(counts)
-  colnames(elig_df) = paste0("n_", colnames(elig_df))
-  elig_df$label = rownames(elig_df)
-
-  # eligible clusters within each stage, then the intersection actually used
-  eligible = lapply(stages, function(st) rownames(counts)[counts[, st] >= min_cells])
-  names(eligible) = stages
-  common = Reduce(intersect, eligible)
-
-  for (st in stages) {
-    elig_df[[paste0("eligible_", st)]] = counts[elig_df$label, st] >= min_cells
-  }
-  elig_mat = as.matrix(elig_df[, paste0("eligible_", stages), drop = FALSE])
-  elig_df$failed_in = apply(elig_mat, 1, function(r) paste(stages[!r], collapse = "; "))
-  elig_df$used_in_comparison = elig_df$label %in% common
-  rownames(elig_df) = NULL
-
-  markers = list()
-  if (length(common) < 2) {
-    warning(paste0("Fewer than two clusters are eligible in every stage, so ",
-                   "stage-split markers cannot be computed."))
-  } else {
-    for (st in stages) {
-      keep = stage_vec == st & labels %in% common
-      markers[[st]] = findMarkers(sce[, keep],
-                                  droplevels(factor(labels[keep])),
-                                  test.type = "t",
-                                  direction = "up",
-                                  pval.type = "some")
-    }
-  }
-
-  list(markers           = markers,
-       eligibility       = elig_df,
-       eligible_by_stage = eligible,
-       common            = common,
-       min_cells         = min_cells)
-}
-```
-
-The `findMarkers` calls are the expensive part, so they are computed once and
-cached. On the first run the chunk below computes and saves them; on later runs
-it loads the saved result. Delete `stage_split_markers.Rds` to force a
-recomputation.
-
-```{r}
-markers_file = paste0(Robject_out_dir, "/stage_split_markers.Rds")
-
-if (file.exists(markers_file)) {
-  stage_split = readRDS(markers_file)
-} else {
-  message("Computing stage-split markers. This is slow, and the result is ",
-          "cached in ", markers_file, " for later runs.")
-  stage_split = list(
-    germ = stage_split_markers(combined.sex.sce,
-                               colData(merged.sex.sce)$label,
-                               germ_meta$stage),
-    all  = stage_split_markers(combined.sce,
-                               colData(merged.sce)$label,
-                               all_meta$stage))
-  saveRDS(stage_split, file = markers_file)
-}
-```
-
-### Which clusters were eligible in each stage
-
-```{r}
-eligibility = bind_rows(
-  stage_split$germ$eligibility %>% mutate(clustering = "germ_subcluster"),
-  stage_split$all$eligibility  %>% mutate(clustering = "all_cells_cluster")) %>%
-  dplyr::select(clustering, label, everything())
-
-write.csv(eligibility,
-          file = paste0(results_dir, "/SuppTable_marker_background_eligibility.csv"),
-          row.names = FALSE)
-
-datatable(eligibility, filter = "top", rownames = FALSE)
-```
-
-```{r, results="asis"}
-for (cl in c("germ", "all")) {
-  s   = stage_split[[cl]]
-  nm  = if (cl == "germ") "Germ cell subclusters" else "All-cells clusters"
-  cat("**", nm, "** (minimum ", s$min_cells, " cells per stage)\n\n", sep = "")
-  for (st in names(s$eligible_by_stage)) {
-    cat("* Eligible in ", st, ": ",
-        paste(sort(as.numeric(s$eligible_by_stage[[st]])), collapse = ", "),
-        "\n", sep = "")
-  }
-  cat("* Intersection used for both calls: ",
-      paste(sort(as.numeric(s$common)), collapse = ", "), "\n\n", sep = "")
-}
-```
-
-### Clusters excluded from the marker comparison
-
-A cluster excluded here has too few cells in at least one stage. That is a
-stage restricted population, and is reported rather than dropped silently.
-
-```{r}
-excluded = eligibility %>%
-  filter(!used_in_comparison) %>%
-  dplyr::select(clustering, label, starts_with("n_"), failed_in)
-
-datatable(excluded, rownames = FALSE)
-```
-
-`r if (nrow(excluded) == 0) "No cluster was excluded; every cluster met the cell threshold in both stages." else paste0(nrow(excluded), " cluster(s) were excluded from the marker comparison because they fall below the cell threshold in at least one stage.")`
-
-### Two metrics, and why a control is needed
-
-Top 50 overlap is easy to read but unstable: marker rankings shuffle between
-random halves of identical data, so a raw overlap percentage cannot be judged
-without knowing how much overlap is achievable at all. Two things are added
-here.
-
-  * **A split-half control.** Within a single stage, the cells of the shared
-    clusters are split at random into two halves, markers are computed on each
-    half, and the top 50 overlap is calculated by the identical function. This
-    establishes the ceiling. Cross-stage overlap should be read against it, not
-    on its own.
-  * **A rank correlation across all genes.** Spearman correlation between the
-    larval and transformer test statistics over every tested gene. It uses all
-    the information rather than an arbitrary cutoff, and is far less sensitive
-    to differences in cell number.
-
-Both metrics are computed identically for the cross-stage comparison and for
-the split-half control.
+Cell numbers are matched and every comparison is repeated over independent
+draws, in both.
 
 Two implementation choices matter for how these numbers come out.
 
@@ -825,6 +662,27 @@ stat_rank_cor = function(m1, m2, lab) {
   if (length(g) < 10) return(NA_real_)
   suppressWarnings(cor(e1[g], e2[g], method = "spearman"))
 }
+```
+
+Both comparisons below use uncorrected expression. The germ cell object is
+rebuilt here from the per-sample objects, as in `03`. It is only a subset and a
+`cbind`, so it is not cached. Rather than patching one sample's `colData` by
+name, the columns common to all samples are kept, which is all `cbind` requires
+and does not depend on which sample happens to be missing a field.
+
+```{r}
+universe     = Reduce(intersect, lapply(all.sex.sce, rownames))
+all.sex.sce2 = lapply(all.sex.sce, "[", i = universe, )
+
+common_cols  = Reduce(intersect, lapply(all.sex.sce2,
+                                        function(x) colnames(colData(x))))
+all.sex.sce2 = lapply(all.sex.sce2, function(x) {
+  colData(x) = colData(x)[, common_cols, drop = FALSE]
+  x
+})
+
+combined.sex.sce = do.call(cbind, all.sex.sce2)
+stopifnot(identical(colnames(combined.sex.sce), colnames(merged.sex.sce)))
 ```
 
 ### Pairwise library discordance
@@ -1095,7 +953,7 @@ datatable(disc_per_cluster %>% mutate(across(where(is.numeric), ~round(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
-#### Overall
+#### Pooled levels per comparison
 
 ```{r}
 disc_overall = disc_results %>%
@@ -1125,11 +983,21 @@ datatable(disc_overall %>% mutate(across(where(is.numeric), ~round(., 3))),
 
 #### Paired comparison against the floor
 
-Each cluster is compared against **its own** replicate floor, and the pairing is
-kept. A comparison against the pooled minimum-to-maximum spread of the floor
-would not be a test: that spread runs across clusters that genuinely differ and
-across random draws, so it is wide enough to contain almost any value, and it is
-not uncertainty around the floor's median.
+Every cluster has two numbers: how well the two larval replicate libraries agree
+for that cluster, which is its floor, and how well larvae and transformers agree
+for that same cluster. This test compares those two numbers **within each
+cluster**, then asks how the differences come out across clusters.
+
+Pairing matters because clusters are not alike. A cluster with sharp,
+distinctive markers will show high agreement in every comparison, and a diffuse
+one will show low agreement in every comparison. Collapsing all clusters into a
+single number for each comparison lets that between-cluster spread swamp the
+difference being measured. Comparing each cluster against itself removes it, in
+the same way a paired test removes subject-to-subject variation.
+
+Three things are reported per metric: the median of the per-cluster ratios, how
+many clusters fall below their own floor, and a Wilcoxon signed rank test on the
+pairs.
 
 ```{r}
 paired = disc_per_cluster %>%
@@ -1263,13 +1131,30 @@ paired_sentence = function(p) {
 }
 ```
 
-**Germ cell subclusters.** `r disc_sentence(dg, "germ subcluster")`
+#### Interpretation
 
-**All-cells clusters.** `r disc_sentence(da, "all-cells cluster")`
+The two readouts below answer different questions and are computed differently.
 
-**Germ cell subclusters, paired.** `r paired_sentence(lt_g)`
+The **levels** pool every cluster and every draw into one distribution per
+comparison and report its median. They tell you the absolute amount of agreement
+in play, which is what decides whether the measure is informative at all. If the
+replicate floor itself is low, marker agreement is too noisy here to support any
+conclusion, whatever the comparisons do relative to it.
 
-**All-cells clusters, paired.** `r paired_sentence(lt_a)`
+The **paired test** reduces each cluster to its own median first, forms the
+ratio against that same cluster's floor, and then summarizes across clusters. It
+is the actual comparison against the floor. A ratio of medians and a median of
+ratios are different quantities, so these two blocks can disagree: a few
+high-agreement clusters can hold up the pooled median while most clusters
+individually sit below their own floor.
+
+**Pooled levels, germ cell subclusters.** `r disc_sentence(dg, "germ subcluster")`
+
+**Pooled levels, all-cells clusters.** `r disc_sentence(da, "all-cells cluster")`
+
+**Paired test, germ cell subclusters.** `r paired_sentence(lt_g)`
+
+**Paired test, all-cells clusters.** `r paired_sentence(lt_a)`
 
 #### How to read these numbers
 
@@ -1328,184 +1213,296 @@ as a positive control nor as a result.
 
 `r if (!lt_available) "**The larvae versus transformers comparison could not be computed.** No clustering had two or more clusters with enough cells in all four libraries, so there is no paired test to report and nothing follows in either direction." else if (lt_within) paste0("**The larvae versus transformers comparison does not exceed the replicate floor**, in the ", lt_source, ". ", paired_sentence(lt_primary), " In the clusters that can be tested, the stage and collection date contrast produces no more marker disagreement than two larval replicate libraries do. Since these markers are computed on uncorrected expression, that is direct evidence the batch effect is small in these populations, subject to the two limits above.") else paste0("**The larvae versus transformers comparison exceeds the replicate floor**, in the ", lt_source, ". ", paired_sentence(lt_primary), " The stage and collection date contrast agrees less well than two larval replicate libraries do. This comparison cannot say how much of that shortfall is real stage biology and how much is batch, since both push in the same direction.")`
 
-### Cross-stage agreement, as a supporting comparison
+### Two-stage comparison, covering populations the four-library filter excludes
 
-The comparison below pools libraries by stage and asks whether the same genes
-mark each shared population in larvae and in transformers. It is reported after
-the pairwise analysis above because it cannot separate stage from library on its
-own: it has no reference floor built into it. Read it against the replicate floor
-established above.
+The comparison above requires enough cells in all four libraries, which excludes
+any population confined to one sex. Most germ cell subclusters are of that kind,
+so they cannot enter it. This section runs the same comparison at a looser
+requirement, cells in both stages rather than in all four libraries, which
+reaches those populations.
 
-```{r}
-marker_agreement = shared_pops %>%
-  rowwise() %>%
-  mutate(
-    grp = list(if (clustering == "germ_subcluster") stage_split$germ
-               else stage_split$all),
-    in_common       = as.character(label) %in% grp$common,
-    top_larva       = list(top_markers_for(grp$markers[["larva"]],
-                                           as.character(label))),
-    top_transformer = list(top_markers_for(grp$markers[["transformer"]],
-                                           as.character(label))),
-    n_top_larva       = length(top_larva),
-    n_top_transformer = length(top_transformer),
-    n_shared_markers  = length(intersect(top_larva, top_transformer)),
-    cross_stage_overlap_pct = ifelse(in_common,
-                                     top_overlap_pct(grp$markers[["larva"]],
-                                                     grp$markers[["transformer"]],
-                                                     as.character(label)),
-                                     NA_real_),
-    cross_stage_rank_cor = ifelse(in_common,
-                                  stat_rank_cor(grp$markers[["larva"]],
-                                                grp$markers[["transformer"]],
-                                                as.character(label)),
-                                  NA_real_),
-    shared_marker_genes = paste(intersect(top_larva, top_transformer),
-                                collapse = ";")) %>%
-  ungroup() %>%
-  dplyr::select(-grp, -top_larva, -top_transformer)
-```
+The reference cannot be the larval replicate floor here, because a cluster with
+few larval cells cannot be divided between the two larval libraries. Instead each
+stage is split at random into two halves the same size as the comparison groups,
+and agreement between those halves is the reference. That measures sampling noise
+at matched depth. It is a weaker reference than a replicate floor, since it holds
+animal and library constant rather than varying them, so it will sit higher than
+the true floor and this comparison is correspondingly conservative.
 
-### Split-half control
-
-Cells are split within each cluster, so both halves contain every cluster at
-roughly half size and the comparison background is unchanged. The same
-`findMarkers` arguments and the same overlap and correlation functions are used.
-This is the expensive step in the document and is cached separately; delete
-`split_half_control.Rds` to recompute.
+Every group holds the same number of cells per cluster, `n`, drawn so that each
+stage supplies two disjoint sets of `n`. The procedure is repeated over
+independent draws, and `findMarkers` arguments are unchanged.
 
 ```{r}
-split_half_control = function(sce, labels, stage_vec, common, stage,
-                              n_splits = 10, n_top = 50, seed = 1) {
+stage_discordance = function(sce, labels, stage_vec, min_cells = 20,
+                             n_draws = 10, n_top = 50, seed = 1) {
   labels    = as.character(labels)
   stage_vec = as.character(stage_vec)
+  stages    = c("larva", "transformer")
 
-  in_stage = which(stage_vec == stage & labels %in% common)
-  lab_s    = labels[in_stage]
-  if (length(unique(lab_s)) < 2) return(NULL)
+  clusters_all = sort(unique(labels))
+  cnt = sapply(stages, function(st)
+    sapply(clusters_all, function(cl) sum(labels == cl & stage_vec == st)))
+  if (is.null(dim(cnt)))
+    cnt = matrix(cnt, nrow = length(clusters_all),
+                 dimnames = list(clusters_all, stages))
+  rownames(cnt) = clusters_all
 
-  # seeded once, outside the loop, so each of the n_splits iterations draws a
-  # different partition while the set as a whole stays reproducible
+  # each stage must supply two disjoint draws of n cells per cluster, so n is
+  # half the smaller stage count. Every group then holds exactly n.
+  n_by_cluster = floor(apply(cnt, 1, min) / 2)
+
+  eligibility = as.data.frame(cnt)
+  colnames(eligibility)   = paste0("n_", stages)
+  eligibility$label       = clusters_all
+  eligibility$n_per_group = as.integer(n_by_cluster)
+  eligibility$eligible    = eligibility$n_per_group >= min_cells
+  rownames(eligibility)   = NULL
+
+  eligible = clusters_all[eligibility$eligible]
+  if (length(eligible) < 2) {
+    warning("Fewer than two clusters support the two-stage comparison.")
+    return(list(results = NULL, eligibility = eligibility,
+                n_by_cluster = integer(0), eligible = eligible))
+  }
+  n_by_cluster = n_by_cluster[eligible]
+
+  cmps = list(
+    larvae_vs_transformers = c("larva_h1", "transformer_h1"),
+    larva_splithalf        = c("larva_h1", "larva_h2"),
+    transformer_splithalf  = c("transformer_h1", "transformer_h2"))
+
   set.seed(seed)
   res = list()
 
-  for (r in seq_len(n_splits)) {
-    # a fresh stratified 50/50 split within each cluster on every replicate
-    by_clust = split(seq_along(lab_s), lab_s)
-    pick     = unlist(lapply(by_clust, function(ii) {
-      ii[sample(length(ii), floor(length(ii) / 2))]
-    }), use.names = FALSE)
+  for (d in seq_len(n_draws)) {
+    idx = list()
+    ok  = TRUE
+    for (st in stages) {
+      a = integer(0); b = integer(0)
+      for (cl in eligible) {
+        pool = which(labels == cl & stage_vec == st)
+        need = 2 * n_by_cluster[[cl]]
+        if (length(pool) < need) { ok = FALSE; break }
+        pick = pool[sample(length(pool), need)]
+        a = c(a, pick[seq_len(n_by_cluster[[cl]])])
+        b = c(b, pick[n_by_cluster[[cl]] + seq_len(n_by_cluster[[cl]])])
+      }
+      if (!ok) break
+      idx[[paste0(st, "_h1")]] = a
+      idx[[paste0(st, "_h2")]] = b
+    }
+    if (!ok) next
 
-    is_half1 = rep(FALSE, length(lab_s))
-    is_half1[pick] = TRUE
+    markers = lapply(idx, function(ii)
+      findMarkers(sce[, ii], droplevels(factor(labels[ii])),
+                  test.type = "t", direction = "up", pval.type = "some"))
 
-    lab1 = droplevels(factor(lab_s[is_half1]))
-    lab2 = droplevels(factor(lab_s[!is_half1]))
-    if (nlevels(lab1) < 2 || nlevels(lab2) < 2) next
-    if (min(table(lab1)) < 2 || min(table(lab2)) < 2) next
-
-    m1 = findMarkers(sce[, in_stage[is_half1]],  lab1,
-                     test.type = "t", direction = "up", pval.type = "some")
-    m2 = findMarkers(sce[, in_stage[!is_half1]], lab2,
-                     test.type = "t", direction = "up", pval.type = "some")
-
-    res[[r]] = data.frame(
-      stage       = stage,
-      replicate   = r,
-      label       = common,
-      overlap_pct = vapply(common, function(lb) top_overlap_pct(m1, m2, lb, n_top),
-                           numeric(1)),
-      rank_cor    = vapply(common, function(lb) stat_rank_cor(m1, m2, lb),
-                           numeric(1)),
-      stringsAsFactors = FALSE)
+    for (cmp in names(cmps)) {
+      g1 = cmps[[cmp]][1]
+      g2 = cmps[[cmp]][2]
+      res[[length(res) + 1]] = data.frame(
+        comparison  = cmp,
+        draw        = d,
+        label       = eligible,
+        n_per_group = as.integer(n_by_cluster[eligible]),
+        overlap_pct = vapply(eligible, function(cl)
+          top_overlap_pct(markers[[g1]], markers[[g2]], cl, n_top), numeric(1)),
+        rank_cor    = vapply(eligible, function(cl)
+          stat_rank_cor(markers[[g1]], markers[[g2]], cl), numeric(1)),
+        stringsAsFactors = FALSE)
+    }
   }
 
   out = do.call(rbind, res)
   if (!is.null(out)) rownames(out) = NULL
-  out
+  list(results = out, eligibility = eligibility,
+       n_by_cluster = n_by_cluster, eligible = eligible)
 }
 ```
 
 ```{r}
-split_half_file = paste0(Robject_out_dir, "/split_half_control.Rds")
+sd_file = paste0(Robject_out_dir, "/stage_discordance.Rds")
 
-if (file.exists(split_half_file)) {
-  split_half = readRDS(split_half_file)
+if (file.exists(sd_file)) {
+  stage_disc = readRDS(sd_file)
 } else {
-  message("Running the split-half control. This is the slowest step in the ",
-          "document; the result is cached in ", split_half_file, ".")
-  split_half = bind_rows(
-    bind_rows(lapply(c("larva", "transformer"), function(st)
-      split_half_control(combined.sex.sce, colData(merged.sex.sce)$label,
-                         germ_meta$stage, stage_split$germ$common, st))) %>%
-      mutate(clustering = "germ_subcluster"),
-    bind_rows(lapply(c("larva", "transformer"), function(st)
-      split_half_control(combined.sce, colData(merged.sce)$label,
-                         all_meta$stage, stage_split$all$common, st))) %>%
-      mutate(clustering = "all_cells_cluster"))
-  saveRDS(split_half, file = split_half_file)
+  message("Computing the two-stage comparison. Cached in ", sd_file, ".")
+  stage_disc = list(
+    germ = stage_discordance(combined.sex.sce, colData(merged.sex.sce)$label,
+                             germ_meta$stage),
+    all  = stage_discordance(combined.sce, colData(merged.sce)$label,
+                             all_meta$stage))
+  saveRDS(stage_disc, file = sd_file)
 }
 ```
 
-```{r}
-split_half_summary = split_half %>%
-  group_by(clustering, label, stage) %>%
-  summarize(n_replicates      = dplyr::n(),
-            splithalf_overlap_median = median(overlap_pct, na.rm = TRUE),
-            splithalf_overlap_min    = min(overlap_pct, na.rm = TRUE),
-            splithalf_overlap_max    = max(overlap_pct, na.rm = TRUE),
-            splithalf_rankcor_median = median(rank_cor, na.rm = TRUE),
-            .groups = "drop")
+#### Cells used, and clusters excluded
 
-datatable(split_half_summary %>% mutate(across(where(is.numeric), ~round(., 2))),
-          filter = "top", rownames = FALSE)
+```{r}
+sd_elig = bind_rows(
+  stage_disc$germ$eligibility %>% mutate(clustering = "germ_subcluster"),
+  stage_disc$all$eligibility  %>% mutate(clustering = "all_cells_cluster")) %>%
+  dplyr::select(clustering, label, everything())
+
+write.csv(sd_elig,
+          file = paste0(results_dir, "/SuppTable_stage_discordance_eligibility.csv"),
+          row.names = FALSE)
+
+datatable(sd_elig, filter = "top", rownames = FALSE)
 ```
 
-Overall, across all replicates and clusters:
+* `r depth_line(stage_disc$germ, "Germ cell subclusters")`
+* `r depth_line(stage_disc$all, "All-cells clusters")`
 
 ```{r}
-split_half_overall = split_half %>%
-  left_join(population_sharing %>%
-              dplyr::select(clustering, label, population_type),
-            by = c("clustering", "label")) %>%
-  group_by(clustering, population_type, stage) %>%
-  summarize(n_obs = dplyr::n(),
+sd_results = bind_rows(
+  if (!is.null(stage_disc$germ$results))
+    stage_disc$germ$results %>% mutate(clustering = "germ_subcluster"),
+  if (!is.null(stage_disc$all$results))
+    stage_disc$all$results  %>% mutate(clustering = "all_cells_cluster"))
+
+if (nrow(sd_results) == 0) {
+  sd_results = data.frame(
+    comparison = character(0), draw = integer(0), label = character(0),
+    n_per_group = integer(0), overlap_pct = numeric(0), rank_cor = numeric(0),
+    clustering = character(0), stringsAsFactors = FALSE)
+}
+
+sd_per_cluster = sd_results %>%
+  group_by(clustering, label, comparison) %>%
+  summarize(n_per_group    = dplyr::first(n_per_group),
+            n_draws        = dplyr::n(),
             overlap_median = median(overlap_pct, na.rm = TRUE),
             overlap_min    = min(overlap_pct, na.rm = TRUE),
             overlap_max    = max(overlap_pct, na.rm = TRUE),
             rankcor_median = median(rank_cor, na.rm = TRUE),
             .groups = "drop")
 
-datatable(split_half_overall %>% mutate(across(where(is.numeric), ~round(., 2))),
+# the reference is the noisier of the two within-stage split halves, since a
+# cluster cannot agree across stages better than it agrees with itself
+sd_ref = sd_per_cluster %>%
+  filter(comparison %in% c("larva_splithalf", "transformer_splithalf")) %>%
+  group_by(clustering, label) %>%
+  summarize(ref_overlap = min(overlap_median, na.rm = TRUE),
+            ref_rankcor = min(rankcor_median, na.rm = TRUE),
+            .groups = "drop")
+
+sd_stage = sd_per_cluster %>%
+  filter(comparison == "larvae_vs_transformers") %>%
+  left_join(sd_ref, by = c("clustering", "label")) %>%
+  mutate(overlap_ratio_to_ref = ifelse(!is.na(ref_overlap) & ref_overlap > 0,
+                                       overlap_median / ref_overlap, NA_real_),
+         rankcor_ratio_to_ref = ifelse(!is.na(ref_rankcor) & ref_rankcor > 0,
+                                       rankcor_median / ref_rankcor, NA_real_),
+         below_ref = overlap_median < ref_overlap)
+
+write.csv(sd_stage,
+          file = paste0(results_dir, "/SuppTable_stage_discordance.csv"),
+          row.names = FALSE)
+
+datatable(sd_stage %>% mutate(across(where(is.numeric), ~round(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+#### Paired test against the within-stage reference
+
+```{r}
+sd_paired = sd_stage %>%
+  filter(!is.na(ref_overlap)) %>%
+  group_by(clustering) %>%
+  summarize(n_clusters   = dplyr::n(),
+            median_ref   = median(ref_overlap),
+            median_stage = median(overlap_median),
+            median_ratio = median(overlap_ratio_to_ref, na.rm = TRUE),
+            n_below_ref  = sum(below_ref, na.rm = TRUE),
+            wilcox_p     = if (dplyr::n() >= 5)
+              suppressWarnings(wilcox.test(overlap_median, ref_overlap,
+                                           paired = TRUE)$p.value) else NA_real_,
+            .groups = "drop") %>%
+  mutate(exceeds_ref = median_ratio < 1 & n_below_ref > n_clusters / 2)
+
+datatable(sd_paired %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE)
 ```
 
-### Cross-stage agreement against the ceiling
+```{r}
+sd_sentence = function(clust) {
+  p = sd_paired %>% filter(clustering == clust)
+  if (nrow(p) == 0) return("No two-stage comparison available.")
+  paste0("Paired across ", p$n_clusters, " cluster(s): median within-stage ",
+         "reference ", round(p$median_ref, 1), "%, median stage contrast ",
+         round(p$median_stage, 1), "%, median per-cluster ratio ",
+         round(p$median_ratio, 2), ". ", p$n_below_ref, " of ", p$n_clusters,
+         " clusters agree across stages less well than they agree with ",
+         "themselves",
+         if (!is.na(p$wilcox_p)) paste0(" (Wilcoxon signed rank p = ",
+                                        signif(p$wilcox_p, 2), ")") else "",
+         ".")
+}
+
+sd_germ = sd_paired %>% filter(clustering == "germ_subcluster")
+sd_all  = sd_paired %>% filter(clustering == "all_cells_cluster")
+sd_germ_available = nrow(sd_germ) > 0
+sd_germ_exceeds   = sd_germ_available && isTRUE(sd_germ$exceeds_ref)
+```
+
+**Germ cell subclusters.** `r sd_sentence("germ_subcluster")`
+
+**All-cells clusters.** `r sd_sentence("all_cells_cluster")`
+
+`r if (!sd_germ_available) "**No germ cell subcluster supports this comparison.** Fewer than two have enough cells in both stages once the depth requirement is applied, so marker agreement cannot be assessed for germ cell populations at all, by this or any other comparison in this document. That is a limitation to state in the response rather than a result." else if (sd_germ_exceeds) "**Germ cell populations agree across stages less well than they agree with themselves.** More than half of them fall below their own within-stage reference. Since the reference holds animal, library and collection date constant and the stage contrast does not, the shortfall is consistent with either a stage difference or a batch difference, and this comparison cannot separate them." else "**Germ cell populations agree across stages about as well as they agree with themselves.** Their cross-stage marker agreement is not detectably worse than agreement between random halves of the same stage, at matched depth. Since these markers are computed on uncorrected expression, that is evidence the same genes define these populations at both stages."`
+
+```{r, fig.width=10, fig.height=6}
+sd_plot = sd_per_cluster %>%
+  mutate(comparison = factor(comparison,
+                             levels = c("larva_splithalf", "transformer_splithalf",
+                                        "larvae_vs_transformers")))
+
+sd_cols = c(larva_splithalf = "#009292", transformer_splithalf = "#FF6DB6",
+            larvae_vs_transformers = "#9e2f7f")
+
+p_sd = ggplot(sd_plot, aes(x = factor(label), y = overlap_median,
+                           color = comparison)) +
+  geom_linerange(aes(ymin = overlap_min, ymax = overlap_max),
+                 position = position_dodge(width = 0.6), linewidth = 0.6) +
+  geom_point(position = position_dodge(width = 0.6), size = 2) +
+  scale_color_manual(values = sd_cols) +
+  facet_wrap(~ clustering, scales = "free_x", ncol = 1) +
+  xlab("Cluster") + ylab("Top 50 marker overlap (%)") +
+  labs(caption = paste0("Points are medians across draws, bars the range. ",
+                        "The two split-half comparisons are the within-stage reference."))
+
+p_sd
+ggsave(p_sd, file = paste0(results_dir, "/stage_discordance_by_cluster.png"),
+       width = 10, height = 6)
+```
+
+#### The lowest-agreement population
 
 ```{r}
-sh_wide = split_half_summary %>%
-  tidyr::pivot_wider(id_cols = c(clustering, label),
-                     names_from = stage,
-                     values_from = c(splithalf_overlap_median,
-                                     splithalf_overlap_min,
-                                     splithalf_overlap_max,
-                                     splithalf_rankcor_median))
+sd_germ_clusters = sd_stage %>%
+  filter(clustering == "germ_subcluster", !is.na(overlap_median))
 
+worst = if (nrow(sd_germ_clusters) > 0)
+  sd_germ_clusters %>% slice_min(overlap_median, n = 1, with_ties = FALSE) else NULL
+```
+
+`r if (is.null(worst)) "No germ cell subcluster entered the two-stage comparison, so there is no lowest-agreement population to report." else paste0("The germ cell subcluster with the lowest cross-stage agreement is **", worst$label, "**, at ", round(worst$overlap_median, 1), "% top 50 overlap with ", worst$n_per_group, " cells per group. Its own within-stage reference is ", round(worst$ref_overlap, 1), "%, a ratio of ", round(worst$overlap_ratio_to_ref, 2), ". ", if (!is.na(worst$overlap_ratio_to_ref) && worst$overlap_ratio_to_ref > 0.8) "Its markers reproduce across stages about as well as they reproduce within one stage, so the low absolute figure reflects the instability of marker lists at this depth rather than a difference between stages." else "Its markers reproduce within a stage but not across stages, which is not explained by depth or instability. The genes defining this population differ between larvae and transformers, and its identity is worth re-examining.")`
+
+#### Adding these results to the population table
+
+```{r}
 population_sharing = population_sharing %>%
-  left_join(marker_agreement %>%
-              dplyr::select(clustering, label, in_common, n_top_larva,
-                            n_top_transformer, n_shared_markers,
-                            cross_stage_overlap_pct, cross_stage_rank_cor,
-                            shared_marker_genes),
+  left_join(sd_stage %>%
+              dplyr::select(clustering, label, n_per_group,
+                            stage_overlap_pct = overlap_median,
+                            stage_rank_cor    = rankcor_median,
+                            ref_overlap_pct   = ref_overlap,
+                            ref_rank_cor      = ref_rankcor,
+                            overlap_ratio_to_ref),
             by = c("clustering", "label")) %>%
-  left_join(sh_wide, by = c("clustering", "label")) %>%
-  mutate(ceiling_overlap = pmin(splithalf_overlap_median_larva,
-                                splithalf_overlap_median_transformer,
-                                na.rm = TRUE),
-         overlap_vs_ceiling = ifelse(!is.na(ceiling_overlap) & ceiling_overlap > 0,
-                                     cross_stage_overlap_pct / ceiling_overlap,
-                                     NA_real_),
-         min_stage_n = pmin(n_larva, n_transformer),
+  mutate(min_stage_n   = pmin(n_larva, n_transformer),
          low_cell_flag = min_stage_n < 50)
 
 write.csv(population_sharing,
@@ -1513,89 +1510,11 @@ write.csv(population_sharing,
           row.names = FALSE)
 
 datatable(population_sharing %>%
-            dplyr::select(-shared_marker_genes) %>%
             mutate(across(where(is.numeric), ~round(., 2))),
           filter = "top", rownames = FALSE)
 ```
 
-```{r, fig.width=10, fig.height=6}
-plot_df = population_sharing %>%
-  filter(in_common, !is.na(cross_stage_overlap_pct)) %>%
-  mutate(pop_label = paste0(clustering, " ", label, ": ", population))
-
-sh_points = split_half_summary %>%
-  inner_join(plot_df %>% dplyr::select(clustering, label, pop_label,
-                                       population_type),
-             by = c("clustering", "label"))
-
-p_ceiling = ggplot() +
-  geom_linerange(data = sh_points,
-                 aes(x = pop_label, ymin = splithalf_overlap_min,
-                     ymax = splithalf_overlap_max, color = stage),
-                 position = position_dodge(width = 0.5), linewidth = 0.6) +
-  geom_point(data = sh_points,
-             aes(x = pop_label, y = splithalf_overlap_median, color = stage),
-             position = position_dodge(width = 0.5), size = 2) +
-  geom_point(data = plot_df,
-             aes(x = pop_label, y = cross_stage_overlap_pct),
-             shape = 4, size = 3, stroke = 1.2, color = "black") +
-  scale_color_manual(values = c(larva = "#009292", transformer = "#FF6DB6")) +
-  coord_flip() +
-  facet_wrap(~ population_type, scales = "free_y", ncol = 1) +
-  ylab("Top 50 marker overlap (%)") +
-  xlab(NULL) +
-  labs(color = "Split-half within stage",
-       caption = "Cross (x) is the cross-stage overlap. Dots and bars are the within-stage split-half median and range.")
-
-p_ceiling
-ggsave(p_ceiling, file = paste0(results_dir, "/overlap_vs_splithalf_ceiling.png"),
-       width = 10, height = 6)
-```
-
-```{r}
-germ_agree = population_sharing %>%
-  filter(population_type == "germ", !is.na(cross_stage_overlap_pct))
-
-germ_ceiling = germ_agree %>% filter(!is.na(ceiling_overlap))
-```
-
-`r if (nrow(germ_agree) == 0) "No shared germ cell population had enough cells of both stages to compute stage-split markers, so marker agreement could not be assessed." else paste0("Across ", nrow(germ_agree), " shared germ cell population(s), cross-stage top 50 overlap ranges from ", round(min(germ_agree$cross_stage_overlap_pct), 1), "% to ", round(max(germ_agree$cross_stage_overlap_pct), 1), "% (median ", round(median(germ_agree$cross_stage_overlap_pct), 1), "%). The within-stage split-half ceiling for the same clusters has a median of ", if (nrow(germ_ceiling) > 0) round(median(germ_ceiling$ceiling_overlap), 1) else NA, "%, so cross-stage overlap reaches a median of ", if (nrow(germ_ceiling) > 0) round(100 * median(germ_ceiling$overlap_vs_ceiling, na.rm = TRUE), 0) else NA, "% of what is achievable within a single stage. Cross-stage rank correlation across all tested genes has a median of ", round(median(germ_agree$cross_stage_rank_cor, na.rm = TRUE), 2), ".")`
-
-```{r}
-ceiling_low = nrow(germ_ceiling) > 0 && median(germ_ceiling$ceiling_overlap) < 50
-```
-
-`r if (nrow(germ_ceiling) == 0) "" else if (ceiling_low) "**The ceiling is low.** Marker lists do not reproduce well even between random halves of the same cells, so top 50 overlap is not a usable measure of agreement in this dataset. Read the rank correlation across all genes instead, which does not depend on an arbitrary cutoff." else "The ceiling is high enough that top 50 overlap is interpretable here, and the cross-stage figure should be read as a fraction of it rather than in absolute terms."`
-
-### The lowest-agreement population
-
-```{r}
-worst = germ_agree %>% slice_min(cross_stage_overlap_pct, n = 1, with_ties = FALSE)
-
-worst_sh = split_half_summary %>%
-  filter(clustering == worst$clustering, label == worst$label)
-
-worst_sh_min = if (nrow(worst_sh) > 0) min(worst_sh$splithalf_overlap_median, na.rm = TRUE) else NA_real_
-
-# low cross-stage overlap is a power or instability artifact if the same cluster
-# also fails to reproduce within a single stage, or if one stage is thin
-worst_is_artifact = (!is.na(worst_sh_min) && worst_sh_min < 2 * worst$cross_stage_overlap_pct) ||
-                     worst$min_stage_n < 50
-```
-
-The shared germ cell population with the lowest cross-stage agreement is
-**`r worst$population`** (`r worst$clustering` `r worst$label`), with
-`r worst$n_larva` larval and `r worst$n_transformer` transformer cells, and a
-cross-stage top 50 overlap of `r round(worst$cross_stage_overlap_pct, 1)`%.
-
-```{r}
-datatable(worst_sh %>% mutate(across(where(is.numeric), ~round(., 2))),
-          rownames = FALSE)
-```
-
-`r if (nrow(worst_sh) == 0) "No split-half control is available for this cluster, so the low overlap cannot be attributed." else if (worst_is_artifact) paste0("Its own split-half overlap is only ", round(worst_sh_min, 1), "% within a single stage, and the sparser stage contributes ", worst$min_stage_n, " cells. Its markers therefore do not reproduce even between random halves of the same cells, so the low cross-stage figure reflects instability and limited power rather than a biological difference between stages. It should be described that way and not used as evidence that the population differs between stages.") else paste0("Its split-half overlap is ", round(worst_sh_min, 1), "% within a single stage, and both stages contribute ample cells (minimum ", worst$min_stage_n, "). Markers reproduce within a stage but not across stages, which is a substantive finding: the cells assigned to this cluster are not defined by the same genes in larvae and in transformers, and the identity of this cluster is questionable.")`
-
-### Cell counts for every shared population
+#### Cell counts for every shared population
 
 Overlap percentages are not interpretable without them. Populations where one
 stage contributes fewer than 50 cells are flagged.
@@ -1605,11 +1524,12 @@ datatable(population_sharing %>%
             filter(sharing == "shared") %>%
             dplyr::select(clustering, label, population, population_type,
                           n_larva, n_transformer, min_stage_n, low_cell_flag,
-                          cross_stage_overlap_pct, ceiling_overlap,
-                          overlap_vs_ceiling, cross_stage_rank_cor) %>%
+                          n_per_group, stage_overlap_pct, ref_overlap_pct,
+                          overlap_ratio_to_ref, stage_rank_cor) %>%
             mutate(across(where(is.numeric), ~round(., 2))),
           filter = "top", rownames = FALSE)
 ```
+
 
 # 5. Marker behavior along pseudotime
 
@@ -1861,7 +1781,7 @@ markers_ok      = n_directional > 0 && n_consistent > 0
 hold at least 10% of their cells from each stage: `r n_shared_germ` germ cell
 populations and `r n_shared_som` somatic populations.
 
-`r if (n_shared_germ == 0) "**No germ cell population is shared between stages.** Every germ cell cluster and subcluster is dominated by one stage. Sharing among somatic populations shows the integration can align cells collected on different dates, but it says nothing about whether the germ cell ordering is developmental, because no germ cell state is jointly occupied. On this evidence the trajectory claim is not supported." else paste0("Germ cell populations occupied by both stages are the strongest evidence available here, because a batch effect does not create a jointly occupied state. ", if (nrow(germ_ceiling) > 0) paste0("Markers computed separately within each stage overlap across stages by a median of ", round(median(germ_agree$cross_stage_overlap_pct), 1), "% in the top 50. That figure is only interpretable against the within-stage split-half ceiling, which is ", round(median(germ_ceiling$ceiling_overlap), 1), "%: cross-stage agreement therefore reaches ", round(100 * median(germ_ceiling$overlap_vs_ceiling, na.rm = TRUE), 0), "% of what is achievable between random halves of the same cells. Rank correlation of the test statistic across all tested genes has a median of ", round(median(germ_agree$cross_stage_rank_cor, na.rm = TRUE), 2), ".") else if (nrow(germ_agree) > 0) "Marker agreement was computed but no split-half control was available, so the overlap figures cannot be placed against a ceiling." else "Marker agreement could not be assessed for these populations because at least one stage had too few cells.")`
+`r if (n_shared_germ == 0) "**No germ cell population is shared between stages.** Every germ cell cluster and subcluster is dominated by one stage. Sharing among somatic populations shows the integration can align cells collected on different dates, but it says nothing about whether the germ cell ordering is developmental, because no germ cell state is jointly occupied. On this evidence the trajectory claim is not supported." else paste0("Germ cell populations occupied by both stages are the strongest evidence available here, because a batch effect does not create a jointly occupied state. ", sd_sentence("germ_subcluster"))`
 
 **Marker behavior.** Of `r n_tested` marker and branch combinations tested,
 `r n_directional` show a directional trend along pseudotime (Spearman |rho| >=
@@ -1901,17 +1821,16 @@ cat(paste0(
   "do distinguish the possibilities. First, ", n_shared,
   " populations contain at least 10% of their cells from each stage, of which ",
   n_shared_germ, " are germ cell populations",
-  if (nrow(germ_ceiling) > 0) paste0(
-    "; markers computed separately within larval and within transformer cells ",
-    "for these populations overlap by a median of ",
-    round(median(germ_agree$cross_stage_overlap_pct), 1),
-    "% in the top 50, against a within-stage split-half ceiling of ",
-    round(median(germ_ceiling$ceiling_overlap), 1),
-    "%, that is ",
-    round(100 * median(germ_ceiling$overlap_vs_ceiling, na.rm = TRUE), 0),
-    "% of the agreement achievable between random halves of the same cells, ",
-    "with a median rank correlation of the test statistic across all tested ",
-    "genes of ", round(median(germ_agree$cross_stage_rank_cor, na.rm = TRUE), 2))
+  if (sd_germ_available) paste0(
+    "; for these populations, markers computed separately in larvae and in ",
+    "transformers at matched cell numbers overlap by a median of ",
+    round(sd_germ$median_stage, 1),
+    "% in the top 50, against a within-stage reference of ",
+    round(sd_germ$median_ref, 1),
+    "% obtained by splitting each stage into random halves of the same size, ",
+    "a ratio of ", round(sd_germ$median_ratio, 2), ", with ",
+    sd_germ$n_below_ref, " of ", sd_germ$n_clusters,
+    " clusters falling below their own reference")
   else "",
   ". Second, of ", n_tested, " marker and branch combinations, ", n_directional,
   " show a directional trend along pseudotime and ", n_consistent,
