@@ -984,23 +984,53 @@ in any single library, and that depth is used identically in every group and
 every comparison for that cluster.
 
 ```{r}
-n_used_tab = bind_rows(
-  data.frame(clustering = "germ_subcluster",
-             label = names(discordance$germ$n_by_cluster),
-             n_per_group = as.integer(discordance$germ$n_by_cluster)),
-  data.frame(clustering = "all_cells_cluster",
-             label = names(discordance$all$n_by_cluster),
-             n_per_group = as.integer(discordance$all$n_by_cluster))) %>%
-  mutate(low_power_flag = n_per_group < 50) %>%
-  arrange(n_per_group)
+# a clustering with no cluster passing the four-library threshold yields an
+# empty n_by_cluster, which is a result rather than an error
+n_used_df = function(d, clustering) {
+  if (length(d$n_by_cluster) == 0) {
+    return(data.frame(clustering = character(0), label = character(0),
+                      n_per_group = integer(0), stringsAsFactors = FALSE))
+  }
+  data.frame(clustering  = clustering,
+             label       = names(d$n_by_cluster),
+             n_per_group = as.integer(d$n_by_cluster),
+             stringsAsFactors = FALSE)
+}
+
+n_used_tab = bind_rows(n_used_df(discordance$germ, "germ_subcluster"),
+                       n_used_df(discordance$all,  "all_cells_cluster"))
+
+if (nrow(n_used_tab) > 0) {
+  n_used_tab = n_used_tab %>%
+    mutate(low_power_flag = n_per_group < 50) %>%
+    arrange(n_per_group)
+} else {
+  n_used_tab$low_power_flag = logical(0)
+}
 
 datatable(n_used_tab, rownames = FALSE)
 ```
 
-* Germ cell subclusters: `r length(discordance$germ$eligible)` eligible, `r if (length(discordance$germ$n_by_cluster) == 0) "none" else paste0(min(discordance$germ$n_by_cluster), " to ", max(discordance$germ$n_by_cluster), " cells per cluster per group (median ", round(median(discordance$germ$n_by_cluster)), ")")`.
-* All-cells clusters: `r length(discordance$all$eligible)` eligible, `r if (length(discordance$all$n_by_cluster) == 0) "none" else paste0(min(discordance$all$n_by_cluster), " to ", max(discordance$all$n_by_cluster), " cells per cluster per group (median ", round(median(discordance$all$n_by_cluster)), ")")`.
+```{r}
+depth_line = function(d, what) {
+  if (length(d$n_by_cluster) == 0) {
+    return(paste0(what, ": ", length(d$eligible),
+                  " eligible, so no depth could be set and this clustering ",
+                  "does not enter the analysis."))
+  }
+  paste0(what, ": ", length(d$eligible), " eligible, ",
+         min(d$n_by_cluster), " to ", max(d$n_by_cluster),
+         " cells per cluster per group (median ",
+         round(median(d$n_by_cluster)), ").")
+}
+```
 
-`r if (sum(n_used_tab$low_power_flag) == 0) "Every cluster is matched at 50 or more cells per group." else paste0(sum(n_used_tab$low_power_flag), " cluster(s) are matched at fewer than 50 cells per group and are flagged above. Marker rankings are noisy at that depth, so their discordance values carry little information in either direction and should not be read as evidence of agreement or disagreement. Raising min_cells excludes them and does not affect the depth used for any other cluster.")`
+* `r depth_line(discordance$germ, "Germ cell subclusters")`
+* `r depth_line(discordance$all, "All-cells clusters")`
+
+`r if (length(discordance$germ$n_by_cluster) == 0) "**The germ cell subclusters cannot support this analysis.** Fewer than two of them have enough cells in all four libraries at once. That is a structural consequence of the biology rather than a shortage of data: the female germ cell subclusters have almost no cells in the male library and the male subclusters almost none in the female library, so requiring presence in all four libraries excludes nearly all of them. The pairwise library comparison therefore runs only on the all-cells clustering, where somatic populations are present in every library, and it speaks to the batch effect in those populations rather than in the germ cell states along the trajectory." else ""`
+
+`r if (nrow(n_used_tab) == 0) "" else if (sum(n_used_tab$low_power_flag) == 0) "Every cluster that does enter the analysis is matched at 50 or more cells per group." else paste0(sum(n_used_tab$low_power_flag), " cluster(s) are matched at fewer than 50 cells per group and are flagged above. Marker rankings are noisy at that depth, so their discordance values carry little information in either direction and should not be read as evidence of agreement or disagreement. Raising min_cells excludes them and does not affect the depth used for any other cluster.")`
 
 ```{r}
 disc_excluded = disc_eligibility %>% filter(!eligible)
@@ -1022,6 +1052,15 @@ disc_results = bind_rows(
     discordance$germ$results %>% mutate(clustering = "germ_subcluster"),
   if (!is.null(discordance$all$results))
     discordance$all$results  %>% mutate(clustering = "all_cells_cluster"))
+
+# if neither clustering produced results, give the downstream code a table with
+# the right columns and no rows rather than a zero-column object
+if (nrow(disc_results) == 0) {
+  disc_results = data.frame(
+    comparison = character(0), draw = integer(0), label = character(0),
+    n_per_group = integer(0), overlap_pct = numeric(0), rank_cor = numeric(0),
+    clustering = character(0), stringsAsFactors = FALSE)
+}
 
 disc_per_cluster = disc_results %>%
   group_by(clustering, label, comparison) %>%
@@ -1202,8 +1241,14 @@ lt_paired = function(clust, met = "overlap_median") {
 lt_g = lt_paired("germ_subcluster")
 lt_a = lt_paired("all_cells_cluster")
 
-lt_exceeds = nrow(lt_g) > 0 && isTRUE(lt_g$exceeds_floor)
-lt_within  = nrow(lt_g) > 0 && !isTRUE(lt_g$exceeds_floor)
+# the germ subclusters are usually unavailable here, since sex-restricted
+# populations cannot be present in all four libraries. Fall back to the
+# all-cells clustering, and record which one the verdict came from.
+lt_primary    = if (nrow(lt_g) > 0) lt_g else lt_a
+lt_source     = if (nrow(lt_g) > 0) "germ cell subclusters" else "all-cells clusters"
+lt_available  = nrow(lt_primary) > 0
+lt_exceeds    = lt_available && isTRUE(lt_primary$exceeds_floor)
+lt_within     = lt_available && !isTRUE(lt_primary$exceeds_floor)
 
 paired_sentence = function(p) {
   if (nrow(p) == 0) return("No paired comparison available.")
@@ -1281,7 +1326,7 @@ figure for completeness, but nothing is concluded from it. The clusters testable
 here are largely somatic and need not differ between sexes, so it serves neither
 as a positive control nor as a result.
 
-`r if (lt_within) paste0("**The larvae versus transformers comparison does not exceed the replicate floor.** ", paired_sentence(lt_g), " In the clusters that can be tested, the stage and collection date contrast produces no more marker disagreement than two larval replicate libraries do. Since these markers are computed on uncorrected expression, that is direct evidence the batch effect is small in these populations, subject to the two limits above.") else paste0("**The larvae versus transformers comparison exceeds the replicate floor.** ", paired_sentence(lt_g), " The stage and collection date contrast agrees less well than two larval replicate libraries do. This comparison cannot say how much of that excess is real stage biology and how much is batch, since both push in the same direction.")`
+`r if (!lt_available) "**The larvae versus transformers comparison could not be computed.** No clustering had two or more clusters with enough cells in all four libraries, so there is no paired test to report and nothing follows in either direction." else if (lt_within) paste0("**The larvae versus transformers comparison does not exceed the replicate floor**, in the ", lt_source, ". ", paired_sentence(lt_primary), " In the clusters that can be tested, the stage and collection date contrast produces no more marker disagreement than two larval replicate libraries do. Since these markers are computed on uncorrected expression, that is direct evidence the batch effect is small in these populations, subject to the two limits above.") else paste0("**The larvae versus transformers comparison exceeds the replicate floor**, in the ", lt_source, ". ", paired_sentence(lt_primary), " The stage and collection date contrast agrees less well than two larval replicate libraries do. This comparison cannot say how much of that shortfall is real stage biology and how much is batch, since both push in the same direction.")`
 
 ### Cross-stage agreement, as a supporting comparison
 
@@ -1810,7 +1855,7 @@ markers_ok      = n_directional > 0 && n_consistent > 0
 **Pairwise library discordance, the primary result.**
 `r disc_sentence(dg, "germ subcluster")`
 
-`r if (lt_within) paste0("The stage and collection date contrast does not agree less well than two larval replicate libraries do, compared cluster by cluster against each cluster's own floor. ", paired_sentence(lt_g), " Because these markers are computed on uncorrected expression, and the correction never touched those values, that is evidence the batch effect is small in the clusters where it can be measured. ", if (sum(stage_dominated$population_type == "somatic") == 0) "No somatic cluster is stage-dominated, so there is no population that the correction failed to merge and no set of high batch effect clusters excluded from this estimate." else paste0(sum(stage_dominated$population_type == "somatic"), " somatic cluster(s) are stage-dominated and should be inspected, since a somatic type split by stage is a candidate for a merge the correction did not achieve."), " The result does not extend automatically to the germ cell states along the trajectory, most of which are confined to one stage and so cannot enter this comparison.") else paste0("The stage and collection date contrast agrees less well than two larval replicate libraries do, compared cluster by cluster against each cluster's own floor. ", paired_sentence(lt_g), " This comparison cannot apportion that shortfall between real stage biology and batch, since both act in the same direction.")`
+`r if (!lt_available) "The pairwise library comparison could not be computed: no clustering had two or more clusters with enough cells in all four libraries. Nothing follows from it in either direction, and the population sharing and marker trend results below carry the argument on their own." else if (lt_within) paste0("The stage and collection date contrast does not agree less well than two larval replicate libraries do, compared cluster by cluster against each cluster's own floor, in the ", lt_source, ". ", paired_sentence(lt_primary), " Because these markers are computed on uncorrected expression, and the correction never touched those values, that is evidence the batch effect is small in the clusters where it can be measured. ", if (sum(stage_dominated$population_type == "somatic") == 0) "No somatic cluster is stage-dominated, so there is no population that the correction failed to merge and no set of high batch effect clusters excluded from this estimate." else paste0(sum(stage_dominated$population_type == "somatic"), " somatic cluster(s) are stage-dominated and should be inspected, since a somatic type split by stage is a candidate for a merge the correction did not achieve."), " The result does not extend automatically to the germ cell states along the trajectory, most of which are confined to one stage and so cannot enter this comparison.") else paste0("The stage and collection date contrast agrees less well than two larval replicate libraries do, compared cluster by cluster against each cluster's own floor, in the ", lt_source, ". ", paired_sentence(lt_primary), " This comparison cannot apportion that shortfall between real stage biology and batch, since both act in the same direction.")`
 
 **Population sharing.** `r n_shared` of `r nrow(population_sharing)` populations
 hold at least 10% of their cells from each stage: `r n_shared_germ` germ cell
