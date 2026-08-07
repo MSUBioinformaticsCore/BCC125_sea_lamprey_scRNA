@@ -561,7 +561,6 @@ population against all other cells of the same stage in the same clustering.
 Uncorrected expression is used. If the two gene lists agree, the population is
 being aligned on common biology rather than merged by the correction.
 
-<<<<<<< HEAD
 **The two calls must use the same set of competing clusters.** `findMarkers`
 scores a cluster against the other clusters present in the object it is given.
 If a cluster is dropped from one stage for having too few cells but retained in
