@@ -888,12 +888,18 @@ library_discordance = function(sce, labels, library_vec, min_cells = 20,
   if (length(eligible) < 2) {
     warning("Fewer than two clusters have enough cells in every library; ",
             "pairwise library discordance cannot be computed.")
-    return(list(results = NULL, eligibility = eligibility, n_used = NA_integer_,
-                eligible = eligible))
+    return(list(results = NULL, eligibility = eligibility,
+                n_by_cluster = integer(0), eligible = eligible))
   }
 
-  # every group, in every comparison, gets exactly this many cells per cluster
-  n_used = min(cnt[eligible, , drop = FALSE])
+  # Each cluster is matched at its own depth: the smallest count available for
+  # it in any single library. What the comparison requires is equal power
+  # between the groups being compared, and that holds cluster by cluster. A
+  # single global n would instead force every cluster down to the sparsest one,
+  # discarding most of the data for no gain, since clusters are never compared
+  # against each other here.
+  n_by_cluster = apply(cnt[eligible, , drop = FALSE], 1, min)
+  names(n_by_cluster) = eligible
 
   set.seed(seed)
   res = list()
@@ -907,8 +913,8 @@ library_discordance = function(sce, labels, library_vec, min_cells = 20,
       ok   = TRUE
       for (cl in eligible) {
         pool = which(labels == cl & library_vec %in% libs)
-        if (length(pool) < n_used) { ok = FALSE; break }
-        idx = c(idx, pool[sample(length(pool), n_used)])
+        if (length(pool) < n_by_cluster[[cl]]) { ok = FALSE; break }
+        idx = c(idx, pool[sample(length(pool), n_by_cluster[[cl]])])
       }
       if (!ok) next
       markers_by_group[[gname]] = findMarkers(
@@ -924,6 +930,7 @@ library_discordance = function(sce, labels, library_vec, min_cells = 20,
         comparison  = cmp,
         draw        = d,
         label       = eligible,
+        n_per_group = as.integer(n_by_cluster[eligible]),
         overlap_pct = vapply(eligible, function(cl)
           top_overlap_pct(markers_by_group[[g1]], markers_by_group[[g2]], cl, n_top),
           numeric(1)),
@@ -936,7 +943,7 @@ library_discordance = function(sce, labels, library_vec, min_cells = 20,
 
   out = do.call(rbind, res)
   if (!is.null(out)) rownames(out) = NULL
-  list(results = out, eligibility = eligibility, n_used = n_used,
+  list(results = out, eligibility = eligibility, n_by_cluster = n_by_cluster,
        eligible = eligible)
 }
 ```
@@ -973,8 +980,28 @@ write.csv(disc_eligibility,
 datatable(disc_eligibility, filter = "top", rownames = FALSE)
 ```
 
-* Germ cell subclusters: `r length(discordance$germ$eligible)` eligible, subsampled to **`r discordance$germ$n_used` cells per cluster per group**.
-* All-cells clusters: `r length(discordance$all$eligible)` eligible, subsampled to **`r discordance$all$n_used` cells per cluster per group**.
+Each cluster is subsampled to its own depth, the smallest count available for it
+in any single library, and that depth is used identically in every group and
+every comparison for that cluster.
+
+```{r}
+n_used_tab = bind_rows(
+  data.frame(clustering = "germ_subcluster",
+             label = names(discordance$germ$n_by_cluster),
+             n_per_group = as.integer(discordance$germ$n_by_cluster)),
+  data.frame(clustering = "all_cells_cluster",
+             label = names(discordance$all$n_by_cluster),
+             n_per_group = as.integer(discordance$all$n_by_cluster))) %>%
+  mutate(low_power_flag = n_per_group < 50) %>%
+  arrange(n_per_group)
+
+datatable(n_used_tab, rownames = FALSE)
+```
+
+* Germ cell subclusters: `r length(discordance$germ$eligible)` eligible, `r if (length(discordance$germ$n_by_cluster) == 0) "none" else paste0(min(discordance$germ$n_by_cluster), " to ", max(discordance$germ$n_by_cluster), " cells per cluster per group (median ", round(median(discordance$germ$n_by_cluster)), ")")`.
+* All-cells clusters: `r length(discordance$all$eligible)` eligible, `r if (length(discordance$all$n_by_cluster) == 0) "none" else paste0(min(discordance$all$n_by_cluster), " to ", max(discordance$all$n_by_cluster), " cells per cluster per group (median ", round(median(discordance$all$n_by_cluster)), ")")`.
+
+`r if (sum(n_used_tab$low_power_flag) == 0) "Every cluster is matched at 50 or more cells per group." else paste0(sum(n_used_tab$low_power_flag), " cluster(s) are matched at fewer than 50 cells per group and are flagged above. Marker rankings are noisy at that depth, so their discordance values carry little information in either direction and should not be read as evidence of agreement or disagreement. Raising min_cells excludes them and does not affect the depth used for any other cluster.")`
 
 ```{r}
 disc_excluded = disc_eligibility %>% filter(!eligible)
@@ -999,7 +1026,8 @@ disc_results = bind_rows(
 
 disc_per_cluster = disc_results %>%
   group_by(clustering, label, comparison) %>%
-  summarize(n_draws        = dplyr::n(),
+  summarize(n_per_group    = dplyr::first(n_per_group),
+            n_draws        = dplyr::n(),
             overlap_median = median(overlap_pct, na.rm = TRUE),
             overlap_min    = min(overlap_pct, na.rm = TRUE),
             overlap_max    = max(overlap_pct, na.rm = TRUE),
