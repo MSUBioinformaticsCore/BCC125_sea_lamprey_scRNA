@@ -1073,19 +1073,65 @@ disc_overall = disc_results %>%
 floor_overall = disc_overall %>%
   filter(comparison == "UND1_vs_UND2") %>%
   dplyr::select(clustering,
-                floor_overlap = overlap_median, floor_rankcor = rankcor_median,
-                floor_overlap_min = overlap_min, floor_overlap_max = overlap_max)
+                floor_overlap = overlap_median, floor_rankcor = rankcor_median)
 
 disc_overall = disc_overall %>%
   left_join(floor_overall, by = "clustering") %>%
   mutate(overlap_ratio_to_floor = overlap_median / floor_overlap,
-         rankcor_ratio_to_floor = rankcor_median / floor_rankcor,
-         within_floor_range = overlap_median >= floor_overlap_min &
-                              overlap_median <= floor_overlap_max)
+         rankcor_ratio_to_floor = rankcor_median / floor_rankcor)
 
 datatable(disc_overall %>% mutate(across(where(is.numeric), ~round(., 3))),
           rownames = FALSE)
 ```
+
+#### Paired comparison against the floor
+
+Each cluster is compared against **its own** replicate floor, and the pairing is
+kept. A comparison against the pooled minimum-to-maximum spread of the floor
+would not be a test: that spread runs across clusters that genuinely differ and
+across random draws, so it is wide enough to contain almost any value, and it is
+not uncertainty around the floor's median.
+
+```{r}
+paired = disc_per_cluster %>%
+  dplyr::select(clustering, label, comparison, n_per_group,
+                overlap_median, rankcor_median) %>%
+  tidyr::pivot_longer(c(overlap_median, rankcor_median),
+                      names_to = "metric", values_to = "value") %>%
+  tidyr::pivot_wider(id_cols = c(clustering, label, n_per_group, metric),
+                     names_from = comparison, values_from = value) %>%
+  filter(!is.na(UND1_vs_UND2))
+
+paired_test = paired %>%
+  tidyr::pivot_longer(c(Female_vs_Male, larvae_vs_transformers),
+                      names_to = "comparison", values_to = "value") %>%
+  filter(!is.na(value)) %>%
+  group_by(clustering, metric, comparison) %>%
+  summarize(
+    n_clusters        = dplyr::n(),
+    median_floor      = median(UND1_vs_UND2),
+    median_comparison = median(value),
+    median_ratio      = median(value / UND1_vs_UND2, na.rm = TRUE),
+    n_below_floor     = sum(value < UND1_vs_UND2),
+    wilcox_p          = if (dplyr::n() >= 5)
+      suppressWarnings(wilcox.test(value, UND1_vs_UND2, paired = TRUE)$p.value)
+      else NA_real_,
+    .groups = "drop") %>%
+  mutate(exceeds_floor = median_ratio < 1 &
+                         n_below_floor > n_clusters / 2)
+
+write.csv(paired_test,
+          file = paste0(results_dir, "/SuppTable_discordance_paired_test.csv"),
+          row.names = FALSE)
+
+datatable(paired_test %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE)
+```
+
+`exceeds_floor` is TRUE when a comparison agrees less well than the replicate
+floor: the median per-cluster ratio is below 1 and more than half the clusters
+individually fall below their own floor. Lower agreement means greater
+discordance.
 
 ```{r, fig.width=10, fig.height=6}
 cmp_cols = c(UND1_vs_UND2 = "#009292", Female_vs_Male = "#006ddb",
@@ -1141,13 +1187,34 @@ disc_sentence = function(x, what) {
       "Larvae versus transformers: median overlap ", round(x$lt$overlap_median, 1),
       "%, which is ", round(x$lt$overlap_ratio_to_floor, 2),
       " times the floor, and rank correlation ", round(x$lt$rankcor_median, 2),
-      ". This ", if (isTRUE(x$lt$within_floor_range))
-        "falls inside the range of the larval replicate floor, so the stage contrast produces no more disagreement than replicate variation alone."
-      else if (x$lt$overlap_median < x$lt$floor_overlap_min)
-        "falls below the floor range, so the stage contrast produces more disagreement than replicate variation alone."
-      else "falls above the floor range."))
+      "."))
   }
   paste(parts, collapse = " ")
+}
+
+# verdict from the paired per-cluster test, not from a pooled spread
+lt_paired = function(clust, met = "overlap_median") {
+  paired_test %>%
+    filter(clustering == clust, metric == met,
+           comparison == "larvae_vs_transformers")
+}
+
+lt_g = lt_paired("germ_subcluster")
+lt_a = lt_paired("all_cells_cluster")
+
+lt_exceeds = nrow(lt_g) > 0 && isTRUE(lt_g$exceeds_floor)
+lt_within  = nrow(lt_g) > 0 && !isTRUE(lt_g$exceeds_floor)
+
+paired_sentence = function(p) {
+  if (nrow(p) == 0) return("No paired comparison available.")
+  paste0("Paired across ", p$n_clusters, " cluster(s): median floor ",
+         round(p$median_floor, 1), "%, median stage contrast ",
+         round(p$median_comparison, 1), "%, median per-cluster ratio ",
+         round(p$median_ratio, 2), ". ", p$n_below_floor, " of ", p$n_clusters,
+         " clusters agree less well than their own floor",
+         if (!is.na(p$wilcox_p)) paste0(" (Wilcoxon signed rank p = ",
+                                        signif(p$wilcox_p, 2), ")") else "",
+         ".")
 }
 ```
 
@@ -1155,9 +1222,9 @@ disc_sentence = function(x, what) {
 
 **All-cells clusters.** `r disc_sentence(da, "all-cells cluster")`
 
-```{r}
-lt_within = !is.null(dg) && nrow(dg$lt) > 0 && isTRUE(dg$lt$within_floor_range)
-```
+**Germ cell subclusters, paired.** `r paired_sentence(lt_g)`
+
+**All-cells clusters, paired.** `r paired_sentence(lt_a)`
 
 #### How to read these numbers
 
@@ -1214,7 +1281,7 @@ figure for completeness, but nothing is concluded from it. The clusters testable
 here are largely somatic and need not differ between sexes, so it serves neither
 as a positive control nor as a result.
 
-`r if (lt_within) "**The larvae versus transformers comparison falls within the replicate floor.** In the clusters that can be tested, the stage and collection date contrast produces no more marker disagreement than two larval replicate libraries do. Since these markers are computed on uncorrected expression, that is direct evidence the batch effect is small in these populations, subject to the two limits above." else "**The larvae versus transformers comparison exceeds the replicate floor.** The stage and collection date contrast produces more marker disagreement than two larval replicate libraries do. This comparison cannot say how much of that excess is real stage biology and how much is batch, since both push in the same direction."`
+`r if (lt_within) paste0("**The larvae versus transformers comparison does not exceed the replicate floor.** ", paired_sentence(lt_g), " In the clusters that can be tested, the stage and collection date contrast produces no more marker disagreement than two larval replicate libraries do. Since these markers are computed on uncorrected expression, that is direct evidence the batch effect is small in these populations, subject to the two limits above.") else paste0("**The larvae versus transformers comparison exceeds the replicate floor.** ", paired_sentence(lt_g), " The stage and collection date contrast agrees less well than two larval replicate libraries do. This comparison cannot say how much of that excess is real stage biology and how much is batch, since both push in the same direction.")`
 
 ### Cross-stage agreement, as a supporting comparison
 
@@ -1743,7 +1810,7 @@ markers_ok      = n_directional > 0 && n_consistent > 0
 **Pairwise library discordance, the primary result.**
 `r disc_sentence(dg, "germ subcluster")`
 
-`r if (lt_within) paste0("The stage and collection date contrast falls within the range produced by two larval replicate libraries. Because these markers are computed on uncorrected expression, and the correction never touched those values, that is evidence the batch effect is small in the clusters where it can be measured. ", if (sum(stage_dominated$population_type == "somatic") == 0) "No somatic cluster is stage-dominated, so there is no population that the correction failed to merge and no set of high batch effect clusters excluded from this estimate." else paste0(sum(stage_dominated$population_type == "somatic"), " somatic cluster(s) are stage-dominated and should be inspected, since a somatic type split by stage is a candidate for a merge the correction did not achieve."), " The result does not extend automatically to the germ cell states along the trajectory, most of which are confined to one stage and so cannot enter this comparison.") else "The stage and collection date contrast exceeds the replicate floor. This comparison cannot apportion that excess between real stage biology and batch, since both act in the same direction."`
+`r if (lt_within) paste0("The stage and collection date contrast does not agree less well than two larval replicate libraries do, compared cluster by cluster against each cluster's own floor. ", paired_sentence(lt_g), " Because these markers are computed on uncorrected expression, and the correction never touched those values, that is evidence the batch effect is small in the clusters where it can be measured. ", if (sum(stage_dominated$population_type == "somatic") == 0) "No somatic cluster is stage-dominated, so there is no population that the correction failed to merge and no set of high batch effect clusters excluded from this estimate." else paste0(sum(stage_dominated$population_type == "somatic"), " somatic cluster(s) are stage-dominated and should be inspected, since a somatic type split by stage is a candidate for a merge the correction did not achieve."), " The result does not extend automatically to the germ cell states along the trajectory, most of which are confined to one stage and so cannot enter this comparison.") else paste0("The stage and collection date contrast agrees less well than two larval replicate libraries do, compared cluster by cluster against each cluster's own floor. ", paired_sentence(lt_g), " This comparison cannot apportion that shortfall between real stage biology and batch, since both act in the same direction.")`
 
 **Population sharing.** `r n_shared` of `r nrow(population_sharing)` populations
 hold at least 10% of their cells from each stage: `r n_shared_germ` germ cell
