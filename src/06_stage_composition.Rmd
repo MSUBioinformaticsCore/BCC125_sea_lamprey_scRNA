@@ -745,19 +745,67 @@ here.
 Both metrics are computed identically for the cross-stage comparison and for
 the split-half control.
 
+Two implementation choices matter for how these numbers come out.
+
+**The top 50 is sorted explicitly**, by FDR then p-value, rather than relying on
+the order `findMarkers` happens to return. Nothing would error if that order
+changed; the top 50 would silently become an arbitrary 50 and every overlap
+figure in this section would be wrong.
+
+**The rank correlation uses the mean of the pairwise log fold changes, not
+`summary.logFC`.** Under `pval.type = "some"`, `summary.logFC` is not a fixed
+quantity. `findMarkers` computes a log fold change for every pairwise comparison
+of a cluster against each other cluster, then reports the one belonging to the
+comparison that supplied the summary p-value, which under `"some"` is drawn from
+the middle of the ranked p-values. Which comparison that is varies from gene to
+gene, and varies between the two runs being compared: the same gene in the same
+cluster may report its log fold change against one cluster in the larval run and
+against a different cluster in the transformer run. Correlating those vectors
+compares different contrasts. Because both runs are now restricted to the same
+`common` cluster set, they carry identical `logFC.*` columns, so the mean across
+those columns is an average effect size against the same clusters on both sides
+and means the same thing in each.
+
+The noise `summary.logFC` introduced was unstructured, so it attenuated the
+correlation rather than inflating it. Any value computed under the previous
+version was a lower bound on agreement.
+
 ```{r}
 top_markers_for = function(marker_list, lab, n = 50) {
   if (is.null(marker_list)) return(character(0))
   if (!lab %in% names(marker_list)) return(character(0))
-  rownames(marker_list[[lab]])[seq_len(min(n, nrow(marker_list[[lab]])))]
+  df = marker_list[[lab]]
+  if (nrow(df) == 0) return(character(0))
+
+  # sort explicitly rather than trusting the order findMarkers returns
+  ord = if (all(c("FDR", "p.value") %in% colnames(df))) {
+    order(df$FDR, df$p.value)
+  } else if ("FDR" %in% colnames(df)) {
+    order(df$FDR)
+  } else if ("p.value" %in% colnames(df)) {
+    order(df$p.value)
+  } else {
+    seq_len(nrow(df))
+  }
+  rownames(df)[ord][seq_len(min(n, nrow(df)))]
 }
 
-# the statistic findMarkers returns for the relevant comparison
-pick_stat = function(df) {
-  if ("summary.logFC" %in% colnames(df)) return("summary.logFC")
-  lf = grep("^logFC", colnames(df), value = TRUE)
-  if (length(lf) > 0) return(lf[1])
-  NA_character_
+# per-gene effect size: the mean log fold change across every pairwise
+# comparison, which is comparable between runs because both use the same
+# cluster set. summary.logFC is only a fallback; see the note above.
+marker_effect = function(df) {
+  lf = grep("^logFC\\.", colnames(df), value = TRUE)
+  if (length(lf) > 0) {
+    v = rowMeans(as.matrix(as.data.frame(df[, lf, drop = FALSE])), na.rm = TRUE)
+    names(v) = rownames(df)
+    return(v)
+  }
+  if ("summary.logFC" %in% colnames(df)) {
+    v = as.numeric(df$summary.logFC)
+    names(v) = rownames(df)
+    return(v)
+  }
+  NULL
 }
 
 top_overlap_pct = function(m1, m2, lab, n = 50) {
@@ -769,15 +817,14 @@ top_overlap_pct = function(m1, m2, lab, n = 50) {
 }
 
 stat_rank_cor = function(m1, m2, lab) {
-  if (is.null(m1) || is.null(m2))            return(NA_real_)
+  if (is.null(m1) || is.null(m2))                 return(NA_real_)
   if (!lab %in% names(m1) || !lab %in% names(m2)) return(NA_real_)
-  d1 = m1[[lab]]; d2 = m2[[lab]]
-  s1 = pick_stat(d1); s2 = pick_stat(d2)
-  if (is.na(s1) || is.na(s2)) return(NA_real_)
-  g = intersect(rownames(d1), rownames(d2))
+  e1 = marker_effect(m1[[lab]])
+  e2 = marker_effect(m2[[lab]])
+  if (is.null(e1) || is.null(e2)) return(NA_real_)
+  g = intersect(names(e1), names(e2))
   if (length(g) < 10) return(NA_real_)
-  suppressWarnings(cor(as.numeric(d1[g, s1]), as.numeric(d2[g, s2]),
-                       method = "spearman"))
+  suppressWarnings(cor(e1[g], e2[g], method = "spearman"))
 }
 ```
 
