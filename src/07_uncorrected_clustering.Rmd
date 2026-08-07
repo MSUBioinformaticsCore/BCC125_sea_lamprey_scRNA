@@ -1,0 +1,498 @@
+---
+title: "07_uncorrected_clustering"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+The clustering used throughout this project is computed on `fastMNN` corrected
+values, so cells from different libraries landing in the same cluster is partly
+produced by the correction itself and cannot, on its own, show that the batch
+effect is small. This document clusters the same cells **without** correction and
+asks how they group.
+
+Libraries are normalized to comparable coverage with `multiBatchNorm`, then
+shared highly variable genes and PCA, and nothing further. `multiBatchNorm`
+rescales for sequencing depth only; it does not adjust expression structure. Skipping
+it and clustering raw per-sample `logNormCounts` would let depth differences
+appear as batch effect and overstate the problem.
+
+## What each comparison can and cannot show
+
+**Undifferentiated.1 versus Undifferentiated.2 is the clean comparison.** Same
+stage, same collection date, different animal and library. If those cells mix
+without correction, library preparation and replicate variation alone are not
+strong enough to drive clustering. Nothing else differs between them, so this is
+unambiguous.
+
+**Somatic cell types mixing across all four libraries is the informative
+result.** Fibroblasts, erythrocytes and macrophages should be broadly similar at
+both stages. If July and November cells of those types group together with no
+correction applied, then the July to November difference is smaller than the
+difference between cell types, demonstrated without `fastMNN` involved anywhere.
+
+**Larvae versus transformers is confounded and is reported but not
+interpreted.** Stage and collection date vary together, so separation could be
+either, and this analysis cannot tell them apart.
+
+**What this cannot address.** Whether the germ cell trajectory ordering is
+developmental. Germ cell states are largely stage-restricted, so they will
+separate in uncorrected space whether the cause is batch or biology. This
+document bounds the batch effect using populations present at both stages; it
+cannot speak to populations that are not.
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(batchelor)
+library(BiocSingular)
+library(BiocNeighbors)
+library(patchwork)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir     = paste0(params$project_dir, "/results/20260804_uncorrected")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+```
+
+```{r, echo=FALSE}
+Robject_dir = paste0(params$project_dir, "/results/20260312/Robjects")
+all.sce     = readRDS(paste0(Robject_dir, "/all.sce.Rds"))
+merged.sce  = readRDS(paste0(Robject_dir, "/merged.sce.Rds"))
+```
+
+```{r}
+library_meta = data.frame(
+  batch      = c("UND1_C00004336", "UND2_C00004362", "TF_C00004337", "TM_C00004374"),
+  library    = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male"),
+  stage      = c("larva", "larva", "transformer", "transformer"),
+  stringsAsFactors = FALSE)
+
+anno_all = c(
+  "1. Fibroblasts (migrating)",
+  "2. Mesonephric cells",
+  "3. Granulosa cells (migrating)",
+  "4. Granulosa cells",
+  "5. Oogonia/Oocytes",
+  "6. Endothelial cells",
+  "7. Primordial germ cells (migrating)",
+  "8. Erythrocytes",
+  "9. Pre-granulosa cells (migrating)",
+  "10. Leukocytes",
+  "11. Hemopoietic stem cells",
+  "12. Podocytes",
+  "13. Macrophages",
+  "14. Pre-granulosa cells (mitotic)",
+  "15. Immune cells (migrating, mitotic)",
+  "16. Spermatocytes (cytokinetic)",
+  "17. Male germ cells (migrating)",
+  "18. Spermatocytes (apoptotic)",
+  "19. Spermatocytes (GPCR-activated)")
+
+classify_population = function(x) {
+  x_l = tolower(x)
+  ifelse(grepl("germ|oogonia|oocyte|spermatocyt|spermatogon|pgc|fgc|mgc|spc", x_l),
+         "germ", "somatic")
+}
+```
+
+# Cluster the uncorrected data
+
+`multiBatchNorm`, shared HVGs and PCA, then the same graph construction and
+Louvain settings used in `01` (`k = 30`, seed 1), so the only difference between
+this clustering and the published one is the absence of `fastMNN`. This is the
+expensive step and is cached; delete `uncorrected.sce.Rds` to recompute.
+
+```{r}
+uncorrected_file = paste0(Robject_out_dir, "/uncorrected.sce.Rds")
+
+if (file.exists(uncorrected_file)) {
+  uncorrected.sce = readRDS(uncorrected_file)
+} else {
+  message("Clustering the uncorrected data. This is slow; cached in ",
+          uncorrected_file, ".")
+
+  universe = Reduce(intersect, lapply(all.sce, rownames))
+  all.sce2 = lapply(all.sce, "[", i = universe, )
+  all.dec  = lapply(all.sce, modelGeneVar)
+  all.dec2 = lapply(all.dec, "[", i = universe, )
+
+  # depth rescaling only, no correction of expression structure
+  normed.sce   = do.call(multiBatchNorm, all.sce2)
+  combined.dec = do.call(combineVar, all.dec2)
+  combined.hvg = getTopHVGs(combined.dec, n = 5000)
+
+  common_cols = Reduce(intersect, lapply(normed.sce,
+                                         function(x) colnames(colData(x))))
+  normed.sce  = lapply(normed.sce, function(x) {
+    colData(x)     = colData(x)[, common_cols, drop = FALSE]
+    reducedDims(x) = list()
+    x
+  })
+
+  uncorrected.sce = do.call(cbind, normed.sce)
+
+  set.seed(1)
+  uncorrected.sce = runPCA(uncorrected.sce, subset_row = combined.hvg,
+                           ncomponents = 50, BSPARAM = RandomParam())
+  set.seed(1)
+  g = buildSNNGraph(uncorrected.sce, use.dimred = "PCA", k = 30)
+  set.seed(1)
+  colLabels(uncorrected.sce) = factor(igraph::cluster_louvain(g)$membership)
+  set.seed(1)
+  uncorrected.sce = runTSNE(uncorrected.sce, dimred = "PCA")
+
+  saveRDS(uncorrected.sce, file = uncorrected_file)
+}
+```
+
+```{r}
+cells_match = identical(colnames(uncorrected.sce), colnames(merged.sce))
+```
+
+Cell barcodes `r if (cells_match) "match" else "do NOT match"` between the
+uncorrected and the corrected objects, in the same order.
+
+```{r}
+stopifnot(cells_match)
+
+meta = data.frame(
+  barcode            = colnames(uncorrected.sce),
+  batch              = as.character(colData(merged.sce)$batch),
+  corrected_cluster  = as.character(colData(merged.sce)$label),
+  uncorrected_cluster = as.character(colData(uncorrected.sce)$label),
+  stringsAsFactors   = FALSE) %>%
+  left_join(library_meta, by = "batch") %>%
+  mutate(CellType        = anno_all[as.integer(corrected_cluster)],
+         population_type = classify_population(CellType))
+
+observed_libs = sort(unique(meta$batch))
+unexpected    = setdiff(observed_libs, library_meta$batch)
+```
+
+* Libraries present: `r paste(observed_libs, collapse = ", ")`
+* Identifiers not in the mapping: `r if (length(unexpected) > 0) paste(unexpected, collapse = ", ") else "none"`
+
+```{r}
+if (length(unexpected) > 0) {
+  stop(paste0("Library identifier(s) not in library_meta: ",
+              paste(unexpected, collapse = ", ")))
+}
+```
+
+`r length(unique(meta$uncorrected_cluster))` clusters are found without
+correction, against `r length(unique(meta$corrected_cluster))` with it.
+
+## Uncorrected clusters in TSNE space
+
+```{r, fig.width=12, fig.height=5}
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+
+colData(uncorrected.sce)$library = meta$library
+colData(uncorrected.sce)$stage   = meta$stage
+
+p_lib = plotTSNE(uncorrected.sce, colour_by = "library", point_size = .05) +
+  ggtitle("Uncorrected, colored by library") +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+p_clust = plotTSNE(uncorrected.sce, colour_by = "label", text_by = "label",
+                   text_colour = "red", point_size = .05) +
+  ggtitle("Uncorrected, colored by uncorrected cluster")
+
+p_lib + p_clust
+
+ggsave(p_lib + p_clust, file = paste0(results_dir, "/uncorrected_tsne.png"),
+       width = 12, height = 5)
+```
+
+# Do uncorrected clusters separate by library?
+
+If the batch effect were large, cells of one type from different libraries would
+fail to group together and would appear as library-specific clusters.
+
+```{r}
+unc_comp = meta %>%
+  dplyr::count(uncorrected_cluster, library, name = "n") %>%
+  group_by(uncorrected_cluster) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+unc_wide = unc_comp %>%
+  tidyr::pivot_wider(id_cols = uncorrected_cluster, names_from = library,
+                     values_from = c(n, pct), values_fill = 0) %>%
+  mutate(n_total = rowSums(dplyr::select(., starts_with("n_"))))
+
+unc_dominant = unc_comp %>%
+  group_by(uncorrected_cluster) %>%
+  slice_max(pct, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(uncorrected_cluster,
+            dominant_library = library,
+            dominant_pct = pct,
+            single_library_dominated = pct >= 90)
+
+unc_comp_tab = unc_wide %>%
+  left_join(unc_dominant, by = "uncorrected_cluster") %>%
+  arrange(desc(dominant_pct))
+
+write.csv(unc_comp_tab,
+          file = paste0(results_dir, "/SuppTable_uncorrected_cluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(unc_comp_tab %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r}
+n_dominated = sum(unc_comp_tab$single_library_dominated)
+```
+
+`r n_dominated` of `r nrow(unc_comp_tab)` uncorrected clusters draw 90% or more
+of their cells from a single library.
+
+```{r, fig.width=9, fig.height=5}
+p_unc_comp = ggplot(unc_comp,
+                    aes(x = factor(uncorrected_cluster,
+                                   levels = sort(unique(as.numeric(uncorrected_cluster)))),
+                        y = pct, fill = library)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = lib_cols) +
+  xlab("Uncorrected cluster") + ylab("Percent of cells")
+
+p_unc_comp
+ggsave(p_unc_comp,
+       file = paste0(results_dir, "/uncorrected_cluster_composition.png"),
+       width = 9, height = 5)
+```
+
+## Correspondence with the corrected clustering
+
+```{r}
+crosstab = meta %>%
+  dplyr::count(corrected_cluster, uncorrected_cluster, name = "n") %>%
+  group_by(corrected_cluster) %>%
+  mutate(pct_of_corrected = 100 * n / sum(n)) %>%
+  ungroup()
+
+best_match = crosstab %>%
+  group_by(corrected_cluster) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(CellType = anno_all[as.integer(corrected_cluster)]) %>%
+  arrange(desc(pct_of_corrected)) %>%
+  dplyr::select(corrected_cluster, CellType, uncorrected_cluster,
+                n, pct_of_corrected)
+
+datatable(best_match %>% mutate(across(where(is.numeric), ~round(., 1))),
+          filter = "top", rownames = FALSE)
+```
+
+# Library mixing among nearest neighbors
+
+Cluster membership is coarse. A finer measure asks, for each cell, what fraction
+of its nearest neighbors come from a different library.
+
+Neighbors are searched **within a cell type**, so the question is specifically
+whether cells of the same type from different libraries sit next to each other.
+The observed fraction is compared against what perfect mixing would give for that
+cell type's library proportions, which is `1 - sum(p^2)`. The ratio is the mixing
+score: 1 means libraries are interleaved as thoroughly as their proportions
+allow, 0 means complete separation by library.
+
+The same statistic is computed on the corrected embedding as an upper reference.
+Correction is designed to maximize it, so it shows what the ceiling looks like.
+
+```{r}
+mixing_score = function(emb, groups, k = 30) {
+  n = nrow(emb)
+  g = as.character(groups)
+  keep = !is.na(g)
+  emb = emb[keep, , drop = FALSE]; g = g[keep]; n = nrow(emb)
+
+  if (n <= 5 || length(unique(g)) < 2) {
+    return(data.frame(n_cells = n, n_groups = length(unique(g)),
+                      observed = NA_real_, expected = NA_real_,
+                      mixing_score = NA_real_))
+  }
+  kk = min(k, n - 1)
+  kn = BiocNeighbors::findKNN(emb, k = kk, get.distance = FALSE)$index
+  same = matrix(g[kn], nrow = n) == g
+  observed = mean(1 - rowMeans(same))
+  p = as.numeric(table(g)) / n
+  expected = 1 - sum(p^2)
+  data.frame(n_cells = n, n_groups = length(unique(g)),
+             observed = observed, expected = expected,
+             mixing_score = ifelse(expected > 0, observed / expected, NA_real_))
+}
+
+run_mixing = function(emb, meta, group_col, cell_subset = NULL, k = 30) {
+  m = meta
+  idx = seq_len(nrow(m))
+  if (!is.null(cell_subset)) idx = which(cell_subset)
+  bind_rows(lapply(split(idx, m$CellType[idx]), function(ii) {
+    if (length(ii) < 6) return(NULL)
+    res = mixing_score(emb[ii, , drop = FALSE], m[[group_col]][ii], k = k)
+    res$CellType = m$CellType[ii][1]
+    res
+  }))
+}
+```
+
+```{r}
+emb_unc = reducedDim(uncorrected.sce, "PCA")[, 1:50]
+emb_cor = reducedDim(merged.sce, "corrected")[, 1:50]
+
+mixing = bind_rows(
+  run_mixing(emb_unc, meta, "library") %>%
+    mutate(embedding = "uncorrected", comparison = "all four libraries"),
+  run_mixing(emb_cor, meta, "library") %>%
+    mutate(embedding = "corrected",   comparison = "all four libraries"),
+
+  run_mixing(emb_unc, meta, "library", cell_subset = meta$stage == "larva") %>%
+    mutate(embedding = "uncorrected", comparison = "UND1 vs UND2"),
+  run_mixing(emb_cor, meta, "library", cell_subset = meta$stage == "larva") %>%
+    mutate(embedding = "corrected",   comparison = "UND1 vs UND2"),
+
+  run_mixing(emb_unc, meta, "stage") %>%
+    mutate(embedding = "uncorrected", comparison = "larvae vs transformers"),
+  run_mixing(emb_cor, meta, "stage") %>%
+    mutate(embedding = "corrected",   comparison = "larvae vs transformers")) %>%
+  mutate(population_type = classify_population(CellType)) %>%
+  dplyr::select(comparison, embedding, CellType, population_type,
+                n_cells, n_groups, observed, expected, mixing_score)
+
+write.csv(mixing, file = paste0(results_dir, "/SuppTable_library_mixing.csv"),
+          row.names = FALSE)
+
+datatable(mixing %>% mutate(across(where(is.numeric), ~round(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r, fig.width=11, fig.height=7}
+p_mix = ggplot(mixing %>% filter(!is.na(mixing_score)),
+               aes(x = reorder(CellType, mixing_score), y = mixing_score,
+                   fill = embedding)) +
+  geom_bar(stat = "identity", position = position_dodge(width = 0.75)) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "grey40") +
+  scale_fill_manual(values = c(uncorrected = "#9e2f7f", corrected = "#009292")) +
+  coord_flip() +
+  facet_wrap(~ comparison, ncol = 3) +
+  xlab(NULL) + ylab("Mixing score (1 = fully interleaved)") +
+  theme(axis.text.y = element_text(size = 7))
+
+p_mix
+ggsave(p_mix, file = paste0(results_dir, "/library_mixing_by_celltype.png"),
+       width = 11, height = 7)
+```
+
+# Summary
+
+```{r}
+summ = mixing %>%
+  filter(!is.na(mixing_score)) %>%
+  group_by(comparison, embedding, population_type) %>%
+  summarize(n_cell_types = dplyr::n(),
+            median_score = median(mixing_score),
+            min_score    = min(mixing_score),
+            max_score    = max(mixing_score),
+            .groups = "drop")
+
+datatable(summ %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+```{r}
+get_score = function(cmp, emb, ptype) {
+  v = summ %>% filter(comparison == cmp, embedding == emb,
+                      population_type == ptype) %>% pull(median_score)
+  if (length(v) == 0) NA_real_ else v
+}
+
+und_unc  = get_score("UND1 vs UND2", "uncorrected", "somatic")
+som_unc  = get_score("all four libraries", "uncorrected", "somatic")
+som_cor  = get_score("all four libraries", "corrected", "somatic")
+germ_unc = get_score("all four libraries", "uncorrected", "germ")
+
+som_ratio = if (!is.na(som_unc) && !is.na(som_cor) && som_cor > 0)
+  som_unc / som_cor else NA_real_
+```
+
+**The clean comparison.** Among somatic cell types in the uncorrected embedding,
+the median mixing score between Undifferentiated.1 and Undifferentiated.2 is
+`r round(und_unc, 2)`.
+`r if (is.na(und_unc)) "" else if (und_unc >= 0.8) "Replicate libraries of the same stage are essentially interleaved without any correction, so library preparation and replicate variation alone do not drive clustering." else if (und_unc >= 0.5) "Replicate libraries of the same stage are partly interleaved without correction, so some clustering structure does track library of origin even between replicates." else "Replicate libraries of the same stage separate substantially without correction. Library variation alone is strong enough to structure the data, which limits what any of the other comparisons can show."`
+
+**The informative result.** Among somatic cell types, the median mixing score
+across all four libraries is `r round(som_unc, 2)` uncorrected, against
+`r round(som_cor, 2)` in the corrected embedding, that is
+`r if (is.na(som_ratio)) NA else round(100 * som_ratio, 0)`% of the mixing
+achieved after correction.
+`r if (is.na(som_unc)) "" else if (som_unc >= 0.8) "Somatic cell types from July and November group together without correction. The July to November difference is therefore smaller than the differences between cell types, shown with no correction applied." else if (som_unc >= 0.5) "Somatic cell types from July and November partly group together without correction, so the batch effect is present but does not dominate cell type identity." else "Somatic cell types from July and November largely separate without correction. The batch effect is substantial, and co-clustering in the corrected data is largely produced by fastMNN rather than by underlying similarity."`
+
+**Germ cell populations**, for reference, have a median uncorrected mixing score
+of `r round(germ_unc, 2)` across all four libraries. This number is not
+interpretable as a batch effect, because most germ cell states are confined to
+one stage and therefore to one or two libraries; a low score is expected whatever
+the batch effect is.
+
+**Larvae versus transformers** is reported in the tables above but is not
+interpreted here. Stage and collection date vary together, so separation could be
+either and this analysis cannot distinguish them.
+
+## For the reviewer response
+
+```{r, results="asis"}
+cat(paste0(
+  "To assess whether the integration is manufacturing agreement between ",
+  "libraries, we repeated the clustering without batch correction, applying ",
+  "only `multiBatchNorm` depth rescaling followed by shared highly variable ",
+  "gene selection and PCA. We then measured, for each cell, the fraction of ",
+  "its nearest neighbors of the same cell type drawn from a different library, ",
+  "relative to the fraction expected under complete interleaving. Among ",
+  "somatic cell types, which are present at both stages, the median mixing ",
+  "score without correction was ", round(som_unc, 2), ", compared with ",
+  round(som_cor, 2), " after correction. Replicate larval libraries collected ",
+  "on the same date reached ", round(und_unc, 2),
+  " without correction, establishing the level attributable to library ",
+  "preparation and replicate animal variation alone. ",
+  if (!is.na(som_unc) && som_unc >= 0.8) {
+    paste0("Cells of the same somatic type from the July and the November ",
+           "collections therefore group together in the absence of any ",
+           "correction, indicating that the collection date difference is ",
+           "smaller than the differences between cell types.")
+  } else {
+    paste0("We note that somatic cell types do not fully interleave without ",
+           "correction, and we have moderated our conclusions accordingly.")
+  }))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
