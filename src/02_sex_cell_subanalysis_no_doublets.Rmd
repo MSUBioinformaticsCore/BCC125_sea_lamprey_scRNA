@@ -419,21 +419,20 @@ pheatmap(dist_matrix,
 
 | sex subclusters | all cell clusters | Broad Annotation |
 | --- | --- | --- |
-| 1 | Oogonia/Oocytes | FGC (migrating) |
-| 2 | Migrating PGCs | PGC |
-| 3 | Migrating PGCs | Oogonia (stem cells) |
-| 4 | Oogonia/Oocytes | Oocytes |
-| 5 | Migrating PGCs | Cyst epithelial cell |
-| 6 | Oogonia/Oocytes | Oogonia |
-| 7 | Spermatocytes (cytokinetic) | SPC (cytokinetic) |
-| 8 | Male germ cells (migrating) | MGC/SPC group2 |
-| 9 | Spermatocytes (apoptotic) | MGC/SPC group1 |
-| 10 | Male germ cells (migrating) / Spermatocytes (GPCR-activated) | MGC/SPC group3 |
-| 11 | Male germ cells (migrating) / Spermatocytes (apoptotic) | MGC/SPC group2 |
-| 12 | Male germ cells (migrating) / Spermatocytes (apoptotic) | MGC/SPC group1 |
-| 13 | Spermatocytes (GPCR-activated) | MGC/SPC group3 |
-| 14 | Spermatocytes (cytokinetic) / Male germ cells (migrating) / Spermatocytes (apoptotic) | MGC/SPC group2 |
-| 15 | Male germ cells (migrating) / Spermatocytes (apoptotic) / Spermatocytes (GPCR-activated) | MGC/SPC group3 |
+| 1 | Oogonia/Oocytes | ? |
+| 2 | Male germ cells (migrating) / Spermatocytes (GPCR-activated) | noise |
+| 3 | Spermatocytes (cytokinetic) | ? |
+| 4 | Male germ cells (migrating) | MGC |
+| 5 | Male germ cells (migrating) | MGC |
+| 6 | Spermatocytes (apoptotic) | MGC-SPC |
+| 7 | Spermatocytes (GPCR-activated) | SPC-GPCR |
+| 8 | Male germ cells (migrating) | MGC |
+| 9 | Male germ cells (migrating) | MGC-SPC |
+| 10 | Spermatocytes (GPCR-activated) | SPC-GPCR |
+| 11 | Male germ cells (migrating) / Spermatocytes (apoptotic) | MGC-SPC |
+| 12 | Spermatocytes (GPCR-activated) | SPC-GPCR |
+| 13 | Male germ cells (migrating) / Spermatocytes (GPCR-activated) | ? |
+| 14 | Oogonia/Oocytes | noise |
 
 ## Cells per broad annotation by sample
 
@@ -451,11 +450,11 @@ meta_df = as.data.frame(colData(merged.sex.sce))
 
 sample_tally =
   meta_df %>%
-  mutate(broad = as.factor(broad), batch = as.factor(batch)) %>%
-  group_by(broad, batch, .drop = FALSE) %>%
+  mutate(label = as.factor(label), batch = as.factor(batch)) %>%
+  group_by(label, batch, .drop = FALSE) %>%
   tally()
 
-ggplot(sample_tally, aes(fill = batch, y = broad, x = n)) +
+ggplot(sample_tally, aes(fill = batch, y = label, x = n)) +
   geom_bar(position = "fill", stat = "identity") +
   xlab("Proportion of cells")
 ```
@@ -482,7 +481,7 @@ Top ~100 cluster enriched genes per broad annotation (all in `no.support_sex_sca
 
 ```{r, eval=FALSE}
 scatter_markers = findMarkers(combined.sex.sce,
-                               merged.sex.sce$broad,
+                               merged.sex.sce$label,
                                test.type = "t",
                                block     = combined.sex.sce$sample,
                                direction = "up",
@@ -589,7 +588,7 @@ names(list_of_dfs)  = gsub("\\(", "", names(list_of_dfs))
 file_names = gsub(" ", "_", names(list_of_dfs))
 file_names = paste0(file_names, "_germ_cell_clusters")
 
-ct = colData(merged.sex.sce)$broad
+ct = colData(merged.sex.sce)$label
 combined.sex.sce$CellType = ct
 combined.sex.sce$CellType = factor(combined.sex.sce$CellType, levels = unique(ct))
 combined.sex.sce$cluster  = ct
