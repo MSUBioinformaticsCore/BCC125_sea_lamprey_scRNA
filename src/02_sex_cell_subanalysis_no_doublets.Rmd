@@ -77,6 +77,7 @@ Robject_dir    = results_dir
 all.sex.sce    = readRDS(paste0(Robject_dir, "/no.support.sex.sce.Rds"))
 merged.sex.sce = readRDS(paste0(Robject_dir, "/no.support.merged.sex.sce.Rds"))
 scatter_markers = readRDS(paste0(Robject_dir, "/no.support_sex_scatter_markers.Rds"))
+merged.sce   = readRDS(paste0(results_dir, "/merged.sce.Rds"))
 ```
 
 ```{r}
@@ -264,6 +265,7 @@ yet been recomputed.
 
 ```{r, eval=FALSE}
 sample_dirs  = list.dirs(data_dir, full.names = TRUE, recursive = FALSE)
+sample_dirs = sample_dirs[grep("smith_annotation", sample_dirs, invert=TRUE)]
 sample_names = basename(sample_dirs)
 
 cds_list = list()
@@ -273,6 +275,7 @@ for (i in 1:length(sample_dirs)) {
 }
 names(cds_list) = sample_names
 
+merged.sce    = readRDS(paste0(results_dir, "/merged.sce.Rds"))
 meta_df       = as.data.frame(colData(merged.sce))
 meta_df$cells = rownames(meta_df)
 
@@ -286,7 +289,7 @@ for (cds in names(cds_list)) {
   # TODO: cluster numbers below are from the with-doublets analysis; confirm
   # against the doublet-filtered annotation before relying on this filter.
   sex.cells = meta_df %>%
-    filter(label %in% c(16, 17, 18, 19, 5, 7), batch == cds) %>%
+    filter(label %in% c(17, 18, 19, 20, 8), batch == cds) %>%
     pull(cells)
 
   all.sex.sce[[cds]] = all.sce[, sex.cells]
@@ -321,11 +324,9 @@ g <- buildSNNGraph(merged.sex.sce, use.dimred = "corrected", k = 8)
 set.seed(1)
 colLabels(merged.sex.sce) <- factor(igraph::cluster_louvain(g)$membership)
 
-# TODO: cluster numbers below are from the with-doublets analysis; confirm
-# against the doublet-filtered annotation before relying on this filter.
 all.scatter.clust =
   meta_df %>%
-  filter(label %in% c(16, 17, 18, 19, 5, 7)) %>%
+  filter(label %in% c(17, 18, 19, 20, 8)) %>%
   select(cells, label) %>%
   tibble::deframe()
 
