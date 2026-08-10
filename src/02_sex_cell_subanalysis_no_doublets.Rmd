@@ -341,10 +341,32 @@ saveRDS(merged.sex.sce, file = paste0(results_dir, "/no.support.merged.sex.sce.R
 ## Plot new clusters in TSNE space
 
 ```{r, fig.width=10, fig.height=4}
-tsne_new = plotTSNE(merged.sex.sce, colour_by = "label",
-                    text_by = "label", text_colour = "black", point_size = .05)
-tsne_old = plotTSNE(merged.sex.sce, colour_by = "all.scatter.clust",
-                    text_by = "all.scatter.clust", text_colour = "black", point_size = .05)
+# Both colour variables are factors inherited from the parent object, so they
+# carry levels that are not present here (all.scatter.clust keeps all 19
+# all-cells levels though only 6 appear) and their levels sort as text, giving
+# a legend ordered 1, 10, 11, ... 2, 3. Rebuild both with only the levels
+# present, ordered numerically.
+numeric_factor = function(x) {
+  x = as.character(x)
+  factor(x, levels = as.character(sort(unique(as.numeric(x)))))
+}
+
+colData(merged.sex.sce)$sex_cluster = numeric_factor(colData(merged.sex.sce)$label)
+colData(merged.sex.sce)$all_cluster = numeric_factor(colData(merged.sex.sce)$all.scatter.clust)
+
+# point_size .05 leaves the legend keys too small to match against the plot
+key_size = guides(colour = guide_legend(override.aes = list(size = 4)))
+
+tsne_new = plotTSNE(merged.sex.sce, colour_by = "sex_cluster",
+                    text_by = "sex_cluster", text_colour = "black",
+                    point_size = .05) +
+  key_size + ggtitle("Sex cell subclusters")
+
+tsne_old = plotTSNE(merged.sex.sce, colour_by = "all_cluster",
+                    text_by = "all_cluster", text_colour = "black",
+                    point_size = .05) +
+  key_size + ggtitle("Originating all-cells clusters")
+
 tsne_new + tsne_old
 ```
 

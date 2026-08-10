@@ -696,10 +696,28 @@ Three pairs are compared:
     collection date, no sex difference. Whatever disagreement appears here is
     produced by replicate animals and library preparation alone, so it is the
     reference floor. Everything else is reported relative to it.
-  * **Female versus Male transformer.** Same stage and collection date,
-    different sex.
+  * **Female versus Male transformer.** Same stage, same collection date,
+    different sex. This is a **second replicate floor**, measured in the
+    November batch. Any cluster reaching this comparison has cells in both
+    transformer libraries, which excludes the sex-specific somatic populations,
+    so what remains is the sex-neutral somatic compartment where female and male
+    cells should not differ biologically. Disagreement here is therefore also
+    animal and library variation, with the caveat below.
   * **Larvae pooled versus transformers pooled.** The stage contrast, which is
     also the collection date contrast.
+
+Having a floor in each batch is useful in itself. The first is estimated in July
+and the second in November, so comparing them asks whether replicate variation
+is stable across the two collections, or whether one batch is intrinsically
+noisier. The stage contrast spans both, so a floor from only one of them would
+be the weaker reference.
+
+The caveat on the second floor: Undifferentiated.1 and Undifferentiated.2 differ
+only by animal, while Female and Male differ by animal and by sex. Any residual
+sex effect in shared somatic cell types is therefore included, making it an
+upper bound on replicate variation rather than a clean floor. If the two floors
+come out close, both that sex effect and any difference in batch noise are
+small.
 
 Cell numbers are matched across every group and every comparison, since
 disagreement between marker lists otherwise tracks statistical power rather than
@@ -1085,9 +1103,11 @@ disc_sentence = function(x, what) {
     round(fl$rankcor_median, 2), "."))
   if (nrow(x$fm) > 0) {
     parts = c(parts, paste0(
-      "Female versus Male, reported for completeness only: median overlap ",
-      round(x$fm$overlap_median, 1), "%, rank correlation ",
-      round(x$fm$rankcor_median, 2), "."))
+      "Second replicate floor (Female versus Male, November batch): median ",
+      "overlap ", round(x$fm$overlap_median, 1), "%, rank correlation ",
+      round(x$fm$rankcor_median, 2), ", which is ",
+      round(x$fm$overlap_ratio_to_floor, 2),
+      " times the July floor."))
   }
   if (nrow(x$lt) > 0) {
     parts = c(parts, paste0(
@@ -1206,10 +1226,36 @@ datatable(stage_dominated %>% mutate(across(where(is.numeric), ~round(., 1))),
 
 `r if (nrow(stage_dominated) == 0) "No cluster is dominated by a single stage, so there is no population that the correction failed to merge, and the discordance analysis is not missing a set of high batch effect clusters." else paste0(nrow(stage_dominated), " cluster(s) are dominated by a single stage, of which ", sum(stage_dominated$population_type == "germ"), " are germ cell populations and ", sum(stage_dominated$population_type == "somatic"), " are somatic. Stage-restricted germ cell populations are expected on biological grounds, since oocytes and spermatocytes have no larval counterpart. A stage-dominated **somatic** cluster is the informative case: somatic cell types should be present at both stages, so if one is split by stage that is a candidate for a merge the correction did not achieve. Inspect the somatic rows above; if there are none, the discordance estimate is not missing a set of high batch effect clusters.")`
 
-The Female versus Male comparison is computed and included in the tables and
-figure for completeness, but nothing is concluded from it. The clusters testable
-here are largely somatic and need not differ between sexes, so it serves neither
-as a positive control nor as a result.
+#### Do the two floors agree?
+
+The paired test already compares Female versus Male against the July floor, so
+that row answers this directly. If the two floors are close, replicate variation
+is stable across the two collections and there is no residual somatic sex effect
+large enough to detect. If the November floor is markedly worse, either that
+batch is noisier or shared somatic types do differ by sex, and this comparison
+cannot separate those two.
+
+```{r}
+fm_paired = paired_test %>%
+  filter(metric == "overlap_median", comparison == "Female_vs_Male")
+
+fm_sentence = function(clust) {
+  p = fm_paired %>% filter(clustering == clust)
+  if (nrow(p) == 0) return("Not computable for this clustering.")
+  paste0("Across ", p$n_clusters, " cluster(s): July floor ",
+         round(p$median_floor, 1), "%, November floor ",
+         round(p$median_comparison, 1), "%, ratio ",
+         round(p$median_ratio, 2), ". ",
+         if (isTRUE(p$exceeds_floor))
+           "The November floor is the worse of the two, so either that batch is noisier or shared somatic types carry a residual sex effect. Treat the July floor as the optimistic reference and this one as the conservative reference."
+         else
+           "The two floors are comparable, so replicate variation is stable across collections and no residual somatic sex effect is detectable at this resolution.")
+}
+```
+
+**Germ cell subclusters.** `r fm_sentence("germ_subcluster")`
+
+**All-cells clusters.** `r fm_sentence("all_cells_cluster")`
 
 `r if (!lt_available) "**The larvae versus transformers comparison could not be computed.** No clustering had two or more clusters with enough cells in all four libraries, so there is no paired test to report and nothing follows in either direction." else if (lt_within) paste0("**The larvae versus transformers comparison does not exceed the replicate floor**, in the ", lt_source, ". ", paired_sentence(lt_primary), " In the clusters that can be tested, the stage and collection date contrast produces no more marker disagreement than two larval replicate libraries do. Since these markers are computed on uncorrected expression, that is direct evidence the batch effect is small in these populations, subject to the two limits above.") else paste0("**The larvae versus transformers comparison exceeds the replicate floor**, in the ", lt_source, ". ", paired_sentence(lt_primary), " The stage and collection date contrast agrees less well than two larval replicate libraries do. This comparison cannot say how much of that shortfall is real stage biology and how much is batch, since both push in the same direction.")`
 
