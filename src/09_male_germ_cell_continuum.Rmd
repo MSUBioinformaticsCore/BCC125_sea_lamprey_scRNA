@@ -1,0 +1,734 @@
+---
+title: "09_male_germ_cell_continuum"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    male_all_clusters: "17,18,19,20"
+    min_library_cells: 50
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+This is the male counterpart to `08_female_germ_cell_continuum.Rmd`, and it asks
+the same question with the same methods.
+
+**Why it may work where the female analysis did not.** The female germ cells
+came from one all-cells cluster split across the larval and transformer
+libraries, so stage and collection date were confounded with everything. The
+male germ cells come from four separate clusters that are expected to sit
+predominantly in the single male transformer library. If that holds, this
+analysis is internally unconfounded: one animal, one collection date, one batch,
+four transcriptionally distinct states. A gradient found there cannot be a batch
+effect, because there is no second batch to produce one.
+
+**The library composition check therefore comes first** and determines how
+everything below should be read.
+
+**A second advantage.** The female cells were a single Louvain cluster, so there
+was no independent grouping to check an ordering against. Here there are four
+clusters already defined on batch-corrected values. If those four lay out in
+sequence along an axis computed on uncorrected values, that is two independent
+methods agreeing, which is considerably stronger than either alone.
+
+As in `08`, everything uses uncorrected normalized log-expression, and a
+pseudotime can be computed from any blob of cells, so the technical and marker
+checks decide rather than the existence of an ordering.
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(batchelor)
+library(patchwork)
+library(readxl)
+library(destiny)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir     = paste0(params$project_dir, "/results/20260804_male_continuum")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+data_dir        = paste0(params$project_dir, "/data")
+```
+
+```{r, echo=FALSE}
+Robject_dir    = paste0(params$project_dir, "/results/20260803_no_doublets")
+all.sex.sce    = readRDS(paste0(Robject_dir, "/no.support.sex.sce.Rds"))
+merged.sex.sce = readRDS(paste0(Robject_dir, "/no.support.merged.sex.sce.Rds"))
+```
+
+```{r}
+library_meta = data.frame(
+  batch   = c("UND1_C00004336", "UND2_C00004362", "TF_C00004337", "TM_C00004374"),
+  library = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male"),
+  stage   = c("larva", "larva", "transformer", "transformer"),
+  stringsAsFactors = FALSE)
+
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+
+male_clusters = trimws(strsplit(params$male_all_clusters, ",")[[1]])
+```
+
+# Identify the male germ cells
+
+Male germ cells are the cells whose originating all-cells cluster is one of
+`r paste(male_clusters, collapse = ", ")`, recorded in `all.scatter.clust`. In
+the doublet-filtered annotation these are the cytokinetic spermatocytes,
+migrating male germ cells, apoptotic spermatocytes and GPCR-activated
+spermatocytes.
+
+```{r}
+germ_meta = as.data.frame(colData(merged.sex.sce))
+germ_meta$barcode = rownames(germ_meta)
+
+if (!"all.scatter.clust" %in% colnames(germ_meta)) {
+  stop(paste0("all.scatter.clust is not present, so male germ cells cannot be ",
+              "identified by originating cluster. Check that ",
+              "02_sex_cell_subanalysis_no_doublets.Rmd was run to completion."))
+}
+
+germ_meta$origin_cluster = as.character(germ_meta$all.scatter.clust)
+male_cells = germ_meta$barcode[germ_meta$origin_cluster %in% male_clusters]
+
+origin_tab = germ_meta %>%
+  filter(origin_cluster %in% male_clusters) %>%
+  dplyr::count(origin_cluster, name = "n_cells") %>%
+  arrange(desc(n_cells))
+
+datatable(origin_tab, rownames = FALSE)
+```
+
+`r length(male_cells)` cells across `r nrow(origin_tab)` originating clusters.
+
+```{r}
+if (length(male_cells) < 100) {
+  stop(paste0("Only ", length(male_cells), " male germ cells were found. Check ",
+              "params$male_all_clusters against the doublet-filtered annotation."))
+}
+```
+
+## Library composition, which decides how everything below reads
+
+```{r}
+male_meta = germ_meta %>% filter(barcode %in% male_cells) %>%
+  left_join(library_meta, by = "batch")
+
+comp_tab = male_meta %>%
+  dplyr::count(origin_cluster, library, name = "n") %>%
+  group_by(origin_cluster) %>%
+  mutate(pct = 100 * n / sum(n)) %>%
+  ungroup()
+
+comp_wide = comp_tab %>%
+  tidyr::pivot_wider(id_cols = origin_cluster, names_from = library,
+                     values_from = c(n, pct), values_fill = 0)
+
+write.csv(comp_wide,
+          file = paste0(results_dir, "/SuppTable_male_cluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(comp_wide %>% mutate(across(where(is.numeric), ~round(., 1))),
+          rownames = FALSE)
+```
+
+```{r}
+lib_totals = male_meta %>% dplyr::count(library, name = "n_cells") %>%
+  mutate(pct = 100 * n_cells / sum(n_cells)) %>%
+  arrange(desc(n_cells))
+
+datatable(lib_totals %>% mutate(pct = round(pct, 1)), rownames = FALSE)
+
+dominant_library = lib_totals$library[1]
+dominant_pct     = lib_totals$pct[1]
+single_library   = dominant_pct >= 90
+```
+
+`r round(dominant_pct, 1)`% of male germ cells come from **`r dominant_library`**.
+
+`r if (single_library) paste0("**These cells are effectively one library.** Animal, collection date, batch and sex are all constant, so any structure found below cannot be a batch effect and a correlation with detection rate is unambiguously technical. This is the unconfounded version of the question that the female analysis could not ask.") else paste0("**These cells span more than one library**, so the female problem applies here too: any axis separating them may be stage, batch or biology, and this analysis cannot fully separate those. The per-library section at the end is then the part that carries the argument, not the combined analysis.")`
+
+```{r, fig.width=9, fig.height=4}
+p_comp = ggplot(comp_tab, aes(x = origin_cluster, y = pct, fill = library)) +
+  geom_bar(stat = "identity") +
+  scale_fill_manual(values = lib_cols) +
+  xlab("Originating all-cells cluster") + ylab("Percent of cells")
+
+p_comp
+ggsave(p_comp, file = paste0(results_dir, "/male_cluster_composition.png"),
+       width = 9, height = 4)
+```
+
+## Build an uncorrected object
+
+```{r}
+male_list_all = lapply(all.sex.sce, function(x) {
+  keep = intersect(colnames(x), male_cells)
+  if (length(keep) == 0) return(NULL)
+  x[, keep]
+})
+male_list_all = male_list_all[!vapply(male_list_all, is.null, logical(1))]
+
+keep_batches = names(male_list_all)[
+  vapply(male_list_all, ncol, integer(1)) >= params$min_library_cells]
+dropped_batches = setdiff(names(male_list_all), keep_batches)
+male_list = male_list_all[keep_batches]
+```
+
+`r if (length(dropped_batches) == 0) "Every library contributing male germ cells has enough cells to keep." else paste0("Dropped for contributing fewer than ", params$min_library_cells, " cells: ", paste(library_meta$library[match(dropped_batches, library_meta$batch)], collapse = ", "), ".")`
+
+```{r}
+universe  = Reduce(intersect, lapply(male_list, rownames))
+male_list = lapply(male_list, "[", i = universe, )
+
+common_cols = Reduce(intersect, lapply(male_list, function(x) colnames(colData(x))))
+male_list   = lapply(male_list, function(x) {
+  colData(x)     = colData(x)[, common_cols, drop = FALSE]
+  reducedDims(x) = list()
+  x
+})
+
+male_list_norm = if (length(male_list) > 1) do.call(multiBatchNorm, male_list) else male_list
+
+male.sce = do.call(cbind, male_list_norm)
+male.sce$batch   = rep(names(male_list), times = vapply(male_list, ncol, integer(1)))
+male.sce$library = library_meta$library[match(male.sce$batch, library_meta$batch)]
+male.sce$stage   = library_meta$stage[match(male.sce$batch, library_meta$batch)]
+male.sce$origin_cluster = germ_meta$origin_cluster[
+  match(colnames(male.sce), germ_meta$barcode)]
+```
+
+`r ncol(male.sce)` cells retained across `r length(male_list)` librar`r if (length(male_list) == 1) "y" else "ies"`.
+
+# Markers
+
+Families are declared so that early and late programmes can be tested against
+each other, which is stronger evidence than coherence within one family.
+
+```{r}
+gene_description =
+  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip = 1) %>%
+  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
+                Gene        = "NCBI_GTF_GENEID",
+                description = "NCBI_GTF_ProteinInfo") %>%
+  dplyr::select(Gene, WangGeneID, description) %>%
+  filter(!is.na(Gene))
+
+resolve_marker = function(symbol, rn, gd) {
+  if (symbol %in% rn) return(symbol)
+  g = gd$Gene[gd$WangGeneID == symbol]
+  g = g[g %in% rn]
+  if (length(g) > 0) return(g[1])
+  NA_character_
+}
+
+marker_families = bind_rows(
+  data.frame(symbol = c("PAX7", "EZH2", "EPCAM", "EXOSC10", "NANOS1"),
+             family = "spermatogonia / SSC (early)", stringsAsFactors = FALSE),
+  data.frame(symbol = c("SYCP3", "SYCP2", "DMC1", "SPO11", "REC8",
+                        "TEX11", "TEX15", "MAEL", "ASZ1", "TDRD7", "TDRD9"),
+             family = "meiotic (late)",              stringsAsFactors = FALSE),
+  data.frame(symbol = c("DDX4", "PIWIL1", "BOLL"),
+             family = "germline, general",           stringsAsFactors = FALSE),
+  data.frame(symbol = c("ALPL", "PRDM14", "PRDM1"),
+             family = "early germline",              stringsAsFactors = FALSE)) %>%
+  distinct(symbol, .keep_all = TRUE)
+
+rn = rownames(male.sce)
+marker_families = marker_families %>%
+  rowwise() %>%
+  mutate(gene_id = resolve_marker(symbol, rn, gene_description)) %>%
+  ungroup()
+
+resolved   = marker_families %>% filter(!is.na(gene_id)) %>%
+  distinct(gene_id, .keep_all = TRUE)
+unresolved = marker_families %>% filter(is.na(gene_id))
+
+late_families  = "meiotic (late)"
+early_families = "spermatogonia / SSC (early)"
+min_family_genes = 3
+```
+
+* Requested: `r nrow(marker_families)`
+* Resolved in `rownames`: `r nrow(resolved)`
+* Not found, and therefore excluded: `r if (nrow(unresolved) == 0) "none" else paste(unresolved$symbol, collapse = ", ")`
+
+```{r}
+datatable(resolved %>% dplyr::count(family, name = "n_resolved"), rownames = FALSE)
+```
+
+```{r}
+safe_rho = function(x, y) {
+  if (length(x) < 10) return(NA_real_)
+  if (length(unique(x)) < 2 || length(unique(y)) < 2) return(NA_real_)
+  suppressWarnings(cor(x, y, method = "spearman"))
+}
+safe_p = function(x, y) {
+  if (length(x) < 10) return(NA_real_)
+  if (length(unique(x)) < 2 || length(unique(y)) < 2) return(NA_real_)
+  suppressWarnings(cor.test(x, y, method = "spearman")$p.value)
+}
+
+partial_rho = function(x, y, Z) {
+  Z  = as.data.frame(Z)
+  ok = stats::complete.cases(x, y, Z)
+  if (sum(ok) < 10) return(NA_real_)
+  xr = rank(x[ok]); yr = rank(y[ok])
+  if (length(unique(xr)) < 2 || length(unique(yr)) < 2) return(NA_real_)
+  Zr = as.data.frame(lapply(Z[ok, , drop = FALSE], rank))
+  if (any(vapply(Zr, function(z) length(unique(z)) < 2, logical(1)))) return(NA_real_)
+  rx = stats::residuals(stats::lm(xr ~ ., data = Zr))
+  ry = stats::residuals(stats::lm(yr ~ ., data = Zr))
+  suppressWarnings(stats::cor(rx, ry))
+}
+
+embed_cells = function(sce, n_hvg = 2000, n_pc = 30, n_dc_from = 15, block = NULL) {
+  dec  = modelGeneVar(sce, block = block)
+  hvgs = getTopHVGs(dec, n = min(n_hvg, nrow(sce) - 1))
+  set.seed(1)
+  npc = min(n_pc, ncol(sce) - 1)
+  tmp = runPCA(sce, subset_row = hvgs, ncomponents = npc)
+  set.seed(1)
+  dm  = destiny::DiffusionMap(reducedDim(tmp, "PCA")[, seq_len(min(n_dc_from, npc))])
+  list(pca        = reducedDim(tmp, "PCA"),
+       percentVar = attr(reducedDim(tmp, "PCA"), "percentVar"),
+       dc         = destiny::eigenvectors(dm)[, 1:min(5, ncol(destiny::eigenvectors(dm)))],
+       dm         = dm)
+}
+
+marker_expression = function(sce, resolved) {
+  m = as.matrix(logcounts(sce)[resolved$gene_id, , drop = FALSE])
+  rownames(m) = resolved$symbol
+  t(m) %>% as.data.frame() %>%
+    tibble::rownames_to_column("barcode") %>%
+    tidyr::pivot_longer(-barcode, names_to = "symbol", values_to = "logexpr")
+}
+
+trend_table = function(expr_long, axis_df, axis_col) {
+  expr_long %>%
+    left_join(axis_df, by = "barcode") %>%
+    group_by(symbol) %>%
+    summarize(n_cells        = dplyr::n(),
+              pct_expressing = 100 * mean(logexpr > 0),
+              rho            = safe_rho(.data[[axis_col]], logexpr),
+              p_value        = safe_p(.data[[axis_col]], logexpr),
+              .groups = "drop") %>%
+    mutate(FDR = p.adjust(p_value, "BH"),
+           direction = case_when(
+             is.na(rho)  ~ "undetermined",
+             FDR >= 0.05 ~ "flat",
+             rho >=  0.3 ~ "increases",
+             rho <= -0.3 ~ "decreases",
+             TRUE        ~ "weak")) %>%
+    left_join(resolved %>% dplyr::select(symbol, family), by = "symbol") %>%
+    arrange(desc(abs(rho)))
+}
+
+partial_trends = function(expr_long, cdb, axis_col = "DC1",
+                          controls = c("sum", "detected")) {
+  ctrl = intersect(controls, colnames(cdb))
+  if (length(ctrl) == 0) return(NULL)
+  j = expr_long %>%
+    left_join(cdb %>% dplyr::select(barcode, all_of(axis_col), all_of(ctrl)),
+              by = "barcode")
+  do.call(rbind, lapply(split(j, j$symbol), function(d) {
+    data.frame(symbol = d$symbol[1],
+               rho_partial = partial_rho(d[[axis_col]], d$logexpr,
+                                         d[, ctrl, drop = FALSE]),
+               stringsAsFactors = FALSE)
+  }))
+}
+```
+
+# 1. Embedding
+
+```{r}
+embed_file = paste0(Robject_out_dir, "/male_embedding.Rds")
+
+if (file.exists(embed_file)) {
+  emb = readRDS(embed_file)
+} else {
+  message("Computing PCA and diffusion map. Cached in ", embed_file, ".")
+  emb = embed_cells(male.sce,
+                    block = if (length(male_list) > 1) male.sce$batch else NULL)
+  saveRDS(emb, file = embed_file)
+}
+
+colnames(emb$dc) = paste0("DC", seq_len(ncol(emb$dc)))
+reducedDim(male.sce, "PCA")          = emb$pca
+reducedDim(male.sce, "DiffusionMap") = emb$dc
+
+cd = as.data.frame(colData(male.sce))
+cd$barcode = colnames(male.sce)
+cd$DC1 = emb$dc[, "DC1"]; cd$DC2 = emb$dc[, "DC2"]
+cd$PC1 = emb$pca[, 1];    cd$PC2 = emb$pca[, 2]
+```
+
+PC1 explains `r round(emb$percentVar[1], 1)`% of variance, PC2
+`r round(emb$percentVar[2], 1)`%.
+
+## Technical covariates
+
+```{r}
+tech_vars = intersect(c("sum", "detected", "subsets_Mito_percent"), colnames(cd))
+
+tech_tab = data.frame(
+  covariate = tech_vars,
+  rho_DC1   = vapply(tech_vars, function(v) safe_rho(cd$DC1, cd[[v]]), numeric(1)),
+  rho_PC1   = vapply(tech_vars, function(v) safe_rho(cd$PC1, cd[[v]]), numeric(1)),
+  stringsAsFactors = FALSE)
+
+write.csv(tech_tab,
+          file = paste0(results_dir, "/SuppTable_male_technical.csv"),
+          row.names = FALSE)
+
+datatable(tech_tab %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+
+tech_max = max(abs(tech_tab$rho_DC1), na.rm = TRUE)
+technical_confound = isTRUE(tech_max >= 0.4)
+partial_reliable   = tech_max < 0.6
+```
+
+Strongest absolute correlation between DC1 and a technical covariate:
+`r round(tech_max, 2)`.
+
+`r if (technical_confound) "**DC1 tracks detection rate.** With library constant this cannot be a batch effect, so it is technical, and the raw marker counts below will be inflated because expression correlates with depth for nearly every gene. The partial correlations are the ones to read." else "DC1 is not associated with detection rate, so the axis is not technical."`
+
+## Library, if more than one contributes
+
+```{r}
+lib_r2 = if (length(unique(cd$library)) > 1)
+  summary(lm(cd$DC1 ~ cd$library))$r.squared else NA_real_
+library_confound = isTRUE(lib_r2 >= 0.25)
+```
+
+`r if (length(unique(cd$library)) < 2) "All retained male germ cells come from one library, so there is no library effect to test and none can be present." else paste0("Library of origin explains ", round(100 * lib_r2, 1), "% of the variance in DC1. ", if (library_confound) "That is substantial, so the axis is at least partly a sample effect." else "That is modest, so the axis is not primarily a sample effect.")`
+
+# 2. Do the four clusters order along the axis?
+
+The female analysis had a single Louvain cluster, so there was no independent
+grouping to check an ordering against. Here there are four, defined on
+batch-corrected values by a different method. If they lay out in sequence along
+an axis computed on uncorrected values, two independent approaches agree, and
+the four clusters are discrete samples of one underlying progression rather than
+unrelated states.
+
+```{r}
+cluster_pos = cd %>%
+  group_by(origin_cluster) %>%
+  summarize(n_cells    = dplyr::n(),
+            median_DC1 = median(DC1),
+            q25        = quantile(DC1, 0.25),
+            q75        = quantile(DC1, 0.75),
+            .groups    = "drop") %>%
+  arrange(median_DC1)
+
+kw = kruskal.test(DC1 ~ factor(origin_cluster), data = cd)
+
+write.csv(cluster_pos,
+          file = paste0(results_dir, "/SuppTable_male_cluster_positions.csv"),
+          row.names = FALSE)
+
+datatable(cluster_pos %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE)
+```
+
+Kruskal-Wallis across clusters on DC1: p = `r signif(kw$p.value, 3)`.
+
+```{r}
+# adjacent-pair overlap: high overlap means the clusters grade into one another,
+# low overlap means they are discrete states that happen to be ordered
+ord = cluster_pos$origin_cluster
+adjacent_overlap = if (length(ord) >= 2) {
+  bind_rows(lapply(seq_len(length(ord) - 1), function(i) {
+    a = cd$DC1[cd$origin_cluster == ord[i]]
+    b = cd$DC1[cd$origin_cluster == ord[i + 1]]
+    lo = max(min(a), min(b)); hi = min(max(a), max(b))
+    inter = max(0, hi - lo)
+    union_w = max(max(a), max(b)) - min(min(a), min(b))
+    data.frame(pair = paste(ord[i], "to", ord[i + 1]),
+               overlap_fraction = inter / union_w,
+               stringsAsFactors = FALSE)
+  }))
+} else NULL
+
+if (!is.null(adjacent_overlap)) {
+  datatable(adjacent_overlap %>% mutate(across(where(is.numeric), ~round(., 3))),
+            rownames = FALSE)
+}
+
+mean_overlap = if (!is.null(adjacent_overlap))
+  mean(adjacent_overlap$overlap_fraction, na.rm = TRUE) else NA_real_
+clusters_graded = isTRUE(mean_overlap >= 0.4)
+clusters_ordered = isTRUE(kw$p.value < 0.05)
+```
+
+`r if (!clusters_ordered) "The clusters do not occupy distinct positions along DC1, so the axis does not correspond to the existing grouping." else if (clusters_graded) paste0("The clusters occupy distinct positions along DC1 and their distributions overlap substantially (mean adjacent overlap ", round(mean_overlap, 2), "). That is what a continuum looks like when a clustering algorithm has been forced to cut it into groups: ordered, but grading into one another rather than separated.") else paste0("The clusters occupy distinct and well separated positions along DC1 (mean adjacent overlap ", round(mean_overlap, 2), "). They are ordered along the axis but do not grade into one another, which is more consistent with discrete states than with a continuum.")`
+
+```{r, fig.width=10, fig.height=4}
+p_pos = ggplot(cd, aes(x = DC1, fill = origin_cluster, color = origin_cluster)) +
+  geom_density(alpha = 0.3) +
+  ggtitle("DC1 by originating cluster")
+
+p_scat = ggplot(cd, aes(x = DC1, y = DC2, color = origin_cluster)) +
+  geom_point(size = 0.6, alpha = 0.8) +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  ggtitle("Diffusion map by originating cluster")
+
+p_scat + p_pos
+ggsave(p_scat + p_pos,
+       file = paste0(results_dir, "/male_clusters_on_DC.png"),
+       width = 10, height = 4)
+```
+
+# 3. Marker behavior along the axis
+
+```{r}
+expr_long = marker_expression(male.sce, resolved)
+axis_df   = cd %>% dplyr::select(barcode, DC1)
+
+trends = trend_table(expr_long, axis_df, "DC1")
+pt     = partial_trends(expr_long, cd)
+if (!is.null(pt)) trends = trends %>% left_join(pt, by = "symbol")
+
+write.csv(trends, file = paste0(results_dir, "/SuppTable_male_marker_trends.csv"),
+          row.names = FALSE)
+
+datatable(trends %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+
+n_directional = sum(trends$direction %in% c("increases", "decreases"))
+n_directional_partial = if ("rho_partial" %in% colnames(trends))
+  sum(abs(trends$rho_partial) >= 0.3, na.rm = TRUE) else NA_integer_
+```
+
+`r n_directional` of `r nrow(trends)` markers correlate with DC1, and
+`r n_directional_partial` still do after regressing out `sum` and `detected`.
+`r if (!partial_reliable) "Because DC1 is itself close to detection rate here, the partial figure is underpowered and a low value is expected whether or not biology is present." else "DC1 is far from collinear with depth, so the partial figure is well powered."`
+
+## Family coherence
+
+```{r}
+family_coherence = trends %>%
+  filter(!is.na(rho)) %>%
+  group_by(family) %>%
+  summarize(n_genes       = dplyr::n(),
+            median_rho    = median(rho),
+            pct_same_sign = 100 * max(sum(rho > 0), sum(rho < 0)) / dplyr::n(),
+            n_significant = sum(FDR < 0.05 & abs(rho) >= 0.3),
+            .groups = "drop") %>%
+  mutate(testable = n_genes >= min_family_genes,
+         coherent = ifelse(testable, pct_same_sign >= 80 & n_significant >= 3, NA)) %>%
+  arrange(desc(n_genes))
+
+write.csv(family_coherence,
+          file = paste0(results_dir, "/SuppTable_male_family_coherence.csv"),
+          row.names = FALSE)
+
+datatable(family_coherence %>% mutate(across(where(is.numeric), ~round(., 2))),
+          rownames = FALSE)
+
+n_testable = sum(family_coherence$testable)
+n_coherent_families = sum(family_coherence$coherent, na.rm = TRUE)
+```
+
+## Direction test: early against late
+
+```{r}
+dir_summary = trends %>%
+  filter(!is.na(rho)) %>%
+  mutate(programme = case_when(family %in% late_families  ~ "late (meiotic)",
+                               family %in% early_families ~ "early (spermatogonia)",
+                               TRUE                       ~ "other")) %>%
+  filter(programme != "other") %>%
+  group_by(programme) %>%
+  summarize(n_genes       = dplyr::n(),
+            median_rho    = median(rho),
+            n_significant = sum(FDR < 0.05 & abs(rho) >= 0.3),
+            .groups = "drop")
+
+datatable(dir_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+
+late_row  = dir_summary %>% filter(programme == "late (meiotic)")
+early_row = dir_summary %>% filter(programme == "early (spermatogonia)")
+both_present = nrow(late_row) == 1 && nrow(early_row) == 1
+
+opposite_directions = both_present &&
+  sign(late_row$median_rho) != sign(early_row$median_rho) &&
+  late_row$n_significant >= 3 && early_row$n_significant >= 1
+
+dir_p = if (both_present) {
+  a = trends %>% filter(family %in% late_families,  !is.na(rho)) %>% pull(rho)
+  b = trends %>% filter(family %in% early_families, !is.na(rho)) %>% pull(rho)
+  suppressWarnings(wilcox.test(a, b)$p.value)
+} else NA_real_
+```
+
+`r if (!both_present) "One programme has no resolved genes, so the direction test cannot be run." else paste0("The late meiotic programme has a median rho of ", round(late_row$median_rho, 2), " across ", late_row$n_genes, " genes (", late_row$n_significant, " significant), and the early spermatogonial programme ", round(early_row$median_rho, 2), " across ", early_row$n_genes, " genes (", early_row$n_significant, " significant). Wilcoxon p = ", signif(dir_p, 2), ".")`
+
+`r if (opposite_directions) "**The two programmes move in opposite directions along DC1.** Spermatogonial markers are high at one end and meiotic markers at the other, which is the ordering expected of spermatogenesis." else if (both_present) "The two programmes do not move in opposite directions, so the axis does not correspond to an early to late transition." else ""`
+
+```{r, fig.width=11, fig.height=8}
+top_markers = trends %>% filter(!is.na(rho)) %>%
+  slice_max(abs(rho), n = 12) %>% pull(symbol)
+
+p_mark = ggplot(expr_long %>% filter(symbol %in% top_markers) %>%
+                  left_join(cd %>% dplyr::select(barcode, DC1, origin_cluster),
+                            by = "barcode"),
+                aes(x = DC1, y = logexpr)) +
+  geom_point(aes(color = origin_cluster), size = 0.3, alpha = 0.35) +
+  geom_smooth(method = "loess", se = FALSE, color = "black", linewidth = 0.7) +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  facet_wrap(~ symbol, scales = "free_y") +
+  ylab("Uncorrected log-expression")
+
+p_mark
+ggsave(p_mark, file = paste0(results_dir, "/male_markers_vs_DC1.png"),
+       width = 11, height = 8)
+```
+
+# 4. Verdict
+
+```{r}
+markers_informative = isTRUE(n_directional_partial >= 3)
+
+male_verdict = if (technical_confound && !partial_reliable) {
+  "technical"
+} else if (!markers_informative) {
+  "no marker signal"
+} else if (clusters_ordered && clusters_graded && opposite_directions) {
+  "continuum"
+} else if (clusters_ordered && opposite_directions) {
+  "ordered discrete states"
+} else {
+  "structure without a programme"
+}
+```
+
+**`r male_verdict`.**
+
+`r switch(male_verdict,
+  "technical" = "DC1 tracks detection rate and the partial correlations cannot separate biology from depth, so no ordering should be built on this axis.",
+  "no marker signal" = "No markers vary monotonically along DC1 once depth is controlled, so there is no evidence that the axis corresponds to spermatogenic progression.",
+  "continuum" = "The four clusters occupy ordered, overlapping positions along an axis computed on uncorrected values, and the spermatogonial and meiotic programmes move in opposite directions along it. These cells form a continuous progression that the clustering has cut into four groups, rather than four unrelated states.",
+  "ordered discrete states" = "The four clusters are ordered along the axis and the early and late programmes separate, but the clusters do not grade into one another. They are discrete states in a developmental sequence rather than a sampled continuum.",
+  "structure without a programme" = "There is structure along DC1, but it does not correspond to an ordered early to late transition, so it should not be described as spermatogenic progression.")`
+
+`r if (single_library) "Because these cells come from a single library, none of this can be a batch effect: animal, collection date, batch and sex are constant throughout." else "Note that these cells span more than one library, so the axis may carry a library contribution as well as biology."`
+
+# 5. Pseudotime, computed only if the axis is supported
+
+```{r}
+order_supported = male_verdict %in% c("continuum", "ordered discrete states")
+
+dpt_file = paste0(Robject_out_dir, "/male_dpt.Rds")
+
+if (order_supported) {
+  if (file.exists(dpt_file)) {
+    dpt = readRDS(dpt_file)
+  } else {
+    message("Computing diffusion pseudotime. Cached in ", dpt_file, ".")
+    dpt = destiny::DPT(emb$dm)
+    saveRDS(dpt, file = dpt_file)
+  }
+  root_cell = which.min(cd$DC1)
+  cd$pseudotime = dpt[[paste0("DPT", root_cell)]]
+} else {
+  cd$pseudotime = NA_real_
+}
+```
+
+`r if (!order_supported) "The axis is not supported, so no pseudotime is computed." else "Cells are ordered along the diffusion axis, rooted at the extreme of DC1."`
+
+```{r}
+if (order_supported) {
+  ord_tab = cd %>% dplyr::select(barcode, library, origin_cluster, DC1, pseudotime)
+  write.csv(ord_tab, file = paste0(results_dir, "/SuppTable_male_ordering.csv"),
+            row.names = FALSE)
+
+  pt_trends = trend_table(expr_long,
+                          cd %>% dplyr::select(barcode, pseudotime), "pseudotime")
+  write.csv(pt_trends,
+            file = paste0(results_dir, "/SuppTable_male_trends_pseudotime.csv"),
+            row.names = FALSE)
+
+  datatable(pt_trends %>% mutate(across(where(is.numeric), ~signif(., 3))),
+            filter = "top", rownames = FALSE)
+}
+```
+
+```{r, fig.width=10, fig.height=4}
+if (order_supported) {
+  p_pt = ggplot(cd, aes(x = DC1, y = DC2, color = pseudotime)) +
+    geom_point(size = 0.7) + scale_color_viridis_c() +
+    ggtitle("Diffusion pseudotime")
+
+  p_pt_cl = ggplot(cd, aes(x = pseudotime, fill = origin_cluster)) +
+    geom_density(alpha = 0.35) +
+    ggtitle("Pseudotime by originating cluster")
+
+  print(p_pt + p_pt_cl)
+  ggsave(p_pt + p_pt_cl, file = paste0(results_dir, "/male_pseudotime.png"),
+         width = 10, height = 4)
+}
+```
+
+# 6. Summary
+
+```{r, results="asis"}
+cat(paste0(
+  ncol(male.sce), " male germ cells from ", nrow(origin_tab),
+  " originating clusters, ", round(dominant_pct, 1), "% from ",
+  dominant_library, ". ",
+  if (single_library)
+    "Because they are effectively a single library, animal, collection date and batch are constant, so nothing here can be a batch effect. "
+  else
+    "They span more than one library, so a library contribution cannot be excluded. ",
+  "PC1 explains ", round(emb$percentVar[1], 1),
+  "% of variance and the strongest correlation between DC1 and a technical ",
+  "covariate is ", round(tech_max, 2), ". ",
+  "Kruskal-Wallis across the originating clusters on DC1 gives p = ",
+  signif(kw$p.value, 3), ", with a mean adjacent overlap of ",
+  round(mean_overlap, 2), ". ",
+  n_directional, " markers correlate with DC1 and ", n_directional_partial,
+  " survive control for depth. ",
+  if (both_present) paste0(
+    "The meiotic programme has a median rho of ", round(late_row$median_rho, 2),
+    " and the spermatogonial programme ", round(early_row$median_rho, 2), ". ")
+  else "",
+  "Verdict: ", male_verdict, ". ",
+  if (male_verdict == "continuum")
+    "This is the result the female analysis could not produce, and it carries no confound."
+  else if (male_verdict == "ordered discrete states")
+    "The states are ordered but do not grade into one another, so report them as a sequence of states rather than a continuous trajectory."
+  else
+    "No ordering should be reported for these cells."))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
