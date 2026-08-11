@@ -1,0 +1,648 @@
+---
+title: "08_female_germ_cell_continuum"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    female_all_cluster: 8
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+Roughly 1,700 female germ cells survive doublet filtering, and
+`buildSNNGraph(k = 8)` followed by Louvain does not split them. That is not a
+cell number problem and `k = 8` is already a small neighborhood, so this asks
+the other question: whether the cells form a continuous transcriptional
+gradient rather than discrete states.
+
+No attempt is made to force discrete clusters by lowering `k` or raising
+resolution. Tuning until clusters appear would be selecting a parameter to
+obtain a desired result.
+
+**A pseudotime can be computed from any blob of cells.** The existence of an
+ordering therefore proves nothing. What decides the question is whether the
+leading component tracks maturation markers or tracks detection rate, so those
+checks come first and the decision is made from them.
+
+Everything here uses uncorrected, normalized log-expression. Running this on
+`fastMNN` output would remove the library signal by construction and make the
+library check below meaningless.
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(batchelor)
+library(patchwork)
+library(readxl)
+library(rtracklayer)
+library(destiny)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir     = paste0(params$project_dir, "/results/20260804_female_continuum")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+data_dir        = paste0(params$project_dir, "/data")
+```
+
+```{r, echo=FALSE}
+# doublet-filtered germ cell objects, as written by
+# 02_sex_cell_subanalysis_no_doublets.Rmd
+Robject_dir    = paste0(params$project_dir, "/results/20260803_no_doublets")
+all.sex.sce    = readRDS(paste0(Robject_dir, "/no.support.sex.sce.Rds"))
+merged.sex.sce = readRDS(paste0(Robject_dir, "/no.support.merged.sex.sce.Rds"))
+```
+
+```{r}
+library_meta = data.frame(
+  batch   = c("UND1_C00004336", "UND2_C00004362", "TF_C00004337", "TM_C00004374"),
+  library = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male"),
+  stage   = c("larva", "larva", "transformer", "transformer"),
+  stringsAsFactors = FALSE)
+
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+```
+
+# Identify the female germ cells
+
+Female germ cells are the cells whose originating all-cells cluster is
+`r params$female_all_cluster`, recorded in `all.scatter.clust`. That is the
+oocyte and oogonia cluster in the doublet-filtered annotation.
+
+```{r}
+germ_meta = as.data.frame(colData(merged.sex.sce))
+germ_meta$barcode = rownames(germ_meta)
+
+has_origin = "all.scatter.clust" %in% colnames(germ_meta)
+```
+
+`all.scatter.clust` is `r if (has_origin) "present" else "**absent**"` in
+`colData(merged.sex.sce)`.
+
+```{r}
+if (!has_origin) {
+  stop(paste0("all.scatter.clust is not present, so female germ cells cannot ",
+              "be identified by originating cluster. Check that ",
+              "02_sex_cell_subanalysis_no_doublets.Rmd was run to completion."))
+}
+
+germ_meta$origin_cluster = as.character(germ_meta$all.scatter.clust)
+female_cells = germ_meta$barcode[germ_meta$origin_cluster ==
+                                   as.character(params$female_all_cluster)]
+
+origin_tab = germ_meta %>%
+  dplyr::count(origin_cluster, name = "n_cells") %>%
+  arrange(desc(n_cells))
+
+datatable(origin_tab, rownames = FALSE)
+```
+
+`r length(female_cells)` cells come from all-cells cluster
+`r params$female_all_cluster`.
+
+```{r}
+if (length(female_cells) < 100) {
+  stop(paste0("Only ", length(female_cells), " female germ cells were found. ",
+              "Check the value of params$female_all_cluster against the ",
+              "doublet-filtered annotation before proceeding."))
+}
+```
+
+## Build an uncorrected object for these cells
+
+Each library is subsetted to the female germ cells, rescaled to comparable
+coverage with `multiBatchNorm`, and combined. `multiBatchNorm` adjusts for
+sequencing depth only; it does not correct expression structure, so a library
+effect remains visible and testable.
+
+```{r}
+fem_list = lapply(all.sex.sce, function(x) {
+  keep = intersect(colnames(x), female_cells)
+  if (length(keep) == 0) return(NULL)
+  x[, keep]
+})
+fem_list = fem_list[!vapply(fem_list, is.null, logical(1))]
+
+n_by_lib = vapply(fem_list, ncol, integer(1))
+```
+
+```{r}
+datatable(data.frame(batch = names(n_by_lib), n_cells = as.integer(n_by_lib)) %>%
+            left_join(library_meta, by = "batch") %>%
+            dplyr::select(batch, library, stage, n_cells),
+          rownames = FALSE)
+```
+
+```{r}
+universe = Reduce(intersect, lapply(fem_list, rownames))
+fem_list = lapply(fem_list, "[", i = universe, )
+
+common_cols = Reduce(intersect, lapply(fem_list, function(x) colnames(colData(x))))
+fem_list    = lapply(fem_list, function(x) {
+  colData(x)     = colData(x)[, common_cols, drop = FALSE]
+  reducedDims(x) = list()
+  x
+})
+
+if (length(fem_list) > 1) {
+  fem_list = do.call(multiBatchNorm, fem_list)
+}
+
+fem.sce = do.call(cbind, fem_list)
+fem.sce$batch = rep(names(n_by_lib), times = as.integer(n_by_lib))
+fem.sce$library = library_meta$library[match(fem.sce$batch, library_meta$batch)]
+```
+
+`r ncol(fem.sce)` cells and `r nrow(fem.sce)` genes, drawn from
+`r length(fem_list)` librar`r if (length(fem_list) == 1) "y" else "ies"`.
+
+# PCA and diffusion map
+
+```{r}
+embed_file = paste0(Robject_out_dir, "/female_embedding.Rds")
+
+if (file.exists(embed_file)) {
+  emb = readRDS(embed_file)
+} else {
+  message("Computing PCA and diffusion map. Cached in ", embed_file, ".")
+
+  dec  = modelGeneVar(fem.sce, block = if (length(fem_list) > 1) fem.sce$batch else NULL)
+  hvgs = getTopHVGs(dec, n = 2000)
+
+  set.seed(1)
+  tmp = runPCA(fem.sce, subset_row = hvgs, ncomponents = 30)
+
+  set.seed(1)
+  dm = destiny::DiffusionMap(reducedDim(tmp, "PCA")[, 1:15])
+
+  emb = list(pca         = reducedDim(tmp, "PCA"),
+             percentVar  = attr(reducedDim(tmp, "PCA"), "percentVar"),
+             dc          = destiny::eigenvectors(dm)[, 1:5],
+             eigenvalues = destiny::eigenvalues(dm)[1:10],
+             hvgs        = hvgs,
+             dm          = dm)
+  saveRDS(emb, file = embed_file)
+}
+
+reducedDim(fem.sce, "PCA") = emb$pca
+colnames(emb$dc) = paste0("DC", seq_len(ncol(emb$dc)))
+reducedDim(fem.sce, "DiffusionMap") = emb$dc
+```
+
+## Variance explained
+
+```{r}
+var_tab = data.frame(
+  component        = paste0("PC", seq_along(emb$percentVar)),
+  percent_variance = round(emb$percentVar, 2)) %>%
+  head(10)
+
+datatable(var_tab, rownames = FALSE)
+```
+
+Leading diffusion map eigenvalues, which describe how much of the diffusion
+structure each component carries:
+
+```{r}
+datatable(data.frame(component  = paste0("DC", seq_along(emb$eigenvalues)),
+                     eigenvalue = round(emb$eigenvalues, 4)),
+          rownames = FALSE)
+```
+
+PC1 explains `r round(emb$percentVar[1], 1)`% of variance and PC2
+`r round(emb$percentVar[2], 1)`%.
+
+# 1. What does the leading component track?
+
+This section runs before any marker analysis, because a first component that
+tracks detection rate is a technical artifact and no amount of marker
+interpretation afterwards would rescue it.
+
+## Technical covariates
+
+```{r}
+cd = as.data.frame(colData(fem.sce))
+
+tech_candidates = c(sum = "sum", detected = "detected",
+                    mito_percent = "subsets_Mito_percent")
+tech_present = tech_candidates[tech_candidates %in% colnames(cd)]
+tech_absent  = tech_candidates[!tech_candidates %in% colnames(cd)]
+```
+
+* Technical covariates found in `colData`: `r if (length(tech_present) > 0) paste(tech_present, collapse = ", ") else "none"`
+* Not present, and therefore not tested: `r if (length(tech_absent) > 0) paste(tech_absent, collapse = ", ") else "none"`
+
+```{r}
+# ribosomal fraction is not stored by the upstream QC, so it is computed here
+# if ribosomal genes can be identified by symbol
+gene_description =
+  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip = 1) %>%
+  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
+                Gene        = "NCBI_GTF_GENEID",
+                description = "NCBI_GTF_ProteinInfo") %>%
+  dplyr::select(Gene, WangGeneID, description) %>%
+  filter(!is.na(Gene))
+
+ribo_symbols = gene_description$Gene[grepl("^RP[SL][0-9]", gene_description$WangGeneID,
+                                           ignore.case = TRUE)]
+ribo_rows = unique(c(rownames(fem.sce)[grepl("^RP[SL][0-9]", rownames(fem.sce),
+                                             ignore.case = TRUE)],
+                     intersect(ribo_symbols, rownames(fem.sce))))
+
+if (length(ribo_rows) >= 10) {
+  cd$ribo_percent = 100 * colSums(counts(fem.sce)[ribo_rows, , drop = FALSE]) /
+    colSums(counts(fem.sce))
+}
+```
+
+`r length(ribo_rows)` ribosomal protein genes were identified by symbol.
+`r if (length(ribo_rows) >= 10) "The ribosomal fraction is included below." else "That is too few to compute a meaningful ribosomal fraction, so it is not tested."`
+
+```{r}
+cd$DC1 = emb$dc[, "DC1"]
+cd$DC2 = emb$dc[, "DC2"]
+cd$PC1 = emb$pca[, 1]
+cd$PC2 = emb$pca[, 2]
+
+tech_vars = intersect(c("sum", "detected", "subsets_Mito_percent", "ribo_percent"),
+                      colnames(cd))
+
+tech_cor = expand.grid(component = c("DC1", "PC1", "DC2", "PC2"),
+                       covariate = tech_vars,
+                       stringsAsFactors = FALSE) %>%
+  rowwise() %>%
+  mutate(spearman_rho = suppressWarnings(
+           cor(cd[[component]], cd[[covariate]], method = "spearman",
+               use = "complete.obs")),
+         abs_rho = abs(spearman_rho)) %>%
+  ungroup() %>%
+  arrange(desc(abs_rho))
+
+write.csv(tech_cor, file = paste0(results_dir, "/SuppTable_technical_correlations.csv"),
+          row.names = FALSE)
+
+datatable(tech_cor %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+```{r}
+dc1_tech_max = tech_cor %>% filter(component == "DC1") %>%
+  summarize(m = max(abs_rho, na.rm = TRUE)) %>% pull(m)
+pc1_tech_max = tech_cor %>% filter(component == "PC1") %>%
+  summarize(m = max(abs_rho, na.rm = TRUE)) %>% pull(m)
+
+dc1_worst = tech_cor %>% filter(component == "DC1") %>% slice_max(abs_rho, n = 1)
+
+technical_confound = isTRUE(dc1_tech_max >= 0.4)
+```
+
+The strongest absolute Spearman correlation between DC1 and any technical
+covariate is `r round(dc1_tech_max, 2)`
+(`r if (nrow(dc1_worst) > 0) dc1_worst$covariate else NA`). For PC1 it is
+`r round(pc1_tech_max, 2)`.
+
+`r if (technical_confound) "**DC1 tracks a technical covariate.** At this strength the leading diffusion component is substantially explained by detection rate or composition rather than by biology. Any ordering built on it would order cells by library quality." else "DC1 is not strongly associated with detection rate or composition, so the leading component is not obviously a technical artifact."`
+
+```{r, fig.width=11, fig.height=3.5}
+tech_long = cd %>%
+  dplyr::select(DC1, all_of(tech_vars)) %>%
+  tidyr::pivot_longer(-DC1, names_to = "covariate", values_to = "value")
+
+p_tech = ggplot(tech_long, aes(x = DC1, y = value)) +
+  geom_point(size = 0.3, alpha = 0.3) +
+  geom_smooth(method = "loess", se = FALSE, color = "#9e2f7f") +
+  facet_wrap(~ covariate, scales = "free_y", nrow = 1) +
+  ylab(NULL)
+
+p_tech
+ggsave(p_tech, file = paste0(results_dir, "/DC1_vs_technical.png"),
+       width = 11, height = 3.5)
+```
+
+## Library of origin
+
+```{r}
+lib_fit = function(v) {
+  if (length(unique(cd$library)) < 2) return(NA_real_)
+  summary(lm(v ~ cd$library))$r.squared
+}
+
+lib_tab = data.frame(
+  component  = c("DC1", "DC2", "PC1", "PC2"),
+  r_squared_library = c(lib_fit(cd$DC1), lib_fit(cd$DC2),
+                        lib_fit(cd$PC1), lib_fit(cd$PC2)))
+
+datatable(lib_tab %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+
+dc1_lib_r2 = lib_tab$r_squared_library[lib_tab$component == "DC1"]
+library_confound = isTRUE(dc1_lib_r2 >= 0.25)
+```
+
+`r if (length(unique(cd$library)) < 2) "All female germ cells come from a single library, so a library effect cannot be tested and cannot be excluded." else paste0("Library of origin explains ", round(100 * dc1_lib_r2, 1), "% of the variance in DC1. ", if (library_confound) "**That is substantial**, so the gradient is at least partly a sample effect rather than a maturation axis." else "That is modest, so the gradient is not primarily a sample effect.")`
+
+```{r, fig.width=10, fig.height=4}
+p_dc_lib = ggplot(cd, aes(x = DC1, y = DC2, color = library)) +
+  geom_point(size = 0.6, alpha = 0.7) +
+  scale_color_manual(values = lib_cols) +
+  guides(color = guide_legend(override.aes = list(size = 3))) +
+  ggtitle("Diffusion map, colored by library")
+
+p_dc_dens = ggplot(cd, aes(x = DC1, fill = library, color = library)) +
+  geom_density(alpha = 0.35) +
+  scale_fill_manual(values = lib_cols) +
+  scale_color_manual(values = lib_cols) +
+  ggtitle("DC1 by library")
+
+p_dc_lib + p_dc_dens
+ggsave(p_dc_lib + p_dc_dens, file = paste0(results_dir, "/DC1_by_library.png"),
+       width = 10, height = 4)
+```
+
+## Marker expression against DC1
+
+```{r}
+requested_symbols = c("DDX4", "PIWIL1", "SYCP3", "ALPL", "PRDM14",
+                      "CUZD1", "S100A1", "AEP1")
+zp_pattern = "^ZP[0-9]"
+
+resolve_marker = function(symbol, rn, gd) {
+  if (symbol %in% rn) return(symbol)
+  g = gd$Gene[gd$WangGeneID == symbol]
+  g = g[g %in% rn]
+  if (length(g) > 0) return(g[1])
+  NA_character_
+}
+
+rn = rownames(fem.sce)
+
+# ZP and AEP genes appear with numeric suffixes, so expand by pattern
+zp_wang  = unique(gene_description$WangGeneID[grepl(zp_pattern,
+                                                    gene_description$WangGeneID)])
+aep_wang = unique(gene_description$WangGeneID[grepl("^aep1", gene_description$WangGeneID,
+                                                    ignore.case = TRUE)])
+
+marker_map = data.frame(symbol = unique(c(requested_symbols, zp_wang, aep_wang)),
+                        stringsAsFactors = FALSE) %>%
+  rowwise() %>%
+  mutate(gene_id = resolve_marker(symbol, rn, gene_description)) %>%
+  ungroup()
+
+resolved   = marker_map %>% filter(!is.na(gene_id)) %>% distinct(gene_id, .keep_all = TRUE)
+unresolved = marker_map %>% filter(is.na(gene_id))
+```
+
+* Markers requested, after expanding ZP and AEP families: `r nrow(marker_map)`
+* Resolved in `rownames`: `r nrow(resolved)`
+* Not found, and therefore excluded: `r if (nrow(unresolved) == 0) "none" else paste(unresolved$symbol, collapse = ", ")`
+
+```{r}
+expr = as.matrix(logcounts(fem.sce)[resolved$gene_id, , drop = FALSE])
+rownames(expr) = resolved$symbol
+
+# joined by barcode rather than by position, so no recycling assumption
+expr_long = t(expr) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("barcode") %>%
+  tidyr::pivot_longer(-barcode, names_to = "symbol", values_to = "logexpr") %>%
+  left_join(data.frame(barcode = colnames(fem.sce), DC1 = cd$DC1,
+                       library = cd$library, stringsAsFactors = FALSE),
+            by = "barcode")
+```
+
+```{r}
+safe_rho = function(x, y) {
+  if (length(unique(x)) < 2 || length(unique(y)) < 2) return(NA_real_)
+  suppressWarnings(cor(x, y, method = "spearman"))
+}
+safe_p = function(x, y) {
+  if (length(unique(x)) < 2 || length(unique(y)) < 2) return(NA_real_)
+  suppressWarnings(cor.test(x, y, method = "spearman")$p.value)
+}
+
+marker_trends = expr_long %>%
+  group_by(symbol) %>%
+  summarize(n_cells        = dplyr::n(),
+            pct_expressing = 100 * mean(logexpr > 0),
+            mean_logexpr   = mean(logexpr),
+            rho_DC1        = safe_rho(DC1, logexpr),
+            p_value        = safe_p(DC1, logexpr),
+            .groups = "drop") %>%
+  mutate(FDR = p.adjust(p_value, "BH"),
+         direction = case_when(
+           is.na(rho_DC1)            ~ "undetermined",
+           FDR >= 0.05               ~ "flat",
+           rho_DC1 >=  0.3           ~ "increases",
+           rho_DC1 <= -0.3           ~ "decreases",
+           TRUE                      ~ "weak")) %>%
+  arrange(desc(abs(rho_DC1)))
+
+write.csv(marker_trends, file = paste0(results_dir, "/SuppTable_marker_trends_DC1.csv"),
+          row.names = FALSE)
+
+datatable(marker_trends %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r}
+n_directional = sum(marker_trends$direction %in% c("increases", "decreases"))
+markers_informative = n_directional >= 3
+```
+
+`r n_directional` of `r nrow(marker_trends)` markers show a monotonic trend
+against DC1 at |rho| >= 0.3 and FDR < 0.05.
+
+```{r, fig.width=11, fig.height=8}
+top_markers = marker_trends %>%
+  filter(!is.na(rho_DC1)) %>%
+  slice_max(abs(rho_DC1), n = 12) %>%
+  pull(symbol)
+
+p_mark = ggplot(expr_long %>% filter(symbol %in% top_markers),
+                aes(x = DC1, y = logexpr)) +
+  geom_point(aes(color = library), size = 0.3, alpha = 0.3) +
+  geom_smooth(method = "loess", se = FALSE, color = "black", linewidth = 0.7) +
+  scale_color_manual(values = lib_cols) +
+  guides(color = guide_legend(override.aes = list(size = 3, alpha = 1))) +
+  facet_wrap(~ symbol, scales = "free_y") +
+  ylab("Uncorrected log-expression")
+
+p_mark
+ggsave(p_mark, file = paste0(results_dir, "/markers_vs_DC1.png"),
+       width = 11, height = 8)
+```
+
+# 2. Decision
+
+```{r}
+continuum_supported = !technical_confound && markers_informative
+```
+
+The decision rests on two checks, applied in this order.
+
+1. **Does DC1 track a technical covariate?** Strongest absolute correlation
+   `r round(dc1_tech_max, 2)`, against a threshold of 0.4.
+   `r if (technical_confound) "Failed." else "Passed."`
+2. **Do maturation markers vary monotonically along DC1?** `r n_directional`
+   markers reach |rho| >= 0.3 with FDR < 0.05, against a requirement of 3.
+   `r if (markers_informative) "Passed." else "Failed."`
+
+`r if (continuum_supported) "**A continuum is supported.** DC1 is not explained by detection rate or composition, and maturation markers vary monotonically along it. An ordering is computed below." else if (technical_confound) "**No continuum is supported.** The leading diffusion component tracks a technical covariate, so an ordering built on it would order cells by library quality rather than by maturation. No trajectory is fitted, and none should be. The analysis stops here." else "**No continuum is supported.** DC1 is not a technical artifact, but maturation markers do not vary monotonically along it, so there is no evidence that it corresponds to a biological progression. Fitting a trajectory to this would be fitting a trajectory to noise. The analysis stops here."`
+
+`r if (library_confound && continuum_supported) "**Caveat:** library of origin explains a substantial share of DC1, so part of the ordering below reflects which animal a cell came from. Interpret the ordering accordingly." else ""`
+
+# 3. Ordering, computed only if a continuum is supported
+
+```{r}
+if (!continuum_supported) {
+  message("No continuum supported; the ordering below is not computed.")
+}
+```
+
+```{r}
+dpt_file = paste0(Robject_out_dir, "/female_dpt.Rds")
+
+if (continuum_supported) {
+  if (file.exists(dpt_file)) {
+    dpt = readRDS(dpt_file)
+  } else {
+    message("Computing diffusion pseudotime. Cached in ", dpt_file, ".")
+    dpt = destiny::DPT(emb$dm)
+    saveRDS(dpt, file = dpt_file)
+  }
+  # root at the extreme of DC1, so the ordering runs along the gradient tested above
+  root_cell   = which.min(cd$DC1)
+  cd$pseudotime = dpt[[paste0("DPT", root_cell)]]
+} else {
+  cd$pseudotime = NA_real_
+}
+```
+
+```{r, eval=TRUE}
+if (continuum_supported) {
+  ord_tab = data.frame(
+    barcode    = colnames(fem.sce),
+    library    = cd$library,
+    DC1        = cd$DC1,
+    pseudotime = cd$pseudotime)
+
+  write.csv(ord_tab, file = paste0(results_dir, "/SuppTable_female_ordering.csv"),
+            row.names = FALSE)
+
+  datatable(head(ord_tab[order(ord_tab$pseudotime), ], 200) %>%
+              mutate(across(where(is.numeric), ~round(., 4))),
+            rownames = FALSE)
+}
+```
+
+```{r, fig.width=10, fig.height=4}
+if (continuum_supported) {
+  p_ord = ggplot(cd, aes(x = DC1, y = DC2, color = pseudotime)) +
+    geom_point(size = 0.6) +
+    scale_color_viridis_c() +
+    ggtitle("Diffusion pseudotime")
+
+  p_ord_lib = ggplot(cd, aes(x = pseudotime, fill = library, color = library)) +
+    geom_density(alpha = 0.35) +
+    scale_fill_manual(values = lib_cols) +
+    scale_color_manual(values = lib_cols) +
+    ggtitle("Pseudotime by library")
+
+  print(p_ord + p_ord_lib)
+  ggsave(p_ord + p_ord_lib,
+         file = paste0(results_dir, "/female_pseudotime.png"),
+         width = 10, height = 4)
+}
+```
+
+## Marker trends against the ordering
+
+```{r}
+if (continuum_supported) {
+  expr_ord = expr_long %>%
+    left_join(data.frame(barcode = colnames(fem.sce),
+                         pseudotime = cd$pseudotime,
+                         stringsAsFactors = FALSE), by = "barcode")
+
+  marker_trends_pt = expr_ord %>%
+    group_by(symbol) %>%
+    summarize(rho_pseudotime = safe_rho(pseudotime, logexpr),
+              p_value        = safe_p(pseudotime, logexpr),
+              .groups = "drop") %>%
+    mutate(FDR = p.adjust(p_value, "BH"),
+           direction = case_when(
+             is.na(rho_pseudotime) ~ "undetermined",
+             FDR >= 0.05           ~ "flat",
+             rho_pseudotime >=  0.3 ~ "increases",
+             rho_pseudotime <= -0.3 ~ "decreases",
+             TRUE                   ~ "weak")) %>%
+    arrange(desc(abs(rho_pseudotime)))
+
+  write.csv(marker_trends_pt,
+            file = paste0(results_dir, "/SuppTable_marker_trends_pseudotime.csv"),
+            row.names = FALSE)
+
+  datatable(marker_trends_pt %>% mutate(across(where(is.numeric), ~signif(., 3))),
+            filter = "top", rownames = FALSE)
+}
+```
+
+# 4. Summary
+
+```{r, results="asis"}
+cat(paste0(
+  "Female germ cells analyzed: ", ncol(fem.sce), ", from ", length(fem_list),
+  " librar", if (length(fem_list) == 1) "y" else "ies", ". ",
+  "PC1 explains ", round(emb$percentVar[1], 1), "% of variance. ",
+  "The strongest correlation between DC1 and a technical covariate is ",
+  round(dc1_tech_max, 2), ". ",
+  if (length(unique(cd$library)) >= 2)
+    paste0("Library of origin explains ", round(100 * dc1_lib_r2, 1),
+           "% of the variance in DC1. ") else
+    "All cells come from one library, so a library effect could not be tested. ",
+  n_directional, " of ", nrow(marker_trends),
+  " resolved markers vary monotonically along DC1. ",
+  if (continuum_supported) {
+    paste0("These cells therefore support a continuous transcriptional ",
+           "gradient rather than discrete states, and the failure of Louvain ",
+           "to split them is the expected result for a continuum rather than ",
+           "a shortcoming of the clustering.")
+  } else if (technical_confound) {
+    paste0("The leading component tracks a technical covariate, so no ",
+           "continuum is supported and no trajectory was fitted. The failure ",
+           "of Louvain to split these cells should not be interpreted as ",
+           "evidence of a gradient.")
+  } else {
+    paste0("Maturation markers do not vary monotonically along the leading ",
+           "component, so no continuum is supported and no trajectory was ",
+           "fitted. The cells are best described as a single state, not as an ",
+           "unresolved gradient.")
+  }))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
