@@ -546,7 +546,13 @@ datatable(combined_trends %>% mutate(across(where(is.numeric), ~signif(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
+A family with fewer than three resolved genes cannot meet the criteria no
+matter what the data show, so those are reported as `NA`, meaning not testable,
+rather than `FALSE`, which would read as a negative result.
+
 ```{r}
+min_family_genes = 3
+
 family_coherence = combined_trends %>%
   filter(!is.na(rho)) %>%
   group_by(family) %>%
@@ -556,7 +562,10 @@ family_coherence = combined_trends %>%
             pct_same_sign  = 100 * max(sum(rho > 0), sum(rho < 0)) / dplyr::n(),
             n_significant  = sum(FDR < 0.05 & abs(rho) >= 0.3),
             .groups = "drop") %>%
-  mutate(coherent = n_genes >= 3 & pct_same_sign >= 80 & n_significant >= 3) %>%
+  mutate(testable = n_genes >= min_family_genes,
+         coherent = ifelse(testable,
+                           pct_same_sign >= 80 & n_significant >= 3,
+                           NA)) %>%
   arrange(desc(n_genes))
 
 write.csv(family_coherence,
@@ -570,13 +579,80 @@ datatable(family_coherence %>% mutate(across(where(is.numeric), ~round(., 2))),
 ```{r}
 zp_row = family_coherence %>% filter(family == "ZP (oocyte)")
 zp_coherent = nrow(zp_row) > 0 && isTRUE(zp_row$coherent)
+n_testable  = sum(family_coherence$testable)
 n_coherent_families = sum(family_coherence$coherent, na.rm = TRUE)
+n_not_testable = sum(!family_coherence$testable)
 programme_coherent = n_coherent_families >= 1
+
+# families that miss only on the sign threshold, reported rather than lost
+near_miss = family_coherence %>%
+  filter(testable, !coherent, n_significant >= 3, pct_same_sign >= 65)
 ```
 
-`r n_coherent_families` of `r nrow(family_coherence)` declared marker families move coherently along DC1, defined as at least three resolved genes, at least 80% agreeing in sign, and at least three reaching |rho| >= 0.3 with FDR < 0.05.
+`r n_coherent_families` of `r n_testable` testable families move coherently
+along DC1, defined as at least 80% of genes agreeing in sign and at least three
+reaching |rho| >= 0.3 with FDR < 0.05.
+`r if (n_not_testable > 0) paste0(n_not_testable, " famil", if (n_not_testable == 1) "y has" else "ies have", " fewer than ", min_family_genes, " resolved genes and could not be tested either way.") else ""`
 
-`r if (zp_coherent) paste0("The ZP family is coherent: ", zp_row$n_genes, " genes, median rho ", round(zp_row$median_rho, 2), ", ", round(zp_row$pct_same_sign), "% agreeing in sign. Zona pellucida genes are oocyte-specific and are not something a batch effect elevates as a set, so this is the oocyte differentiation programme rather than a technical difference between libraries.") else "The ZP family does not move coherently along DC1, so the separation is not accompanied by the oocyte differentiation programme."`
+`r if (zp_coherent) paste0("The ZP family is coherent: ", zp_row$n_genes, " genes, median rho ", round(zp_row$median_rho, 2), ", ", round(zp_row$pct_same_sign), "% agreeing in sign, ", zp_row$n_significant, " significant.") else "The ZP family does not move coherently along DC1."`
+
+`r if (nrow(near_miss) > 0) paste0("Reported rather than discarded: ", paste0(near_miss$family, " (", near_miss$n_genes, " genes, median rho ", round(near_miss$median_rho, 2), ", ", round(near_miss$pct_same_sign), "% same sign, ", near_miss$n_significant, " significant)", collapse = "; "), ". ", if (nrow(near_miss) == 1) "This family falls" else "These families fall", " below the 80% sign threshold while still showing a strong majority direction and many significant genes. For a large paralogous family there is no reason to expect every member to share the same regulation, so a minority moving the other way is plausibly biological rather than noise. The threshold is a convention, not a finding.") else ""`
+
+## Direction test: do early and late programmes move oppositely?
+
+Coherence within one family is weaker evidence than two families moving in
+**opposite** directions. Ambient RNA, capture bias and sequencing depth all push
+a set of genes the same way. None of them raise an oocyte programme while
+lowering a general germline programme, in the order that matches known
+development.
+
+```{r}
+late_families  = c("ZP (oocyte)", "AEP1")
+early_families = c("germline, general", "early germline")
+
+dir_summary = combined_trends %>%
+  filter(!is.na(rho)) %>%
+  mutate(programme = case_when(family %in% late_families  ~ "late (oocyte)",
+                               family %in% early_families ~ "early (germline)",
+                               TRUE                       ~ "other")) %>%
+  filter(programme != "other") %>%
+  group_by(programme) %>%
+  summarize(n_genes       = dplyr::n(),
+            median_rho    = median(rho),
+            n_significant = sum(FDR < 0.05 & abs(rho) >= 0.3),
+            .groups = "drop")
+
+write.csv(dir_summary,
+          file = paste0(results_dir, "/SuppTable_direction_test.csv"),
+          row.names = FALSE)
+
+datatable(dir_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+```{r}
+late_row  = dir_summary %>% filter(programme == "late (oocyte)")
+early_row = dir_summary %>% filter(programme == "early (germline)")
+
+both_present = nrow(late_row) == 1 && nrow(early_row) == 1
+
+opposite_directions = both_present &&
+  sign(late_row$median_rho) != sign(early_row$median_rho) &&
+  late_row$n_significant  >= 3 &&
+  early_row$n_significant >= 1
+
+# a Wilcoxon on the two sets of per-gene correlations, to test the split
+# rather than eyeballing two medians
+dir_p = if (both_present) {
+  a = combined_trends %>% filter(family %in% late_families,  !is.na(rho)) %>% pull(rho)
+  b = combined_trends %>% filter(family %in% early_families, !is.na(rho)) %>% pull(rho)
+  suppressWarnings(wilcox.test(a, b)$p.value)
+} else NA_real_
+```
+
+`r if (!both_present) "One of the two programmes has no resolved genes, so the direction test cannot be run." else paste0("The late oocyte programme has a median rho of ", round(late_row$median_rho, 2), " across ", late_row$n_genes, " genes (", late_row$n_significant, " significant), and the early germline programme a median rho of ", round(early_row$median_rho, 2), " across ", early_row$n_genes, " genes (", early_row$n_significant, " significant). Wilcoxon on the two sets of per-gene correlations: p = ", signif(dir_p, 2), ".")`
+
+`r if (opposite_directions) "**The two programmes move in opposite directions along DC1.** Oocyte genes are high at one end and general germline identity genes at the other. A technical difference between libraries acts on a set of genes in one direction; it does not raise one programme while lowering another in the sequence that matches oogonia giving way to oocytes. This is stronger evidence for a differentiation transition than coherence within either family alone." else if (both_present) "The two programmes do not move in opposite directions along DC1, so the separation does not show the early to late transition expected of a differentiation transition." else ""`
 
 ```{r, fig.width=11, fig.height=8}
 top_markers = combined_trends %>% filter(!is.na(rho)) %>%
@@ -721,7 +797,7 @@ combined_verdict = if (technical_gradient) {
   "technical" = "DC1 retains a strong association with detection rate inside each mode, so it is structured by technical variation and nothing should be built on it.",
   "two groups, unexplained" = "The cells form two separated groups, but no declared marker family moves coherently across them, so the separation cannot be attributed to a differentiation programme and may be technical or batch driven.",
   "two groups, ambient confounded" = "The cells form two separated groups and marker families move coherently, but non-germ cells of the female library also carry zona pellucida transcripts, which they cannot transcribe. The signal is therefore inflated by ambient oocyte RNA and the separation cannot be read as a differentiation difference on this evidence.",
-  "two states" = "The female germ cells form two separated groups, not a gradient, and the separation carries a coherent differentiation programme that is not explained by ambient RNA: zona pellucida expression is confined to the germ cluster and is absent from the other cells of the same library, so it is transcribed rather than free-floating. Louvain at k = 8 not splitting these cells is a finding about the clustering rather than evidence of a continuum, and is expected given the subclustering in 02 runs on fastMNN corrected values where this between-library difference is removed by design. Stage and collection date remain confounded in general, but the specific alternative that the marker signal is a library artifact has been tested and rejected.",
+  "two states" = paste0("The female germ cells form two separated groups, not a gradient, and the separation carries a coherent differentiation programme that is not explained by ambient RNA: zona pellucida expression is confined to the germ cluster and is absent from the other cells of the same library, so it is transcribed rather than free-floating. ", if (opposite_directions) "The oocyte and general germline programmes also move in opposite directions along the axis, which no technical difference between libraries would produce. " else "", "Louvain at k = 8 not splitting these cells is a finding about the clustering rather than evidence of a continuum, and is expected given the subclustering in 02 runs on fastMNN corrected values where this between-library difference is removed by design. Stage and collection date remain confounded in general, but the specific alternative that the marker signal is a library artifact has been tested and rejected."),
   "continuum" = "DC1 is unimodal, is not explained by detection rate, and maturation markers vary monotonically along it, which supports a continuous gradient.",
   "no structure" = "DC1 is neither bimodal nor accompanied by monotonic marker changes, so there is no evidence of either discrete states or a gradient.")`
 
@@ -835,6 +911,181 @@ ggsave(p_perlib, file = paste0(results_dir, "/perlibrary_diffusion.png"),
        width = 11, height = 4)
 ```
 
+## Marker expression in the Female library alone
+
+This is the cleanest test in the document. Inside the female transformer
+library, animal, collection date, batch and sex are all constant, so nothing
+here can be a batch effect and a correlation with detection rate is
+unambiguously technical. If oogonia and oocytes coexist in this sample, the
+oocyte and general germline programmes should move in opposite directions along
+its internal DC1, exactly as they do across the stage split, but with the
+confound removed.
+
+```{r}
+female_batch     = library_meta$batch[library_meta$library == "Female"]
+female_available = length(female_batch) == 1 && female_batch %in% names(perlib)
+```
+
+`r if (!female_available) "The Female library is not available for this analysis, either because it contributes too few cells or because it was dropped above. The section below is skipped." else ""`
+
+```{r}
+if (female_available) {
+  sce_f = fem_list[[female_batch]]
+  e_f   = perlib[[female_batch]]$emb
+
+  cdf = as.data.frame(colData(sce_f))
+  cdf$barcode = perlib[[female_batch]]$barcodes
+  cdf$DC1 = e_f$dc[, 1]
+  cdf$DC2 = e_f$dc[, 2]
+
+  tv_f = intersect(c("sum", "detected", "subsets_Mito_percent"), colnames(cdf))
+  tech_f = data.frame(
+    covariate = tv_f,
+    rho_DC1   = vapply(tv_f, function(v) safe_rho(cdf$DC1, cdf[[v]]), numeric(1)),
+    stringsAsFactors = FALSE)
+
+  datatable(tech_f %>% mutate(across(where(is.numeric), ~round(., 3))),
+            rownames = FALSE)
+}
+```
+
+```{r}
+if (female_available) {
+  fem_tech_max = max(abs(tech_f$rho_DC1), na.rm = TRUE)
+  fem_technical = isTRUE(fem_tech_max >= 0.4)
+} else {
+  fem_tech_max = NA_real_; fem_technical = FALSE
+}
+```
+
+`r if (female_available) paste0("Strongest correlation between the internal DC1 and a technical covariate: ", round(fem_tech_max, 2), ". ", if (fem_technical) "**That is a technical gradient.** With batch held constant there is nothing else it could be, so the internal axis is structured by detection rate and no biological reading is available." else "No technical gradient, so the internal axis is not detection rate.") else ""`
+
+### Marker trends within the Female library
+
+```{r}
+if (female_available) {
+  expr_f   = marker_expression(sce_f, resolved)
+  trends_f = trend_table(expr_f, cdf %>% dplyr::select(barcode, DC1), "DC1")
+
+  write.csv(trends_f,
+            file = paste0(results_dir, "/SuppTable_marker_trends_female.csv"),
+            row.names = FALSE)
+
+  datatable(trends_f %>% mutate(across(where(is.numeric), ~signif(., 3))),
+            filter = "top", rownames = FALSE)
+}
+```
+
+```{r}
+if (female_available) {
+  fam_f = trends_f %>%
+    filter(!is.na(rho)) %>%
+    group_by(family) %>%
+    summarize(n_genes       = dplyr::n(),
+              median_rho    = median(rho),
+              pct_same_sign = 100 * max(sum(rho > 0), sum(rho < 0)) / dplyr::n(),
+              n_significant = sum(FDR < 0.05 & abs(rho) >= 0.3),
+              .groups = "drop") %>%
+    mutate(testable = n_genes >= min_family_genes,
+           coherent = ifelse(testable,
+                             pct_same_sign >= 80 & n_significant >= 3, NA)) %>%
+    arrange(desc(n_genes))
+
+  write.csv(fam_f,
+            file = paste0(results_dir, "/SuppTable_family_coherence_female.csv"),
+            row.names = FALSE)
+
+  datatable(fam_f %>% mutate(across(where(is.numeric), ~round(., 2))),
+            rownames = FALSE)
+}
+```
+
+### Direction test within the Female library
+
+```{r}
+if (female_available) {
+  dir_f = trends_f %>%
+    filter(!is.na(rho)) %>%
+    mutate(programme = case_when(family %in% late_families  ~ "late (oocyte)",
+                                 family %in% early_families ~ "early (germline)",
+                                 TRUE                       ~ "other")) %>%
+    filter(programme != "other") %>%
+    group_by(programme) %>%
+    summarize(n_genes       = dplyr::n(),
+              median_rho    = median(rho),
+              n_significant = sum(FDR < 0.05 & abs(rho) >= 0.3),
+              .groups = "drop")
+
+  datatable(dir_f %>% mutate(across(where(is.numeric), ~round(., 3))),
+            rownames = FALSE)
+
+  late_f  = dir_f %>% filter(programme == "late (oocyte)")
+  early_f = dir_f %>% filter(programme == "early (germline)")
+
+  both_f = nrow(late_f) == 1 && nrow(early_f) == 1
+  fem_opposite = both_f &&
+    sign(late_f$median_rho) != sign(early_f$median_rho) &&
+    late_f$n_significant >= 3 && early_f$n_significant >= 1
+
+  dir_p_f = if (both_f) {
+    a = trends_f %>% filter(family %in% late_families,  !is.na(rho)) %>% pull(rho)
+    b = trends_f %>% filter(family %in% early_families, !is.na(rho)) %>% pull(rho)
+    suppressWarnings(wilcox.test(a, b)$p.value)
+  } else NA_real_
+} else {
+  both_f = FALSE; fem_opposite = FALSE; dir_p_f = NA_real_
+}
+```
+
+`r if (!female_available) "" else if (!both_f) "One programme has no resolved genes within this library, so the direction test cannot be run here." else paste0("Within the Female library alone, the late oocyte programme has a median rho of ", round(late_f$median_rho, 2), " across ", late_f$n_genes, " genes (", late_f$n_significant, " significant) and the early germline programme ", round(early_f$median_rho, 2), " across ", early_f$n_genes, " genes (", early_f$n_significant, " significant). Wilcoxon p = ", signif(dir_p_f, 2), ".")`
+
+`r if (female_available && fem_opposite) "**The two programmes move in opposite directions within a single library.** Batch, animal, collection date and sex are all constant here, so this cannot be a library artifact. Oogonia and oocytes coexist in this sample and are ordered along the internal axis, which is direct evidence of a maturation gradient rather than only a difference between stages." else if (female_available && both_f) "**The two programmes do not move in opposite directions within this library.** Whatever the internal axis describes, it is not the early to late germ cell transition. The opposite-direction result in the combined analysis therefore reflects the difference between the stages rather than a gradient inside the transformer sample." else ""`
+
+```{r, fig.width=11, fig.height=8}
+if (female_available) {
+  top_f = trends_f %>% filter(!is.na(rho)) %>%
+    slice_max(abs(rho), n = 12) %>% pull(symbol)
+
+  p_fem = ggplot(expr_f %>% filter(symbol %in% top_f) %>%
+                   left_join(cdf %>% dplyr::select(barcode, DC1), by = "barcode"),
+                 aes(x = DC1, y = logexpr)) +
+    geom_point(size = 0.4, alpha = 0.3, color = "#FF6DB6") +
+    geom_smooth(method = "loess", se = FALSE, color = "black", linewidth = 0.7) +
+    facet_wrap(~ symbol, scales = "free_y") +
+    xlab("DC1, computed within the Female library only") +
+    ylab("Uncorrected log-expression")
+
+  print(p_fem)
+  ggsave(p_fem, file = paste0(results_dir, "/markers_vs_DC1_female.png"),
+         width = 11, height = 8)
+}
+```
+
+```{r, fig.width=10, fig.height=4}
+if (female_available) {
+  zp_f  = resolved$gene_id[resolved$family == "ZP (oocyte)"]
+  erly  = resolved$gene_id[resolved$family == "germline, general"]
+
+  cdf$ZP_mean       = colMeans(as.matrix(logcounts(sce_f)[zp_f, , drop = FALSE]))
+  cdf$germline_mean = colMeans(as.matrix(logcounts(sce_f)[erly, , drop = FALSE]))
+
+  p_zp = ggplot(cdf, aes(x = DC1, y = DC2, color = ZP_mean)) +
+    geom_point(size = 0.8) +
+    scale_color_viridis_c() +
+    ggtitle("ZP family mean")
+
+  p_gl = ggplot(cdf, aes(x = DC1, y = DC2, color = germline_mean)) +
+    geom_point(size = 0.8) +
+    scale_color_viridis_c(option = "magma") +
+    ggtitle("General germline mean")
+
+  print(p_zp + p_gl)
+  ggsave(p_zp + p_gl,
+         file = paste0(results_dir, "/female_programmes_on_DC.png"),
+         width = 10, height = 4)
+}
+```
+
 # 3. Summary
 
 ```{r, results="asis"}
@@ -847,9 +1098,14 @@ cat(paste0(
   "% of its variance. The strongest correlation with a technical covariate is ",
   round(max_pooled, 2), " pooled but only ", round(max_within, 2),
   " within a mode, so the pooled association is the group difference rather ",
-  "than a gradient. ", n_coherent_families, " marker famil",
-  if (n_coherent_families == 1) "y moves" else "ies move",
-  " coherently across the separation. Verdict: ", combined_verdict, ". ",
+  "than a gradient. ", n_coherent_families, " of ", n_testable,
+  " testable marker famil",
+  if (n_coherent_families == 1) "ies moves" else "ies move",
+  " coherently across the separation",
+  if (opposite_directions)
+    ", and the oocyte and general germline programmes move in opposite directions along it, which a technical difference between libraries would not produce"
+  else "",
+  ". Verdict: ", combined_verdict, ". ",
   "**Per library:** ",
   if (any_within_continuum) {
     paste0(sum(perlib_summary$continuum_supported), " of ", nrow(perlib_summary),
@@ -860,6 +1116,17 @@ cat(paste0(
            "single collection, where batch cannot contribute, these cells do ",
            "not resolve into an ordered progression, so the structure in the ",
            "combined analysis is between the stages rather than within them.")
+  },
+  if (!female_available) "" else if (fem_opposite) {
+    paste0(" In the Female library alone, the oocyte and general germline ",
+           "programmes move in opposite directions along the internal axis, ",
+           "so oogonia and oocytes coexist in that sample and are ordered ",
+           "within it. That result carries no confound at all, since batch, ",
+           "animal, collection date and sex are constant.")
+  } else {
+    paste0(" In the Female library alone the two programmes do not separate, ",
+           "so the early to late transition seen in the combined analysis is ",
+           "between the stages rather than within the transformer sample.")
   }))
 ```
 
