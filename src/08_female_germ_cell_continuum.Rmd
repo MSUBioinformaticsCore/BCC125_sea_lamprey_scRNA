@@ -231,6 +231,37 @@ safe_p = function(x, y) {
   suppressWarnings(cor.test(x, y, method = "spearman")$p.value)
 }
 
+# partial Spearman: rank everything, regress the controls out of both sides,
+# then correlate the residuals
+partial_rho = function(x, y, Z) {
+  Z  = as.data.frame(Z)
+  ok = stats::complete.cases(x, y, Z)
+  if (sum(ok) < 10) return(NA_real_)
+  xr = rank(x[ok]); yr = rank(y[ok])
+  if (length(unique(xr)) < 2 || length(unique(yr)) < 2) return(NA_real_)
+  Zr = as.data.frame(lapply(Z[ok, , drop = FALSE], rank))
+  if (any(vapply(Zr, function(z) length(unique(z)) < 2, logical(1)))) return(NA_real_)
+  rx = stats::residuals(stats::lm(xr ~ ., data = Zr))
+  ry = stats::residuals(stats::lm(yr ~ ., data = Zr))
+  suppressWarnings(stats::cor(rx, ry))
+}
+
+# per-marker partial correlations against an axis, controlling for depth
+partial_trends = function(expr_long, cdb, axis_col = "DC1",
+                          controls = c("sum", "detected")) {
+  ctrl = intersect(controls, colnames(cdb))
+  if (length(ctrl) == 0) return(NULL)
+  j = expr_long %>%
+    left_join(cdb %>% dplyr::select(barcode, all_of(axis_col), all_of(ctrl)),
+              by = "barcode")
+  do.call(rbind, lapply(split(j, j$symbol), function(d) {
+    data.frame(symbol = d$symbol[1],
+               rho_partial = partial_rho(d[[axis_col]], d$logexpr,
+                                         d[, ctrl, drop = FALSE]),
+               stringsAsFactors = FALSE)
+  }))
+}
+
 embed_cells = function(sce, n_hvg = 2000, n_pc = 30, n_dc_from = 15, block = NULL) {
   dec  = modelGeneVar(sce, block = block)
   hvgs = getTopHVGs(dec, n = min(n_hvg, nrow(sce) - 1))
@@ -843,6 +874,9 @@ perlib_summary = bind_rows(lapply(names(perlib), function(b) {
   el = marker_expression(sce_b, resolved)
   tt = trend_table(el, cdb %>% dplyr::select(barcode, DC1), "DC1")
 
+  pt = partial_trends(el, cdb)
+  if (!is.null(pt)) tt = tt %>% left_join(pt, by = "symbol")
+
   fam = tt %>% filter(!is.na(rho)) %>% group_by(family) %>%
     summarize(n_genes = dplyr::n(),
               pct_same_sign = 100 * max(sum(rho > 0), sum(rho < 0)) / dplyr::n(),
@@ -856,12 +890,18 @@ perlib_summary = bind_rows(lapply(names(perlib), function(b) {
     percentVar_PC1   = e$percentVar[1],
     max_tech_rho     = tech_max,
     n_directional    = sum(tt$direction %in% c("increases", "decreases")),
+    n_directional_partial = if ("rho_partial" %in% colnames(tt))
+      sum(abs(tt$rho_partial) >= 0.3, na.rm = TRUE) else NA_integer_,
     n_markers_tested = nrow(tt),
     n_coherent_fam   = sum(fam$coherent, na.rm = TRUE),
     stringsAsFactors = FALSE)
 })) %>%
-  mutate(technical_confound = max_tech_rho >= 0.4,
-         continuum_supported = !technical_confound & n_directional >= 3)
+  mutate(technical_confound  = max_tech_rho >= 0.4,
+         # partialling out a covariate that already explains most of the axis
+         # leaves little to correlate with, so the partial figure is only
+         # informative when the axis is not near-collinear with depth
+         partial_reliable    = max_tech_rho < 0.6,
+         continuum_supported = !technical_confound & n_directional_partial >= 3)
 
 write.csv(perlib_summary,
           file = paste0(results_dir, "/SuppTable_perlibrary_summary.csv"),
@@ -871,20 +911,41 @@ datatable(perlib_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
           rownames = FALSE)
 ```
 
+Marker counts are given twice. The raw count is the number of markers
+correlating with DC1. The partial count is the number still correlating once
+`sum` and `detected` are regressed out of both sides. Where DC1 is itself
+detection rate, nearly every gene will pass the raw test, because expression
+correlates with depth for almost all genes, so only the partial count carries
+information.
+
+The partial count has its own limit: regressing out a covariate that already
+explains most of the axis leaves little variance to work with, so when the
+technical correlation is high the partial figure is underpowered and a collapse
+to zero is expected whether or not biology is present. `partial_reliable` marks
+where it can be trusted.
+
 ```{r, results="asis"}
 for (i in seq_len(nrow(perlib_summary))) {
   r = perlib_summary[i, ]
   cat("**", r$library, "** (", r$n_cells, " cells): PC1 explains ",
       round(r$percentVar_PC1, 1), "% of variance; strongest DC1 to technical ",
       "covariate correlation ", round(r$max_tech_rho, 2), "; ", r$n_directional,
-      " of ", r$n_markers_tested, " markers monotonic; ", r$n_coherent_fam,
-      " coherent marker famil", if (r$n_coherent_fam == 1) "y" else "ies", ". ",
-      if (r$technical_confound) {
-        "Within this single library, where batch cannot contribute, the leading component still tracks detection rate, so it is technical and no ordering should be built on it."
+      " of ", r$n_markers_tested, " markers monotonic, ",
+      r$n_directional_partial, " surviving control for depth; ",
+      r$n_coherent_fam, " coherent marker famil",
+      if (r$n_coherent_fam == 1) "y" else "ies", ". ",
+      if (r$technical_confound && !r$partial_reliable) {
+        paste0("Within this single library, where batch cannot contribute, the leading component is detection rate. The raw marker count is therefore not evidence of biology: expression correlates with depth for almost every gene, so markers correlating with a depth axis is guaranteed. The partial count cannot settle it either, because DC1 and depth are near-collinear here and partialling one out of the other leaves too little signal to test. The honest reading is that this library offers no usable axis, which is also what a homogeneous population would produce, since with no biological variance to structure the embedding depth takes over.")
+      } else if (r$technical_confound) {
+        paste0("The leading component tracks detection rate, so the raw marker count reflects depth rather than biology. ",
+               if (r$n_directional_partial >= 3)
+                 "Some markers survive control for depth, so there may be biological structure underneath the technical gradient worth extracting."
+               else
+                 "No markers survive control for depth, so there is no biological structure underneath the technical gradient.")
       } else if (r$continuum_supported) {
-        "Within this single library the leading component is not technical and markers vary monotonically along it, which supports a maturation gradient inside this stage."
+        "Within this single library the leading component is not technical, and markers vary monotonically along it after controlling for depth, which supports a maturation gradient inside this stage."
       } else {
-        "The leading component is not technical, but markers do not vary monotonically along it, so there is no evidence of a gradient within this library."
+        "The leading component is not technical, but markers do not vary monotonically along it once depth is controlled, so there is no evidence of a gradient within this library."
       },
       "\n\n", sep = "")
 }
@@ -967,14 +1028,23 @@ if (female_available) {
   expr_f   = marker_expression(sce_f, resolved)
   trends_f = trend_table(expr_f, cdf %>% dplyr::select(barcode, DC1), "DC1")
 
+  pt_f = partial_trends(expr_f, cdf)
+  if (!is.null(pt_f)) trends_f = trends_f %>% left_join(pt_f, by = "symbol")
+
   write.csv(trends_f,
             file = paste0(results_dir, "/SuppTable_marker_trends_female.csv"),
             row.names = FALSE)
 
   datatable(trends_f %>% mutate(across(where(is.numeric), ~signif(., 3))),
             filter = "top", rownames = FALSE)
+
+  n_dir_f_raw     = sum(trends_f$direction %in% c("increases", "decreases"))
+  n_dir_f_partial = if ("rho_partial" %in% colnames(trends_f))
+    sum(abs(trends_f$rho_partial) >= 0.3, na.rm = TRUE) else NA_integer_
 }
 ```
+
+`r if (female_available) paste0("In this library, ", n_dir_f_raw, " markers correlate with DC1 and ", n_dir_f_partial, " still do after regressing out sum and detected. With the technical correlation at ", round(fem_tech_max, 2), ", DC1 and depth are far from collinear here, so the partial figure is well powered and can be read at face value.") else ""`
 
 ```{r}
 if (female_available) {
