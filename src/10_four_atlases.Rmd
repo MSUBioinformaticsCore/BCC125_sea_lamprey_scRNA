@@ -1,0 +1,833 @@
+---
+title: "10_four_atlases"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(RColorBrewer)
+library(readxl)
+library(batchelor)
+library(DT)
+library(rtracklayer)
+library(BiocSingular)
+library(pheatmap)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir     = paste0(params$project_dir, "/results/20260812_four_atlases")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+data_dir        = paste0(params$project_dir, "/data")
+
+# doublet-filtered per-sample objects, produced by
+# 01_all_cells_clustering_annotation_no_doublets.Rmd
+no_dbl_dir = paste0(params$project_dir, "/results/20260803_no_doublets")
+```
+
+# Purpose
+
+Four atlases are built from the doublet-filtered cells, clustered independently,
+and then compared to establish which populations are shared between them.
+
+| atlas | libraries | stage | correction |
+| --- | --- | --- | --- |
+| Larva | UND1, UND2 | larva | none |
+| Transformer | TF, TM | transformer | `fastMNN` |
+| Female | TF | transformer | none, single library |
+| Male | TM | transformer | none, single library |
+
+Building the stages separately removes the reason the integrated atlas was
+contested. Nothing here requires a correction to span the stage boundary,
+because no atlas spans it.
+
+## Design decisions, and what they cost
+
+**The larval atlas is not corrected.** UND1 and UND2 interleave at 0.9 to 1.0
+uncorrected in every cell type, so there is no batch effect to remove and
+applying `fastMNN` would only risk removing real structure. `use_mnn` is a
+parameter of the atlas builder, so this can be flipped and rerun if the mixing
+diagnostic below disagrees.
+
+**The transformer atlas is corrected, and this is the one place a correction
+carries risk.** `fastMNN` assumes the libraries being merged share cell
+populations. TF and TM do not fully: oocytes exist only in TF and spermatocytes
+only in TM. Mutual nearest neighbor pairs cannot exist for a population with no
+counterpart, and forcing an alignment between unmatched populations is exactly
+how a correction manufactures a cluster that is not real.
+
+The male and female atlases are the control for this. They contain the same
+cells, uncorrected and unmerged, so a transformer cluster that fuses a
+male-only and a female-only population will have no reciprocal match in either.
+Section 5 reports that comparison directly, and it is the check to read first.
+
+**Male and female cells are subsets of the transformer atlas.** Those three
+comparisons therefore share cells and are not independent evidence. They
+measure whether the integration preserved the within-library structure. Only
+comparisons involving the larval atlas are between disjoint sets of cells, and
+only those speak to whether a population recurs across animals and stages.
+
+**Cross-atlas comparison is rank based throughout.** Normalization is computed
+within each atlas, so absolute expression is not comparable between atlases.
+Spearman correlation of cluster centroids and `SingleR`, which also ranks
+within cell, are both invariant to that. No cross-atlas claim below rests on a
+difference in absolute level.
+
+# Load the doublet-filtered samples
+
+```{r}
+all.sce = readRDS(paste0(no_dbl_dir, "/all.sce.Rds"))
+
+library_meta = data.frame(
+  batch   = c("UND1_C00004336", "UND2_C00004362", "TF_C00004337", "TM_C00004374"),
+  library = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male"),
+  stage   = c("larva", "larva", "transformer", "transformer"),
+  stringsAsFactors = FALSE)
+
+observed   = sort(names(all.sce))
+unexpected = setdiff(observed, library_meta$batch)
+missing    = setdiff(library_meta$batch, observed)
+```
+
+* Samples present: `r paste(observed, collapse = ", ")`
+* In the objects but not in the mapping: `r if (length(unexpected) > 0) paste(unexpected, collapse = ", ") else "none"`
+* In the mapping but not in the objects: `r if (length(missing) > 0) paste(missing, collapse = ", ") else "none"`
+
+```{r}
+if (length(unexpected) > 0 || length(missing) > 0) {
+  stop("Sample identifiers do not match library_meta. Resolve before proceeding ",
+       "rather than silently dropping cells.")
+}
+
+atlas_def = list(
+  Larva       = list(batches = c("UND1_C00004336", "UND2_C00004362"), use_mnn = FALSE),
+  Transformer = list(batches = c("TF_C00004337", "TM_C00004374"),     use_mnn = TRUE),
+  Female      = list(batches = "TF_C00004337",                        use_mnn = FALSE),
+  Male        = list(batches = "TM_C00004374",                        use_mnn = FALSE)
+)
+
+datatable(library_meta, rownames = FALSE)
+```
+
+# 1. Build the four atlases
+
+Each atlas is normalized across its own libraries with `multiBatchNorm`, so
+expression is comparable within an atlas. Highly variable genes are selected on
+the combined variance model. Clustering is Louvain on a shared nearest neighbor
+graph with `k = 30`, matching `01`, so cluster granularity is comparable to the
+existing analysis.
+
+Two objects are kept per atlas: the clustering object, which for a corrected
+atlas holds the `fastMNN` output, and an uncorrected expression object holding
+`logcounts` for every gene. All quantification below uses the second.
+
+```{r}
+build_atlas = function(sce_list, batches, use_mnn, seed = 1, k = 30,
+                       n_hvg = 5000) {
+
+  sub      = sce_list[batches]
+  universe = Reduce(intersect, lapply(sub, rownames))
+  sub      = lapply(sub, "[", i = universe, )
+
+  # strip per-sample extras so cbind does not depend on which sample carries
+  # which optional colData field
+  sub = lapply(sub, function(x) {
+    colData(x)     = colData(x)[, "sample", drop = FALSE]
+    reducedDims(x) = list()
+    rowData(x)     = rowData(x)[, character(0)]
+    x
+  })
+
+  dec = lapply(sub, modelGeneVar)
+
+  if (length(sub) > 1) {
+    normed = do.call(multiBatchNorm, sub)
+    hvg    = getTopHVGs(do.call(combineVar, dec), n = n_hvg)
+  } else {
+    normed = sub
+    hvg    = getTopHVGs(dec[[1]], n = n_hvg)
+  }
+
+  expr        = do.call(cbind, normed)
+  expr$batch  = expr$sample
+
+  if (use_mnn && length(normed) > 1) {
+    set.seed(seed)
+    clust = do.call(fastMNN, c(normed,
+              list(subset.row = hvg, BSPARAM = RandomParam())))
+    dimred = "corrected"
+  } else {
+    set.seed(seed)
+    clust  = runPCA(expr, subset_row = hvg, ncomponents = 50,
+                    BSPARAM = RandomParam())
+    dimred = "PCA"
+  }
+
+  # cbind preserves order, so the two objects stay aligned. Assert it anyway.
+  stopifnot(identical(colnames(clust), colnames(expr)))
+
+  set.seed(seed)
+  g = buildSNNGraph(clust, use.dimred = dimred, k = k)
+  set.seed(seed)
+  colLabels(clust) = factor(igraph::cluster_louvain(g)$membership)
+
+  set.seed(seed)
+  clust = runTSNE(clust, dimred = dimred)
+  set.seed(seed)
+  clust = runUMAP(clust, dimred = dimred)
+
+  clust$batch  = expr$batch
+  expr$label   = clust$label
+
+  list(clust = clust, expr = expr, dimred = dimred, hvg = hvg,
+       corrected = use_mnn && length(normed) > 1)
+}
+
+# cache; the chunk that computes also writes, so a rerun never deadlocks
+atlas_file = paste0(Robject_out_dir, "/atlases.Rds")
+
+if (file.exists(atlas_file)) {
+  atlases = readRDS(atlas_file)
+} else {
+  atlases = lapply(names(atlas_def), function(nm) {
+    build_atlas(all.sce,
+                batches = atlas_def[[nm]]$batches,
+                use_mnn = atlas_def[[nm]]$use_mnn)
+  })
+  names(atlases) = names(atlas_def)
+  saveRDS(atlases, file = atlas_file)
+}
+
+atlas_names = names(atlases)
+```
+
+```{r}
+atlas_summary = purrr::map_dfr(atlas_names, function(nm) {
+  a = atlases[[nm]]
+  data.frame(atlas      = nm,
+             libraries  = paste(atlas_def[[nm]]$batches, collapse = ", "),
+             corrected  = a$corrected,
+             nCells     = ncol(a$clust),
+             nClusters  = nlevels(a$clust$label),
+             nHVG       = length(a$hvg))
+})
+
+write.csv(atlas_summary, file = paste0(results_dir, "/atlas_summary.csv"),
+          row.names = FALSE)
+datatable(atlas_summary, rownames = FALSE)
+```
+
+## Cluster composition by library
+
+For the two multi-library atlases, a cluster drawn overwhelmingly from one
+library is either a genuinely library-restricted population or a failure of the
+merge. For the transformer atlas the distinction is the whole question, and it
+is resolved in section 5, not here.
+
+```{r, fig.width=9, fig.height=4}
+comp_df = purrr::map_dfr(atlas_names, function(nm) {
+  as.data.frame(colData(atlases[[nm]]$clust)) %>%
+    dplyr::count(label, batch, name = "n") %>%
+    mutate(atlas = nm)
+}) %>%
+  left_join(library_meta %>% dplyr::select(batch, library), by = "batch")
+
+write.csv(comp_df, file = paste0(results_dir, "/cells_per_cluster_per_library.csv"),
+          row.names = FALSE)
+
+ggplot(comp_df %>% filter(atlas %in% c("Larva", "Transformer")),
+       aes(fill = library, y = label, x = n)) +
+  geom_bar(position = "fill", stat = "identity") +
+  facet_wrap(~ atlas, scales = "free_y") +
+  xlab("Proportion of cells") + ylab("Cluster")
+
+ggsave(file = paste0(results_dir, "/cluster_composition_by_library.png"),
+       width = 9, height = 4)
+```
+
+```{r}
+datatable(comp_df %>%
+            tidyr::pivot_wider(id_cols = c(atlas, label),
+                               names_from = library, values_from = n,
+                               values_fill = 0),
+          filter = "top", rownames = FALSE)
+```
+
+## Embeddings
+
+```{r, fig.width=11, fig.height=10}
+p = lapply(atlas_names, function(nm) {
+  plotTSNE(atlases[[nm]]$clust, colour_by = "label", text_by = "label",
+           text_colour = "red", point_size = .05) +
+    ggtitle(paste0(nm, if (atlases[[nm]]$corrected) " (fastMNN)" else " (uncorrected)")) +
+    guides(color = guide_legend(override.aes = list(size = 4)))
+})
+wrap_plots(p, ncol = 2)
+
+ggsave(file = paste0(results_dir, "/four_atlas_tsne.png"), width = 11, height = 10)
+```
+
+# 2. Marker genes per atlas
+
+Markers are computed within each atlas, blocked on library where an atlas has
+more than one, so no marker result depends on the correction. Ordering is set
+explicitly by FDR then p-value rather than relying on the order `findMarkers`
+returns, and the per-gene effect size is the mean across the pairwise
+`logFC.*` columns. `summary.logFC` is not used: under `pval.type = "some"` it
+comes from whichever pairwise comparison supplied the summary p-value, which
+varies per gene and per run.
+
+```{r}
+marker_effect = function(df) {
+  lf = grep("^logFC\\.", colnames(df), value = TRUE)
+  if (length(lf) == 0) return(rep(NA_real_, nrow(df)))
+  rowMeans(as.matrix(as.data.frame(df[, lf, drop = FALSE])), na.rm = TRUE)
+}
+
+marker_file = paste0(Robject_out_dir, "/atlas_markers.Rds")
+
+if (file.exists(marker_file)) {
+  atlas_markers = readRDS(marker_file)
+} else {
+  atlas_markers = lapply(atlas_names, function(nm) {
+    e     = atlases[[nm]]$expr
+    blk   = if (length(unique(e$batch)) > 1) e$batch else NULL
+    fm    = findMarkers(e, e$label, test.type = "t", block = blk,
+                        direction = "up", pval.type = "some")
+    lapply(fm, function(df) {
+      df$meanLogFC = marker_effect(df)
+      df[order(df$FDR, df$p.value), ]
+    })
+  })
+  names(atlas_markers) = atlas_names
+  saveRDS(atlas_markers, file = marker_file)
+}
+
+top_markers = function(nm, lab, n = 100) {
+  df = atlas_markers[[nm]][[as.character(lab)]]
+  if (is.null(df) || nrow(df) == 0) return(character(0))
+  rownames(df)[seq_len(min(n, nrow(df)))]
+}
+```
+
+```{r}
+marker_tbl = purrr::map_dfr(atlas_names, function(nm) {
+  purrr::map_dfr(names(atlas_markers[[nm]]), function(lab) {
+    df = as.data.frame(atlas_markers[[nm]][[lab]])
+    df$Gene = rownames(df)
+    df %>%
+      filter(FDR < .01) %>%
+      dplyr::select(Gene, p.value, FDR, meanLogFC) %>%
+      mutate(atlas = nm, cluster = lab)
+  })
+})
+
+write.csv(marker_tbl, file = paste0(results_dir, "/atlas_cluster_markers.csv"),
+          row.names = FALSE)
+
+datatable(marker_tbl %>% group_by(atlas, cluster) %>% slice_head(n = 20),
+          filter = "top", rownames = FALSE)
+```
+
+## Overlap with curated cell type markers
+
+The hypergeometric overlap from `01`, run once per atlas: rows are curated cell
+types, columns are that atlas's clusters, color is the overlap significance and
+the number in each tile is the count of shared genes.
+
+The curated list is `canonical_markers_long_2026-08-12.csv`, the repaired long
+form, not the S1 sheet. Three of the four erythrocyte entries and the oocyte
+`ZAR1` entry in S1 resolve against nothing, so a heatmap built on S1 silently
+tests fewer genes than it reports.
+
+Two cautions on reading these. The overlap is against each cluster's top 100
+enriched genes, so it measures relative enrichment, not expression; the bubble
+plots below measure expression and the two can disagree. And **the four
+heatmaps are not comparable to each other**: a cluster competing against 11
+others yields a different marker list than one competing against 15, so overlap
+counts are biased by cluster number. Compare rows within a heatmap, not tiles
+between heatmaps.
+
+```{r}
+gene_description = read.csv(paste0(no_dbl_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE)
+
+canonical = read.csv(paste0(data_dir, "/canonical_markers_long_2026-08-12.csv"),
+                     stringsAsFactors = FALSE) %>%
+  mutate(symbol = trimws(symbol), loc_id = trimws(loc_id)) %>%
+  filter(symbol != "")
+
+known_markers = canonical %>%
+  dplyr::select(Gene = loc_id, CellType = CellTypeMarkerSet) %>%
+  distinct()
+
+datatable(canonical %>% dplyr::count(CellTypeMarkerSet, name = "n_markers"),
+          rownames = FALSE)
+```
+
+```{r, fig.width=8, fig.height=6, results="asis"}
+overlap_plots = list()
+
+for (nm in atlas_names) {
+  test_genes = marker_tbl %>%
+    filter(atlas == nm) %>%
+    group_by(cluster) %>%
+    slice_head(n = 100) %>%
+    ungroup() %>%
+    dplyr::select(Gene, cluster) %>%
+    mutate(cluster = paste0("cluster", cluster))
+
+  # nrow is the gene universe the hypergeometric needs, stated explicitly
+  overlap_plots[[nm]] = plot_marker_overlap_heatmap(
+    known_markers    = known_markers,
+    test_genes       = as.data.frame(test_genes),
+    background_n     = nrow(atlases[[nm]]$expr),
+    gene_description = gene_description,
+    overlaps_file    = paste0(results_dir, "/", nm, "_marker_gene_overlaps.csv"),
+    pvals_file       = paste0(results_dir, "/", nm, "_marker_overlap_pvalues.csv"),
+    plot_file        = paste0(results_dir, "/", nm, "_marker_overlap_heatmap.png"))
+}
+```
+
+```{r, fig.width=8, fig.height=5}
+overlap_plots[["Larva"]] + ggtitle("Larva")
+```
+
+```{r, fig.width=8, fig.height=5}
+overlap_plots[["Transformer"]] + ggtitle("Transformer")
+```
+
+```{r, fig.width=8, fig.height=5}
+overlap_plots[["Female"]] + ggtitle("Female")
+```
+
+```{r, fig.width=8, fig.height=5}
+overlap_plots[["Male"]] + ggtitle("Male")
+```
+
+## Canonical marker expression per cluster
+
+The same curated genes measured as expression rather than enrichment, in the
+style of the dot plot in `06`. Dot size is the percentage of cells in the
+cluster expressing the gene and color is the mean log expression, computed on
+uncorrected values within each atlas.
+
+This is the plot to annotate from. A cluster that scores a significant overlap
+above but shows no expression here is enriched for a marker it barely
+transcribes, which is how cluster 7 in the original analysis came to be called
+germline.
+
+```{r}
+canon_bubble = function(nm) {
+  e   = atlases[[nm]]$expr
+  ids = intersect(unique(canonical$loc_id), rownames(e))
+  if (length(ids) == 0) return(NULL)
+
+  m   = as.matrix(logcounts(e)[ids, , drop = FALSE])
+  lab = as.character(e$label)
+
+  purrr::map_dfr(sort(unique(lab)), function(k) {
+    sub = m[, lab == k, drop = FALSE]
+    data.frame(atlas          = nm,
+               cluster        = k,
+               loc_id         = ids,
+               n_cells        = ncol(sub),
+               pct_expressing = 100 * rowMeans(sub > 0),
+               mean_logexpr   = rowMeans(sub),
+               stringsAsFactors = FALSE)
+  }) %>%
+    left_join(canonical, by = "loc_id", relationship = "many-to-many")
+}
+
+bubble_df = purrr::map_dfr(atlas_names, canon_bubble) %>%
+  mutate(cluster = factor(cluster, levels = sort(unique(as.numeric(cluster)))))
+
+write.csv(bubble_df,
+          file = paste0(results_dir, "/canonical_marker_expression_per_cluster.csv"),
+          row.names = FALSE)
+```
+
+```{r}
+plot_bubble = function(nm) {
+  ggplot(bubble_df %>% filter(atlas == nm),
+         aes(x = cluster, y = symbol,
+             size = pct_expressing, color = mean_logexpr)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    scale_size_continuous(range = c(0.5, 5)) +
+    facet_grid(CellTypeMarkerSet ~ ., scales = "free_y", space = "free_y") +
+    theme(strip.text.y = element_text(angle = 0, size = 6),
+          axis.text.y  = element_text(size = 6),
+          axis.text.x  = element_text(size = 7)) +
+    xlab("Cluster") + ylab(NULL) + ggtitle(nm) +
+    labs(size = "% expressing", color = "mean logexpr")
+}
+
+for (nm in atlas_names) {
+  ggsave(plot_bubble(nm),
+         file   = paste0(results_dir, "/", nm, "_canonical_marker_bubble.png"),
+         width  = 9, height = 11)
+}
+```
+
+```{r, fig.width=9, fig.height=11}
+plot_bubble("Larva")
+```
+
+```{r, fig.width=9, fig.height=11}
+plot_bubble("Transformer")
+```
+
+```{r, fig.width=9, fig.height=11}
+plot_bubble("Female")
+```
+
+```{r, fig.width=9, fig.height=11}
+plot_bubble("Male")
+```
+
+# 3. Cluster centroid correlation
+
+The first of two comparison methods. Cluster centroids are averaged
+`logcounts` over genes shared by both atlases and variable in either, and
+compared by Spearman correlation, which is invariant to the per-atlas
+normalization.
+
+A correlation is meaningless without a reference, so two are computed the same
+way. The **ceiling** is each cluster against itself across a random split of
+its own atlas into halves, which is the best agreement achievable given
+sampling noise. The **floor** is the distribution of correlations between
+non-matching cluster pairs.
+
+```{r}
+centroids_for = function(nm, genes, cells = NULL) {
+  e = atlases[[nm]]$expr
+  if (!is.null(cells)) e = e[, cells]
+  # summarizeAssayByGroup keeps the matrix sparse, which matters at 5000 genes
+  # by tens of thousands of cells. It returns genes by groups.
+  agg = scuttle::summarizeAssayByGroup(logcounts(e)[genes, , drop = FALSE],
+                                       ids = droplevels(factor(e$label)),
+                                       statistics = "mean")
+  as.matrix(SummarizedExperiment::assay(agg, "mean"))
+}
+
+shared_genes = function(a, b) {
+  g = intersect(rownames(atlases[[a]]$expr), rownames(atlases[[b]]$expr))
+  v = union(atlases[[a]]$hvg, atlases[[b]]$hvg)
+  intersect(g, v)
+}
+
+cor_matrix = function(a, b) {
+  g  = shared_genes(a, b)
+  ca = centroids_for(a, g)
+  cb = centroids_for(b, g)
+  m  = cor(ca, cb, method = "spearman")
+  dimnames(m) = list(colnames(ca), colnames(cb))
+  m
+}
+
+atlas_pairs = t(combn(atlas_names, 2))
+cor_list = setNames(
+  lapply(seq_len(nrow(atlas_pairs)), function(i)
+    cor_matrix(atlas_pairs[i, 1], atlas_pairs[i, 2])),
+  paste(atlas_pairs[, 1], atlas_pairs[, 2], sep = " vs "))
+```
+
+```{r}
+# ceiling: each cluster against itself across a random half split
+set.seed(1)
+self_ceiling = purrr::map_dfr(atlas_names, function(nm) {
+  e     = atlases[[nm]]$expr
+  g     = intersect(rownames(e), atlases[[nm]]$hvg)
+  half  = sample(c(TRUE, FALSE), ncol(e), replace = TRUE)
+
+  keep = names(which(table(e$label[half]) >= 10 & table(e$label[!half]) >= 10))
+  if (length(keep) == 0)
+    return(data.frame(atlas = nm, cluster = NA_character_, rho = NA_real_))
+
+  c1 = centroids_for(nm, g, cells = which(half))
+  c2 = centroids_for(nm, g, cells = which(!half))
+  keep = intersect(keep, intersect(colnames(c1), colnames(c2)))
+
+  data.frame(atlas = nm, cluster = keep,
+             rho = vapply(keep, function(k)
+               cor(c1[, k], c2[, k], method = "spearman"), numeric(1)))
+})
+
+ceiling_med = median(self_ceiling$rho, na.rm = TRUE)
+```
+
+Median within-atlas split-half correlation, the ceiling: **`r round(ceiling_med, 3)`**.
+
+```{r, fig.width=10, fig.height=8}
+for (nm in names(cor_list)) {
+  pheatmap(cor_list[[nm]], main = nm, fontsize = 8,
+           color = colorRampPalette(rev(brewer.pal(9, "RdYlBu")))(50),
+           filename = paste0(results_dir, "/centroid_cor_",
+                             gsub(" ", "_", nm), ".png"),
+           width = 7, height = 6)
+}
+
+pheatmap(cor_list[["Larva vs Transformer"]],
+         main = "Larva vs Transformer, centroid Spearman", fontsize = 8,
+         color = colorRampPalette(rev(brewer.pal(9, "RdYlBu")))(50))
+```
+
+# 4. Label transfer
+
+The second method, and independent of the first. `SingleR` is trained on one
+atlas's clusters and used to classify the other atlas's cells, in both
+directions. The reference is downsampled to at most 500 cells per cluster so
+that large clusters do not dominate.
+
+A cluster pair is called a **reciprocal best match** when each is the other's
+most frequently assigned label. A one-directional match is reported but is
+weaker: a small cluster can be the best match for a large one without the
+reverse holding.
+
+```{r}
+have_singler = requireNamespace("SingleR", quietly = TRUE)
+```
+
+`r if (have_singler) "SingleR is available; label transfer runs below." else "**SingleR is not installed, so this section is skipped.** Install it with BiocManager::install('SingleR') and rerun. The centroid correlation in section 3 and the marker overlap in section 6 do not depend on it, so the document still produces a comparison without it, on two methods rather than three."`
+
+```{r, eval=have_singler}
+downsample_ref = function(nm, max_per = 500) {
+  e = atlases[[nm]]$expr
+  set.seed(1)
+  idx = unlist(lapply(split(seq_len(ncol(e)), e$label), function(i)
+    if (length(i) > max_per) sample(i, max_per) else i))
+  e[, sort(idx)]
+}
+
+transfer_file = paste0(Robject_out_dir, "/label_transfer.Rds")
+
+if (file.exists(transfer_file)) {
+  transfer = readRDS(transfer_file)
+} else {
+  transfer = list()
+  for (i in seq_len(nrow(atlas_pairs))) {
+    a = atlas_pairs[i, 1]; b = atlas_pairs[i, 2]
+    g = intersect(rownames(atlases[[a]]$expr), rownames(atlases[[b]]$expr))
+
+    ref_a = downsample_ref(a); ref_b = downsample_ref(b)
+
+    # the assay types are named explicitly: these objects carry counts as the
+    # first assay, so relying on positional defaults would classify on raw
+    # counts without erroring
+    pred_ab = SingleR::SingleR(test = atlases[[b]]$expr[g, ],
+                               ref  = ref_a[g, ],
+                               labels = ref_a$label, de.method = "wilcox",
+                               assay.type.test = "logcounts",
+                               assay.type.ref  = "logcounts")
+    pred_ba = SingleR::SingleR(test = atlases[[a]]$expr[g, ],
+                               ref  = ref_b[g, ],
+                               labels = ref_b$label, de.method = "wilcox",
+                               assay.type.test = "logcounts",
+                               assay.type.ref  = "logcounts")
+
+    transfer[[paste(a, b, sep = " vs ")]] =
+      list(a = a, b = b,
+           ab = data.frame(target = as.character(atlases[[b]]$expr$label),
+                           predicted = pred_ab$labels),
+           ba = data.frame(target = as.character(atlases[[a]]$expr$label),
+                           predicted = pred_ba$labels))
+  }
+  saveRDS(transfer, file = transfer_file)
+}
+```
+
+```{r, eval=have_singler}
+best_match = function(df) {
+  df %>%
+    dplyr::count(target, predicted, name = "n") %>%
+    group_by(target) %>%
+    mutate(frac = n / sum(n)) %>%
+    slice_max(n, n = 1, with_ties = FALSE) %>%
+    ungroup()
+}
+
+reciprocal = purrr::map_dfr(names(transfer), function(nm) {
+  tr = transfer[[nm]]
+  m_ab = best_match(tr$ab) %>%
+    dplyr::rename(b_cluster = target, a_best = predicted,
+                  n_ab = n, frac_ab = frac)
+  m_ba = best_match(tr$ba) %>%
+    dplyr::rename(a_cluster = target, b_best = predicted,
+                  n_ba = n, frac_ba = frac)
+
+  m_ab %>%
+    inner_join(m_ba, by = c("b_cluster" = "b_best", "a_best" = "a_cluster")) %>%
+    mutate(pair = nm, atlas_a = tr$a, atlas_b = tr$b) %>%
+    dplyr::rename(a_cluster = a_best) %>%
+    dplyr::select(pair, atlas_a, a_cluster, atlas_b, b_cluster,
+                  frac_ab, frac_ba)
+})
+
+write.csv(reciprocal,
+          file = paste0(results_dir, "/reciprocal_best_matches.csv"),
+          row.names = FALSE)
+
+datatable(reciprocal %>% mutate(across(where(is.numeric), ~round(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+# 5. Did the transformer correction invent anything?
+
+The check to read first. Every transformer cluster is compared to the male and
+female atlases, which contain the same cells with no correction applied.
+
+A transformer cluster is **supported** when it has a reciprocal best match in
+the male atlas, the female atlas, or both. A transformer cluster with no
+reciprocal match in either, despite being built from exactly those cells, is a
+candidate artifact of the merge: `fastMNN` grouped cells that neither library
+groups on its own.
+
+The converse is also reported. A male or female cluster that survives into the
+transformer atlas is a population the correction preserved; one that does not
+was dissolved by it.
+
+```{r, eval=have_singler}
+tr_support = reciprocal %>%
+  filter((atlas_a == "Transformer" & atlas_b %in% c("Male", "Female")) |
+         (atlas_b == "Transformer" & atlas_a %in% c("Male", "Female"))) %>%
+  mutate(tr_cluster  = ifelse(atlas_a == "Transformer", a_cluster, b_cluster),
+         other_atlas = ifelse(atlas_a == "Transformer", atlas_b, atlas_a),
+         other_clust = ifelse(atlas_a == "Transformer", b_cluster, a_cluster))
+
+all_tr = levels(atlases[["Transformer"]]$clust$label)
+
+tr_verdict = data.frame(tr_cluster = all_tr, stringsAsFactors = FALSE) %>%
+  left_join(tr_support %>%
+              group_by(tr_cluster) %>%
+              summarize(matched_in = paste(sort(unique(other_atlas)),
+                                           collapse = ", "),
+                        matches    = paste(paste0(other_atlas, ":", other_clust),
+                                           collapse = "; "),
+                        .groups = "drop"),
+            by = "tr_cluster") %>%
+  mutate(matched_in = ifelse(is.na(matched_in), "neither", matched_in),
+         supported  = matched_in != "neither") %>%
+  left_join(comp_df %>% filter(atlas == "Transformer") %>%
+              tidyr::pivot_wider(id_cols = label, names_from = library,
+                                 values_from = n, values_fill = 0) %>%
+              mutate(label = as.character(label)),
+            by = c("tr_cluster" = "label"))
+
+write.csv(tr_verdict,
+          file = paste0(results_dir, "/transformer_cluster_support.csv"),
+          row.names = FALSE)
+
+datatable(tr_verdict, filter = "top", rownames = FALSE)
+
+n_unsupported = sum(!tr_verdict$supported)
+```
+
+`r if (!have_singler) "Not evaluated, since SingleR is unavailable." else if (n_unsupported == 0) "**Every transformer cluster has a reciprocal match in the male atlas, the female atlas, or both.** The correction did not create a population that neither library supports on its own, so the transformer atlas can be presented as an integrated object." else paste0("**", n_unsupported, " transformer cluster(s) have no reciprocal match in either the male or the female atlas: ", paste(tr_verdict$tr_cluster[!tr_verdict$supported], collapse = ", "), ".** These are built from male and female cells but are not recovered when either library is clustered alone, which is the signature of a correction-induced grouping. Inspect their library composition in the table above: a cluster drawn from both libraries in roughly equal parts, with no counterpart in either, should not be reported as a cell population.")`
+
+# 6. Shared clusters across atlases
+
+The final table. A cluster pair is called shared when both methods agree: a
+reciprocal best match from label transfer, and a centroid correlation at or
+above the split-half ceiling reported in section 3. Requiring both means a
+pair carried by one method alone is reported but not called.
+
+```{r}
+cor_lookup = function(a, b, ca, cb) {
+  key = paste(a, b, sep = " vs ")
+  if (key %in% names(cor_list)) {
+    m = cor_list[[key]]
+    if (ca %in% rownames(m) && cb %in% colnames(m)) return(m[ca, cb])
+  }
+  key = paste(b, a, sep = " vs ")
+  if (key %in% names(cor_list)) {
+    m = cor_list[[key]]
+    if (cb %in% rownames(m) && ca %in% colnames(m)) return(m[cb, ca])
+  }
+  NA_real_
+}
+```
+
+```{r, eval=have_singler}
+shared = reciprocal %>%
+  rowwise() %>%
+  mutate(rho = cor_lookup(atlas_a, atlas_b, a_cluster, b_cluster)) %>%
+  ungroup() %>%
+  # only the transformer atlas shares cells with male and female. Female
+  # against male is between different animals and so is independent.
+  mutate(independent = !((atlas_a == "Transformer" &
+                          atlas_b %in% c("Male", "Female")) |
+                         (atlas_b == "Transformer" &
+                          atlas_a %in% c("Male", "Female"))),
+         cor_supports = !is.na(rho) & rho >= ceiling_med,
+         call = dplyr::case_when(
+           cor_supports  ~ "shared",
+           is.na(rho)    ~ "label transfer only, correlation unavailable",
+           TRUE          ~ "label transfer only, correlation below ceiling")) %>%
+  arrange(desc(independent), pair, desc(rho))
+
+write.csv(shared, file = paste0(results_dir, "/shared_clusters.csv"),
+          row.names = FALSE)
+
+datatable(shared %>% mutate(across(where(is.numeric), ~round(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+`r if (!have_singler) "Not evaluated, since SingleR is unavailable. Use the centroid correlation heatmaps in section 3 as a single-method comparison until it is installed." else paste0("Of ", nrow(shared), " reciprocal best matches, ", sum(shared$call == "shared"), " are also supported by centroid correlation and are called shared. ", sum(shared$independent), " of the reciprocal matches are between disjoint sets of cells, meaning they involve the larval atlas; the remainder involve male or female against transformer and share cells, so they measure the integration rather than replication of a population.")`
+
+## Larval populations with no transformer counterpart, and the reverse
+
+```{r, eval=have_singler}
+lt = shared %>% filter(pair == "Larva vs Transformer", call == "shared")
+
+larva_unmatched = setdiff(levels(atlases[["Larva"]]$clust$label),
+                          lt$a_cluster)
+trans_unmatched = setdiff(levels(atlases[["Transformer"]]$clust$label),
+                          lt$b_cluster)
+
+data.frame(
+  atlas   = c("Larva", "Transformer"),
+  n_total = c(nlevels(atlases[["Larva"]]$clust$label),
+              nlevels(atlases[["Transformer"]]$clust$label)),
+  n_shared = c(length(unique(lt$a_cluster)), length(unique(lt$b_cluster))),
+  unmatched = c(paste(larva_unmatched, collapse = ", "),
+                paste(trans_unmatched, collapse = ", "))) %>%
+  datatable(rownames = FALSE)
+```
+
+A cluster with no counterpart is a stage-restricted population, which is a
+result rather than a failure. Oocytes and spermatocytes should appear here on
+the transformer side, since larvae have undifferentiated gonads. A somatic
+cluster appearing here is more interesting and should be examined directly.
+
+# Session info
+
+```{r}
+sessionInfo()
+```
