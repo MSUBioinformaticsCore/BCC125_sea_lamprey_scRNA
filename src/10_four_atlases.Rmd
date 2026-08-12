@@ -398,6 +398,9 @@ known_markers = canonical %>%
   dplyr::select(Gene = loc_id, CellType = CellTypeMarkerSet) %>%
   distinct()
 
+# how many marker genes per cluster feed every overlap test in this document
+top_n_markers = 100
+
 datatable(canonical %>% dplyr::count(CellTypeMarkerSet, name = "n_markers"),
           rownames = FALSE)
 ```
@@ -409,7 +412,7 @@ for (nm in atlas_names) {
   test_genes = marker_tbl %>%
     filter(atlas == nm) %>%
     group_by(cluster) %>%
-    slice_head(n = 100) %>%
+    slice_head(n = top_n_markers) %>%
     ungroup() %>%
     dplyr::select(Gene, cluster) %>%
     mutate(cluster = paste0("cluster", cluster))
@@ -523,6 +526,42 @@ plot_bubble("Female")
 plot_bubble("Male")
 ```
 
+## Best curated cell type per cluster
+
+The single strongest overlap from the heatmaps above, one row per cluster, used to name clusters in sections 5 and 7 rather than leaving them numbered. A cluster whose best overlap misses FDR 0.05 is left `unassigned`.
+
+```{r}
+# best curated cell type per cluster, from the same overlap test as section 2,
+# so a population can be named rather than just numbered
+celltype_file = paste0(Robject_out_dir, "/cluster_celltype_calls.Rds")
+
+if (file.exists(celltype_file)) {
+  cluster_celltype = readRDS(celltype_file)
+} else {
+  cluster_celltype = purrr::map_dfr(atlas_names, function(nm) {
+    tg = marker_tbl %>%
+      filter(atlas == nm) %>%
+      group_by(cluster) %>% slice_head(n = top_n_markers) %>% ungroup() %>%
+      dplyr::select(Gene, Group = cluster) %>%
+      as.data.frame()
+
+    phyperOverlapSets(known_markers, tg, nrow(atlases[[nm]]$expr))$pval.scores %>%
+      dplyr::rename(CellType = Group1, cluster = Group2) %>%
+      mutate(FDR = p.adjust(Pval, "BH"), atlas = nm) %>%
+      group_by(cluster) %>% slice_min(FDR, n = 1, with_ties = FALSE) %>%
+      ungroup() %>%
+      mutate(CellType = ifelse(FDR < .05, as.character(CellType), "unassigned"),
+             cluster  = as.character(cluster)) %>%
+      dplyr::select(atlas, cluster, CellType, celltype_FDR = FDR, nSharedGenes)
+  })
+  saveRDS(cluster_celltype, file = celltype_file)
+}
+
+datatable(cluster_celltype %>%
+            mutate(celltype_FDR = signif(celltype_FDR, 3)),
+          filter = "top", rownames = FALSE)
+```
+
 # 3. Label transfer
 
 The first of two comparison methods. `SingleR` is trained on one
@@ -548,6 +587,17 @@ downsample_ref = function(nm, max_per = 500) {
   idx = unlist(lapply(split(seq_len(ncol(e)), e$label), function(i)
     if (length(i) > max_per) sample(i, max_per) else i))
   e[, sort(idx)]
+}
+
+# SingleR always returns a label in $labels, even when nothing in the reference
+# is a plausible match, so a population with no counterpart is silently pushed
+# onto whichever reference cluster is least dissimilar. $pruned.labels is NA
+# where the score is too low relative to the score distribution, which is the
+# honest answer for a sex-restricted population. NA is kept as an explicit
+# category rather than dropped, so it is visible in the plots.
+prune_to_char = function(pred) {
+  p = pred$pruned.labels
+  ifelse(is.na(p), "unassigned", as.character(p))
 }
 
 transfer_file = paste0(Robject_out_dir, "/label_transfer.Rds")
@@ -578,23 +628,42 @@ if (file.exists(transfer_file)) {
 
     transfer[[paste(a, b, sep = " vs ")]] =
       list(a = a, b = b,
-           ab = data.frame(target = as.character(atlases[[b]]$expr$label),
-                           predicted = pred_ab$labels),
-           ba = data.frame(target = as.character(atlases[[a]]$expr$label),
-                           predicted = pred_ba$labels))
+           ab = data.frame(target        = as.character(atlases[[b]]$expr$label),
+                           predicted     = prune_to_char(pred_ab),
+                           predicted_raw = as.character(pred_ab$labels),
+                           stringsAsFactors = FALSE),
+           ba = data.frame(target        = as.character(atlases[[a]]$expr$label),
+                           predicted     = prune_to_char(pred_ba),
+                           predicted_raw = as.character(pred_ba$labels),
+                           stringsAsFactors = FALSE))
   }
   saveRDS(transfer, file = transfer_file)
 }
 ```
 
 ```{r, eval=have_singler}
+# the best assigned label, with frac still taken over every cell in the cluster
+# including the unassigned ones. A cluster that is 90% unassigned therefore
+# reports its best match at frac 0.1, which is the honest figure. A cluster
+# that is entirely unassigned drops out and can have no reciprocal match.
 best_match = function(df) {
+  totals = df %>% dplyr::count(target, name = "n_total")
   df %>%
     dplyr::count(target, predicted, name = "n") %>%
+    left_join(totals, by = "target") %>%
+    mutate(frac = n / n_total) %>%
+    filter(predicted != "unassigned") %>%
     group_by(target) %>%
-    mutate(frac = n / sum(n)) %>%
     slice_max(n, n = 1, with_ties = FALSE) %>%
-    ungroup()
+    ungroup() %>%
+    dplyr::select(target, predicted, n, frac)
+}
+
+unassigned_frac = function(df) {
+  df %>%
+    group_by(target) %>%
+    summarize(frac_unassigned = mean(predicted == "unassigned"),
+              .groups = "drop")
 }
 
 reciprocal = purrr::map_dfr(names(transfer), function(nm) {
@@ -606,12 +675,19 @@ reciprocal = purrr::map_dfr(names(transfer), function(nm) {
     dplyr::rename(a_cluster = target, b_best = predicted,
                   n_ba = n, frac_ba = frac)
 
+  u_ab = unassigned_frac(tr$ab) %>%
+    dplyr::rename(b_cluster = target, unassigned_b = frac_unassigned)
+  u_ba = unassigned_frac(tr$ba) %>%
+    dplyr::rename(a_cluster = target, unassigned_a = frac_unassigned)
+
   m_ab %>%
     inner_join(m_ba, by = c("b_cluster" = "b_best", "a_best" = "a_cluster")) %>%
-    mutate(pair = nm, atlas_a = tr$a, atlas_b = tr$b) %>%
     dplyr::rename(a_cluster = a_best) %>%
+    left_join(u_ab, by = "b_cluster") %>%
+    left_join(u_ba, by = "a_cluster") %>%
+    mutate(pair = nm, atlas_a = tr$a, atlas_b = tr$b) %>%
     dplyr::select(pair, atlas_a, a_cluster, atlas_b, b_cluster,
-                  frac_ab, frac_ba)
+                  frac_ab, frac_ba, unassigned_a, unassigned_b)
 })
 
 write.csv(reciprocal,
@@ -628,10 +704,24 @@ The classification itself, as a heatmap. Each row is a cluster in the atlas
 being classified and each column is the label it was given. Color is the
 fraction of that cluster's cells receiving the label, so every row sums to one.
 
-This is the plainest view of the comparison and needs no floor or threshold to
-read. A row concentrated in one column is a cluster with a clear counterpart. A
-row spread across several columns is a cluster the other atlas does not
-resolve the same way.
+This is the plainest view of the comparison and needs no threshold to read. A
+row concentrated in one column is a cluster with a clear counterpart. A row
+spread across several columns is a cluster the other atlas does not resolve the
+same way.
+
+**The `unassigned` column is the one to read first.** `SingleR` returns a label
+for every cell in `$labels` whether or not the reference contains anything
+suitable, so a population with no counterpart is pushed onto whichever
+reference cluster is least dissimilar. Female germ cell clusters classified
+against a male reference have no correct answer available, and without pruning
+they pile onto one arbitrary male cluster and produce a bright column that
+looks like a strong match for several unrelated populations at once.
+
+These panels use `$pruned.labels` instead, which is `NA` where the assignment
+score is too low relative to the score distribution, and the `NA` values are
+kept as an explicit `unassigned` category. A row that is mostly unassigned is
+a population with no counterpart in the other atlas, which for a sex-restricted
+or stage-restricted cell type is the correct result rather than a failure.
 
 ```{r, eval=have_singler}
 transfer_long = purrr::map_dfr(names(transfer), function(nm) {
@@ -656,16 +746,24 @@ write.csv(transfer_long,
 ```
 
 ```{r, eval=have_singler, fig.width=11, fig.height=14}
+# numeric cluster ids sorted numerically, with "unassigned" pinned last.
+# as.numeric alone would turn it into NA and drop the column silently.
+cluster_levels = function(x) {
+  num = suppressWarnings(sort(unique(as.numeric(x[x != "unassigned"]))))
+  c(as.character(num), if (any(x == "unassigned")) "unassigned")
+}
+
 p_transfer = ggplot(transfer_long %>%
                       mutate(target    = factor(target,
-                               levels = sort(unique(as.numeric(target)))),
+                                                levels = cluster_levels(target)),
                              predicted = factor(predicted,
-                               levels = sort(unique(as.numeric(predicted))))),
+                                                levels = cluster_levels(predicted))),
                     aes(x = predicted, y = target, fill = frac)) +
   geom_tile() +
   facet_wrap(~ direction, scales = "free", ncol = 3) +
   scale_fill_viridis_c(limits = c(0, 1)) +
   theme(axis.text = element_text(size = 6),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5),
         strip.text = element_text(size = 7)) +
   xlab("label assigned") + ylab("cluster being classified") +
   labs(fill = "fraction of cells")
@@ -684,7 +782,7 @@ neighbors by the same genes, which is a question about gene identity rather
 than about expression levels, so it is not a restatement of the label transfer.
 
 Marker lists are restricted to genes present in both atlases before the top
-`r 100` are taken, since a gene missing from one atlas could never overlap and
+`r top_n_markers` are taken, since a gene missing from one atlas could never overlap and
 would only dilute the list. The gene universe is the number of shared genes.
 
 **The known weakness, and it is your own.** `findMarkers` results depend on how
@@ -695,8 +793,7 @@ and treat this as corroboration of the label transfer rather than as a
 criterion that stands on its own.
 
 ```{r}
-top_n_markers = 100
-overlap_file  = paste0(Robject_out_dir, "/cross_atlas_marker_overlap.Rds")
+overlap_file = paste0(Robject_out_dir, "/cross_atlas_marker_overlap.Rds")
 
 if (file.exists(overlap_file)) {
   cross_overlap = readRDS(overlap_file)
@@ -1015,31 +1112,328 @@ express most of its own markers in its TF cells and its TM cells alike. A high
 concentration with low marker agreement between the two halves is worth
 inspecting directly before the cluster is reported.
 
-## The converse: populations the merge dissolved
+## Which populations does the merge pair up?
 
-A male or female cluster whose cells scatter across several transformer
-clusters was pulled apart by the correction.
+The compression from the single-library atlases to the transformer atlas forces
+some male and female clusters together. Whether that is correct depends
+entirely on **which** ones, so they are named here rather than left to be
+eyeballed off the heatmap.
+
+A transformer cluster qualifies when both libraries contribute at least
+`r 0.2` of its cells. For each, the table gives the dominant male cluster and
+the dominant female cluster it draws from, and the curated cell type assigned
+to each of those. A pairing that joins a cell type to its counterpart in the
+other sex is the merge working as intended. A pairing that joins two different
+cell types is a cost, and the cluster should not be reported as a single
+population.
 
 ```{r}
-dissolved = crosstab %>%
-  group_by(sub_atlas, sub_cluster) %>%
-  summarize(n_cells         = sum(n),
-            top_tr_cluster  = tr_cluster[which.max(frac_of_sub)],
-            largest_share   = max(frac_of_sub),
-            n_tr_clusters   = dplyr::n_distinct(tr_cluster[frac_of_sub > .1]),
-            .groups = "drop") %>%
-  mutate(dissolved = largest_share < conc_min) %>%
-  arrange(largest_share)
+pair_share = 0.2
 
-write.csv(dissolved,
-          file = paste0(results_dir, "/sex_clusters_dissolved_by_merge.csv"),
+celltype_for = function(a) {
+  cluster_celltype %>%
+    filter(atlas == a) %>%
+    dplyr::select(cluster, CellType)
+}
+
+merged_pairs = lib_counts %>%
+  mutate(total    = n_TF + n_TM,
+         share_TF = n_TF / total,
+         share_TM = n_TM / total) %>%
+  filter(share_TF >= pair_share, share_TM >= pair_share) %>%
+  left_join(best_sub %>% filter(sub_atlas == "Male") %>%
+              dplyr::select(tr_cluster, male_cluster = best_sub_cluster,
+                            male_conc = concentration),
+            by = "tr_cluster") %>%
+  left_join(best_sub %>% filter(sub_atlas == "Female") %>%
+              dplyr::select(tr_cluster, female_cluster = best_sub_cluster,
+                            female_conc = concentration),
+            by = "tr_cluster") %>%
+  left_join(celltype_for("Male") %>%
+              dplyr::rename(male_cluster = cluster, male_CellType = CellType),
+            by = "male_cluster") %>%
+  left_join(celltype_for("Female") %>%
+              dplyr::rename(female_cluster = cluster, female_CellType = CellType),
+            by = "female_cluster") %>%
+  mutate(pairing = dplyr::case_when(
+    is.na(male_CellType) | is.na(female_CellType)   ~ "no dominant cluster on one side",
+    male_CellType == "unassigned" |
+      female_CellType == "unassigned"               ~ "one side unassigned, cannot judge",
+    male_CellType == female_CellType                ~ "same cell type, merge is correct",
+    TRUE                                            ~ "different cell types, merge is a cost")) %>%
+  arrange(pairing, tr_cluster)
+
+write.csv(merged_pairs,
+          file = paste0(results_dir, "/transformer_merged_pairings.csv"),
           row.names = FALSE)
 
-datatable(dissolved %>% mutate(across(where(is.numeric), ~round(., 3))),
+datatable(merged_pairs %>% mutate(across(where(is.numeric), ~round(., 3))),
+          filter = "top", rownames = FALSE)
+
+n_pair_ok   = sum(merged_pairs$pairing == "same cell type, merge is correct")
+n_pair_bad  = sum(merged_pairs$pairing == "different cell types, merge is a cost")
+n_pair_unk  = sum(merged_pairs$pairing %in%
+                    c("one side unassigned, cannot judge",
+                      "no dominant cluster on one side"))
+```
+
+`r paste0(nrow(merged_pairs), " transformer cluster(s) draw at least ", pair_share, " of their cells from each library. Of those, ", n_pair_ok, " join a cell type to the same cell type in the other sex, ", n_pair_bad, " join two different cell types, and ", n_pair_unk, " cannot be judged because at least one side has no curated assignment. ", if (n_pair_bad == 0) "No merge pairs unrelated cell types, so the compression is doing what it should." else "The pairings that join different cell types are the concrete cost of merging and should be named in the manuscript rather than reported as single populations.", if (n_pair_unk > 0) " The unjudgeable pairings depend on the curated marker list rather than on the merge, so they are a limitation of the annotation, not evidence either way." else "")`
+
+## The converse: single-library clusters the merge redistributes
+
+A male or female cluster whose cells scatter across several transformer
+clusters has two possible explanations, and the scattering alone does not
+distinguish them:
+
+- **Pulled apart.** The correction split a coherent population arbitrarily.
+  That is a cost of merging.
+- **Resolved more finely.** The single-library cluster was a coarse grouping
+  and the transformer atlas separates genuine subtypes inside it. That is a
+  benefit of merging.
+
+The column is therefore named `redistributed` rather than dissolved, and which
+of the two applies is decided by the test below rather than assumed.
+
+One caution on cluster counts before reading the table, and it concerns a
+different event from the one measured here. If the transformer atlas has fewer
+clusters than the male and female atlases have between them, some
+single-library clusters must **share** a transformer cluster by arithmetic
+alone. That is merging, and it is not what `redistributed` measures:
+`redistributed` fires only when a cluster's cells scatter so widely that no
+single transformer cluster holds a majority of them. Two clusters can each map
+cleanly and entirely into one shared transformer cluster without either being
+flagged. Nothing about the cluster counts forces scattering.
+
+A compression is also expected rather than alarming. A cell type shared between
+the sexes is counted twice across the two single-library atlases, once in each,
+so it should collapse to one cluster when they are merged. If the sexes share
+`S` cell types, the transformer atlas should hold roughly the male count plus
+the female count minus `S`, and the forced sharing is that collapse happening.
+The subsection after next names the pairings so you can check whether each one
+joins a cell type to its counterpart or to something unrelated.
+
+```{r}
+n_tr_clusters   = nlevels(atlases[["Transformer"]]$clust$label)
+n_sub_clusters  = nlevels(atlases[["Male"]]$clust$label) +
+                  nlevels(atlases[["Female"]]$clust$label)
+
+redistributed = crosstab %>%
+  group_by(sub_atlas, sub_cluster) %>%
+  summarize(n_cells        = sum(n),
+            top_tr_cluster = tr_cluster[which.max(frac_of_sub)],
+            largest_share  = max(frac_of_sub),
+            n_tr_clusters  = dplyr::n_distinct(tr_cluster[frac_of_sub > .1]),
+            .groups = "drop") %>%
+  mutate(redistributed = largest_share < conc_min) %>%
+  arrange(largest_share)
+```
+
+The transformer atlas has `r n_tr_clusters` clusters against `r n_sub_clusters`
+across the male and female atlases combined, so `r if (n_tr_clusters >= n_sub_clusters) "no merging is forced by cluster number alone" else paste0("at least ", n_sub_clusters - n_tr_clusters, " single-library cluster(s) must share a transformer cluster with another regardless of the biology")`.
+
+## Is a redistributed cluster split into something real?
+
+The decisive test, and it is clean: take one single-library cluster's cells,
+group them by which transformer cluster they landed in, and test for
+differential expression **between those groups using only that library's
+cells**. Every cell comes from one animal and one library, so there is nothing
+to block on and no correction is involved. Nothing about this test depends on
+the thing being questioned.
+
+If the pieces differ from each other, the transformer atlas found substructure
+the single-library clustering missed. If they do not, the population was
+partitioned arbitrarily.
+
+A negative result is only meaningful with enough cells to detect a difference.
+A split whose smallest piece is small is reported as underpowered rather than
+as arbitrary, since absence of evidence at low `n` is not evidence of absence.
+
+```{r}
+min_cells_group = 20   # a piece smaller than this is not tested at all
+min_power_group = 50   # below this, a null result is called underpowered
+min_sig_cut     = 10   # significant genes needed to call a piece distinct
+                       # named min_sig_cut, not min_sig_genes, because the
+                       # results table already has a min_sig_genes column and
+                       # inside mutate the column would shadow the constant
+
+redist_file = paste0(Robject_out_dir, "/redistribution_de.Rds")
+
+redistribution_de = function(sub_atlas, sub_cl) {
+  e   = atlases[[sub_atlas]]$expr
+  key = cell_labels %>%
+    filter(atlas == "Transformer") %>%
+    dplyr::select(barcode, tr_cluster = cluster)
+
+  ix = which(as.character(e$label) == sub_cl)
+  if (length(ix) == 0) return(NULL)
+
+  sub = e[, ix]
+  grp = key$tr_cluster[match(colnames(sub), key$barcode)]
+
+  keep_grp = names(which(table(grp) >= min_cells_group))
+  if (length(keep_grp) < 2) return(NULL)
+
+  cols = which(grp %in% keep_grp)
+  sub  = sub[, cols]
+  grp  = droplevels(factor(grp[cols]))
+
+  # no block argument: every cell here is from a single library by construction
+  fm    = findMarkers(sub, grp, test.type = "t", direction = "up",
+                      pval.type = "some")
+  n_sig = vapply(fm, function(d) sum(d$FDR < .01, na.rm = TRUE), numeric(1))
+
+  data.frame(sub_atlas      = sub_atlas,
+             sub_cluster    = sub_cl,
+             n_groups       = nlevels(grp),
+             groups         = paste(levels(grp), collapse = ","),
+             n_cells_tested = ncol(sub),
+             smallest_group = min(table(grp)),
+             min_sig_genes  = min(n_sig),
+             max_sig_genes  = max(n_sig),
+             stringsAsFactors = FALSE)
+}
+
+if (file.exists(redist_file)) {
+  redist_de = readRDS(redist_file)
+} else {
+  targets = redistributed %>% filter(redistributed)
+  redist_de = if (nrow(targets) == 0) NULL else
+    purrr::map_dfr(seq_len(nrow(targets)), function(i)
+      redistribution_de(targets$sub_atlas[i], targets$sub_cluster[i]))
+  saveRDS(redist_de, file = redist_file)
+}
+
+redistributed = redistributed %>%
+  left_join(if (is.null(redist_de)) tibble::tibble(sub_atlas = character(),
+                                                   sub_cluster = character())
+            else redist_de,
+            by = c("sub_atlas", "sub_cluster")) %>%
+  mutate(split_verdict = dplyr::case_when(
+    !redistributed                   ~ "not redistributed",
+    is.na(min_sig_genes)             ~ "too few cells to test",
+    min_sig_genes >= min_sig_cut     ~ "real substructure, merge resolves more",
+    smallest_group < min_power_group ~ "underpowered, cannot decide",
+    TRUE                             ~ "arbitrary partition, merge costs a population"))
+
+write.csv(redistributed,
+          file = paste0(results_dir, "/sex_clusters_redistributed.csv"),
+          row.names = FALSE)
+
+datatable(redistributed %>% mutate(across(where(is.numeric), ~round(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
-`r if (sum(dissolved$dissolved) == 0) "No single-library cluster is split across transformer clusters: every one keeps a majority of its cells together through the merge." else paste0(sum(dissolved$dissolved), " single-library cluster(s) lose their majority through the merge, meaning the correction distributed their cells across several transformer clusters. Those populations are visible in the sex-specific atlases but not in the integrated one, which is an argument for reporting the sex atlases alongside it.")`
+## Balance sheet: combine the transformers, or report them separately?
+
+Merging is worth it when it reveals more than it destroys. The accounting below
+is in **cells rather than clusters**, for two reasons.
+
+Cells weight by consequence. A 2,000-cell population partitioned arbitrarily
+matters far more than a 40-cell one, and a count of clusters treats them
+identically.
+
+Cells are also a common currency, which a cluster count is not. The three
+findings in this section are counted in different units: transformer clusters
+in one case, single-library clusters in another. Adding those together produces
+a number that does not mean anything. Every percentage below is instead a share
+of the same denominator, the total transformer cells, so the three ledgers are
+directly comparable even though each describes a different partition of them.
+
+For that reason the ledgers are reported separately and never summed. The same
+cell is counted once in each, since it belongs to exactly one transformer
+cluster and exactly one male or female cluster.
+
+```{r}
+n_tr_cells = ncol(atlases[["Transformer"]]$expr)
+
+# ledger 1: every transformer cell, by what the cross-tabulation concluded
+# about the transformer cluster it sits in. Exhaustive, sums to 100 percent.
+ledger_tr = tr_verdict %>%
+  mutate(n_cells = n_TF + n_TM) %>%
+  group_by(outcome = verdict) %>%
+  summarize(n_clusters = dplyr::n(), n_cells = sum(n_cells), .groups = "drop") %>%
+  mutate(ledger = "transformer clusters",
+         pct_cells = 100 * n_cells / n_tr_cells)
+
+# ledger 2: every cell, by what happened to the single-library cluster it came
+# from. Also exhaustive, also sums to 100 percent.
+ledger_sub = redistributed %>%
+  group_by(outcome = split_verdict) %>%
+  summarize(n_clusters = dplyr::n(), n_cells = sum(n_cells), .groups = "drop") %>%
+  mutate(ledger = "male and female clusters",
+         pct_cells = 100 * n_cells / n_tr_cells)
+
+# ledger 3: only the transformer clusters both libraries feed substantially,
+# so this one does not sum to 100 percent and is not meant to.
+ledger_pair = merged_pairs %>%
+  group_by(outcome = pairing) %>%
+  summarize(n_clusters = dplyr::n(), n_cells = sum(total), .groups = "drop") %>%
+  mutate(ledger = "merged pairings",
+         pct_cells = 100 * n_cells / n_tr_cells)
+
+balance = bind_rows(ledger_tr, ledger_sub, ledger_pair) %>%
+  dplyr::select(ledger, outcome, n_clusters, n_cells, pct_cells) %>%
+  arrange(ledger, desc(pct_cells))
+
+write.csv(balance, file = paste0(results_dir, "/merge_balance_sheet.csv"),
+          row.names = FALSE)
+
+datatable(balance %>% mutate(pct_cells = round(pct_cells, 1)),
+          rownames = FALSE)
+```
+
+```{r, fig.width=9, fig.height=4}
+p_balance = ggplot(balance, aes(x = pct_cells, y = reorder(outcome, pct_cells))) +
+  geom_col(fill = "#9ecae1") +
+  geom_text(aes(label = paste0(round(pct_cells, 1), "%  (", n_clusters, ")")),
+            hjust = -0.1, size = 2.6) +
+  facet_wrap(~ ledger, scales = "free_y", ncol = 1) +
+  scale_x_continuous(expand = expansion(mult = c(0, .25))) +
+  theme(axis.text.y = element_text(size = 7), strip.text = element_text(size = 8)) +
+  xlab("percent of transformer cells") + ylab(NULL)
+
+p_balance
+ggsave(p_balance, file = paste0(results_dir, "/merge_balance_sheet.png"),
+       width = 9, height = 4)
+```
+
+Bars are labeled with the cell percentage and, in brackets, the number of
+clusters, so the two readings stay visible together.
+
+```{r}
+# a cost worth changing the presentation over, as a share of all cells. Not
+# derived from anything; it is a judgment call and is stated so it can be argued with.
+cost_threshold = 5
+
+pct_of = function(tbl, x) {
+  v = tbl$pct_cells[tbl$outcome == x]
+  if (length(v) == 0) 0 else sum(v)
+}
+
+pct_induced   = pct_of(ledger_tr,   "correction induced, dispersed")
+pct_underres  = pct_of(ledger_tr,   "real, under-resolved when split")
+pct_arbitrary = pct_of(ledger_sub,  "arbitrary partition, merge costs a population")
+pct_substruct = pct_of(ledger_sub,  "real substructure, merge resolves more")
+pct_badpair   = pct_of(ledger_pair, "different cell types, merge is a cost")
+pct_goodpair  = pct_of(ledger_pair, "same cell type, merge is correct")
+pct_undecided = pct_of(ledger_sub,  "underpowered, cannot decide") +
+                pct_of(ledger_sub,  "too few cells to test")
+
+worst_cost = max(pct_induced, pct_arbitrary, pct_badpair)
+```
+
+`r paste0("**Costs.** ", round(pct_induced, 1), "% of transformer cells sit in clusters that cohere in neither library on its own, ", round(pct_arbitrary, 1), "% belong to single-library populations the merge partitions arbitrarily, and ", round(pct_badpair, 1), "% sit in clusters that pair two different cell types. **Gains.** ", round(pct_underres, 1), "% sit in populations that separate only in the combined data despite cohering in both libraries, ", round(pct_substruct, 1), "% belong to single-library clusters the merge splits into genuinely distinct subtypes, and ", round(pct_goodpair, 1), "% sit in clusters where the merge correctly joins a cell type to its counterpart in the other sex. ", round(pct_undecided, 1), "% cannot be decided at this cell number.")`
+
+`r if (worst_cost < cost_threshold) paste0("No individual cost exceeds ", cost_threshold, "% of cells. **The integrated transformer atlas is defensible as the primary object**, with the male and female atlases reported alongside it for the sex-restricted populations, which are real results rather than merge failures.") else if (pct_badpair >= cost_threshold) paste0("**", round(pct_badpair, 1), "% of cells sit in clusters that merge two different cell types**, which is the most serious of the three costs because those clusters would be reported as single populations that are not. Either report the male and female atlases separately, or split those specific clusters by library and say so in the text.") else if (pct_induced >= cost_threshold) paste0("**", round(pct_induced, 1), "% of cells sit in clusters that cohere in neither library**, so the correction is generating structure rather than aligning it. Reporting the male and female atlases separately is better supported.") else paste0("**", round(pct_arbitrary, 1), "% of cells belong to single-library populations the merge partitions arbitrarily.** Those populations are visible in the sex atlases and lost in the integrated one, which argues for reporting the sex atlases as primary.")`
+
+Two limits on this. The `r cost_threshold`% threshold is a judgment call, not a
+derived quantity, so read the percentages rather than the verdict if any of
+them sit near it. And the undecided share is undecided because of cell numbers,
+so it can only be resolved by more cells, not by more analysis.
+
+This balance is about the transformer libraries only. It says nothing about
+whether larva and transformer should be integrated with each other, which is
+the separate question the four-atlas design already answers by not doing it.
 
 # 6. Shared clusters across atlases
 
@@ -1200,38 +1594,6 @@ male and female cells, so a population present in male, female and transformer
 spans three atlases but only two animals. `n_independent` counts only the
 larval, female and male atlases, which are disjoint sets of cells, and is the
 number to use when asking how reproducible a population is.
-
-```{r}
-# best curated cell type per cluster, from the same overlap test as section 2,
-# so a population can be named rather than just numbered
-celltype_file = paste0(Robject_out_dir, "/cluster_celltype_calls.Rds")
-
-if (file.exists(celltype_file)) {
-  cluster_celltype = readRDS(celltype_file)
-} else {
-  cluster_celltype = purrr::map_dfr(atlas_names, function(nm) {
-    tg = marker_tbl %>%
-      filter(atlas == nm) %>%
-      group_by(cluster) %>% slice_head(n = top_n_markers) %>% ungroup() %>%
-      dplyr::select(Gene, Group = cluster) %>%
-      as.data.frame()
-
-    phyperOverlapSets(known_markers, tg, nrow(atlases[[nm]]$expr))$pval.scores %>%
-      dplyr::rename(CellType = Group1, cluster = Group2) %>%
-      mutate(FDR = p.adjust(Pval, "BH"), atlas = nm) %>%
-      group_by(cluster) %>% slice_min(FDR, n = 1, with_ties = FALSE) %>%
-      ungroup() %>%
-      mutate(CellType = ifelse(FDR < .05, as.character(CellType), "unassigned"),
-             cluster  = as.character(cluster)) %>%
-      dplyr::select(atlas, cluster, CellType, celltype_FDR = FDR, nSharedGenes)
-  })
-  saveRDS(cluster_celltype, file = celltype_file)
-}
-
-datatable(cluster_celltype %>%
-            mutate(celltype_FDR = signif(celltype_FDR, 3)),
-          filter = "top", rownames = FALSE)
-```
 
 ```{r, eval=have_singler}
 nodes = purrr::map_dfr(atlas_names, function(nm)
