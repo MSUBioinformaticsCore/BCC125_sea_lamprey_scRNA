@@ -1605,36 +1605,27 @@ gene_description =
   dplyr::select(Gene, WangGeneID, description) %>%
   filter(!is.na(Gene))
 
-s1_file = paste0(data_dir, "/S1(Cell_Type_Marker_Genes_12-12-25).csv")
+canonical_file = paste0(data_dir, "/canonical_markers_long_2026-08-12.csv")
 
-# two title rows precede the header; the References row and the trailing
-# citation lines carry no gene data and are removed
-s1_raw = read.csv(s1_file, skip = 2, check.names = FALSE,
-                  stringsAsFactors = FALSE)
-s1_raw = s1_raw[!grepl("^References", s1_raw[[1]]), , drop = FALSE]
-
-s1_body   = s1_raw[, -1, drop = FALSE]
-keep_rows = rowSums(!is.na(as.matrix(s1_body)) &
-                    trimws(as.matrix(s1_body)) != "") > 0
-s1_body   = s1_body[keep_rows, , drop = FALSE]
-
-canonical = s1_body %>%
-  pivot_longer(cols = everything(), names_to = "CellTypeMarkerSet",
-               values_to = "raw", values_drop_na = TRUE) %>%
-  filter(trimws(raw) != "") %>%
-  mutate(symbol   = trimws(str_remove(raw, "\\s*\\(.*\\)")),
-         loc_id   = trimws(str_extract(raw, "(?<=\\().*(?=\\))"))) %>%
-  tidyr::separate_rows(symbol, sep = "/") %>%
-  mutate(symbol = trimws(symbol)) %>%
+# long format, one row per gene per marker set, so no reshaping is needed. This
+# replaces the wide S1 sheet, in which three of the four erythrocyte markers and
+# the oocyte ZAR1 entry were written in a case and hyphenation that resolved
+# against nothing, and CD115/CSF1R split into two symbols sharing one LOC.
+canonical = read.csv(canonical_file, stringsAsFactors = FALSE) %>%
+  mutate(symbol = trimws(symbol),
+         loc_id = trimws(loc_id)) %>%
   filter(symbol != "")
 
 datatable(canonical %>% dplyr::count(CellTypeMarkerSet, name = "n_markers"),
           rownames = FALSE)
 ```
 
-The parenthesised identifier in this list is the NCBI gene ID, so it is tried
+`loc_id` holds the NCBI gene ID and is populated for every row, having been
+checked against `gene_descritption.csv` when the file was built. It is tried
 first when resolving against `rownames`, falling back to the symbol and then to
-the `WangGeneID` mapping.
+the `WangGeneID` mapping, so under normal circumstances the first branch
+succeeds and the fallbacks are never reached. A row that does reach them
+indicates the gene table and the count matrix have diverged.
 
 ```{r}
 resolve_canonical = function(symbol, loc_id, rn, gd) {
@@ -1687,7 +1678,7 @@ cluster_to_set = tribble(
   "14", "Pre-granulosa cells",
   "15", NA_character_,
   "16", "Spermatocytes",
-  "17", "Migrating germ cells",
+  "17", "Germ cells (pan-germline)",
   "18", "Spermatocytes",
   "19", "Spermatocytes") %>%
   mutate(CellType = anno_all[as.integer(label)],
@@ -1698,7 +1689,7 @@ datatable(cluster_to_set, rownames = FALSE)
 untestable = cluster_to_set %>% filter(!testable)
 ```
 
-`r if (nrow(untestable) == 0) "Every cluster has a corresponding marker set." else paste0(nrow(untestable), " cluster(s) have no corresponding set in the curated list and cannot be tested: ", paste0(untestable$CellType, collapse = "; "), ". The list contains 14 cell types where the earlier version contained 17, having dropped migrating immune cells, oogonia and spermatogonia.")`
+`r if (nrow(untestable) == 0) "Every cluster has a corresponding marker set." else paste0(nrow(untestable), " cluster(s) have no corresponding set in the curated list and cannot be tested: ", paste0(untestable$CellType, collapse = "; "), ". The list contains 14 marker sets. The immune clusters have no set because lamprey lymphocytes are identified by variable lymphocyte receptors rather than by immunoglobulin-based receptors, and the VLR loci are not present in this genome annotation under a recognizable name. Substituting mammalian immune markers would assert an identity this annotation cannot support, so these clusters are left untested.")`
 
 ### Expression of each cluster's own markers, by stage
 
@@ -1744,23 +1735,61 @@ datatable(canon_summary %>% mutate(across(where(is.numeric), ~round(., 2))),
 ```
 
 ```{r}
-detect_pct = 10
+detect_pct      = 10
+min_cells_stage = 10
+stage_levels    = c("larva", "transformer")
 
-canon_verdict = canon_summary %>%
+# Every testable cluster crossed with both stages, so a cluster with no cells in
+# a stage appears as a zero rather than as a missing row. This matters: several
+# clusters are transformer-only by construction, and without the cross they drop
+# out of pivot_wider as NA, are excluded from the pass count by na.rm and from
+# the failure list by filter(), and so vanish from the summary while still
+# counting in its denominator.
+cluster_stage_cells =
+  cell_key %>%
+  inner_join(cluster_to_set %>% filter(testable) %>%
+               dplyr::select(label, marker_set, CellType),
+             by = "label") %>%
+  dplyr::count(CellType, label, marker_set, stage, name = "n_cells") %>%
+  tidyr::complete(tidyr::nesting(CellType, label, marker_set),
+                  stage = stage_levels,
+                  fill = list(n_cells = 0))
+
+canon_stage =
+  canon_summary %>%
   mutate(expressed = pct_expressing >= detect_pct) %>%
   group_by(CellType, label, marker_set, stage) %>%
   summarize(n_markers          = dplyr::n(),
             n_expressed        = sum(expressed),
             pct_markers_expressed = 100 * mean(expressed),
-            .groups = "drop") %>%
+            .groups = "drop")
+
+# absence and failure are different results and are kept apart
+canon_stage =
+  cluster_stage_cells %>%
+  left_join(canon_stage, by = c("CellType", "label", "marker_set", "stage")) %>%
+  mutate(status = dplyr::case_when(
+    n_cells < min_cells_stage          ~ "not sampled",
+    is.na(pct_markers_expressed)       ~ "not sampled",
+    pct_markers_expressed >= 50        ~ "holds",
+    TRUE                               ~ "fails"))
+
+canon_verdict =
+  canon_stage %>%
   tidyr::pivot_wider(id_cols = c(CellType, label, marker_set),
-                     names_from = stage,
-                     values_from = c(n_markers, n_expressed,
-                                     pct_markers_expressed)) %>%
-  mutate(holds_larva       = pct_markers_expressed_larva >= 50,
-         holds_transformer = pct_markers_expressed_transformer >= 50,
-         identity_holds_both = holds_larva & holds_transformer) %>%
-  arrange(desc(identity_holds_both), CellType)
+                     names_from  = stage,
+                     values_from = c(n_cells, n_markers, n_expressed,
+                                     pct_markers_expressed, status)) %>%
+  mutate(verdict = dplyr::case_when(
+    status_larva == "holds" & status_transformer == "holds"
+      ~ "holds in both stages",
+    status_larva == "fails" | status_transformer == "fails"
+      ~ "fails in at least one stage",
+    status_larva == "not sampled" & status_transformer == "not sampled"
+      ~ "not sampled in either stage",
+    TRUE
+      ~ "present in one stage only")) %>%
+  arrange(verdict, CellType)
 
 write.csv(canon_verdict,
           file = paste0(results_dir, "/SuppTable_canonical_identity_verdict.csv"),
@@ -1772,18 +1801,39 @@ datatable(canon_verdict %>% mutate(across(where(is.numeric), ~round(., 1))),
 
 A marker counts as expressed in a stage if it is detected in at least
 `r detect_pct`% of that cluster's cells from that stage, and a cluster's
-identity holds in a stage if at least half its assigned markers are expressed.
+identity holds in a stage if at least half its assigned markers are expressed. A
+cluster with fewer than `r min_cells_stage` cells in a stage is recorded as not
+sampled in that stage, which is reported as its own outcome and never merged
+into either the passes or the failures.
 
 ```{r}
 n_tested_clusters = nrow(canon_verdict)
-n_holds_both      = sum(canon_verdict$identity_holds_both, na.rm = TRUE)
-one_stage_only    = canon_verdict %>% filter(!identity_holds_both)
+n_holds_both      = sum(canon_verdict$verdict == "holds in both stages")
+n_fails           = sum(canon_verdict$verdict == "fails in at least one stage")
+n_one_stage       = sum(canon_verdict$verdict == "present in one stage only")
+n_unsampled       = sum(canon_verdict$verdict == "not sampled in either stage")
+n_comparable      = n_holds_both + n_fails
+
+fails_clusters     = canon_verdict %>%
+  filter(verdict == "fails in at least one stage")
+one_stage_clusters = canon_verdict %>%
+  filter(verdict == "present in one stage only")
+
+# no cluster may fall outside the four outcomes
+stopifnot(n_holds_both + n_fails + n_one_stage + n_unsampled == n_tested_clusters)
 ```
 
-`r n_holds_both` of `r n_tested_clusters` testable clusters express at least
-half their assigned canonical markers in **both** stages.
+Of the `r n_tested_clusters` clusters with an assigned marker set,
+`r n_comparable` have at least `r min_cells_stage` cells in both stages and can
+therefore be compared across the merge at all. Of those, **`r n_holds_both`
+express at least half their assigned canonical markers in both stages** and
+`r n_fails` do not.
 
-`r if (n_holds_both == n_tested_clusters) "**Cell type identity is preserved across the stages for every cluster tested.** A single integrated atlas is therefore defensible: the clusters name the same cell types at both stages, and the poor agreement between data-derived marker lists reflects extensive remodeling of expression state rather than a failure of the identity assignment. Those are separable claims and this test separates them." else paste0("**", nrow(one_stage_only), " cluster(s) do not express half their assigned markers in both stages: ", paste0(one_stage_only$CellType, collapse = "; "), ".** For these the annotation does not hold across the merge, and grouping the two stages into one cluster asserts an identity the canonical markers do not support. They should be split by stage, relabeled, or described separately. If this affects many clusters, describing the stages as two atlases is the more honest presentation than one integrated atlas.")`
+`r if (n_one_stage == 0) "Every cluster with a marker set is present in both stages." else paste0("A further ", n_one_stage, " cluster(s) are present in only one stage: ", paste0(one_stage_clusters$CellType, collapse = "; "), ". These express their markers where they are sampled, but a cluster that exists in one stage only cannot agree or disagree with itself across the merge. They are therefore neither evidence for nor against an integrated atlas, and are reported here rather than counted as passes or failures.")`
+
+`r if (n_unsampled > 0) paste0(n_unsampled, " cluster(s) fall below the cell threshold in both stages and are uninformative.") else ""`
+
+`r if (n_comparable == 0) "**No cluster has enough cells in both stages to be compared, so this test cannot decide between one atlas and two.** The decision has to rest on the other evidence in this document." else if (n_fails == 0) "**Cell type identity is preserved across the stages for every cluster that could be compared.** A single integrated atlas is therefore defensible: those clusters name the same cell types at both stages, and the poor agreement between data-derived marker lists reflects extensive remodeling of expression state rather than a failure of the identity assignment. Those are separable claims and this test separates them. Note that the claim extends only to the clusters present in both stages; the stage-restricted clusters listed above are carried in the atlas on the strength of their within-stage markers alone." else paste0("**", n_fails, " cluster(s) do not express half their assigned markers in both stages: ", paste0(fails_clusters$CellType, collapse = "; "), ".** For these the annotation does not hold across the merge, and grouping the two stages into one cluster asserts an identity the canonical markers do not support. They should be split by stage, relabeled, or described separately. If this affects most of the comparable clusters, describing the stages as two atlases is the more honest presentation than one integrated atlas.")`
 
 ```{r, fig.width=11, fig.height=9}
 p_canon = ggplot(canon_summary,
