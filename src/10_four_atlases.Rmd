@@ -1261,6 +1261,18 @@ edge_counts = edges %>%
   mutate(population = nodes$population[match(from, nodes$name)]) %>%
   dplyr::count(population, name = "n_actual")
 
+# the most frequent assigned cell type among a population's clusters. Written
+# as a function because names(sort(table(x)))[1] returns NULL rather than NA
+# when every cluster is unassigned, and summarize cannot combine NULL with the
+# character results from the other groups. Ties break on the first name, which
+# is alphabetical and therefore at least deterministic.
+consensus_celltype = function(x) {
+  x = x[!is.na(x) & x != "unassigned"]
+  if (length(x) == 0) return("unassigned")
+  tab = table(x)
+  names(tab)[which.max(tab)]
+}
+
 pop_summary = nodes %>%
   group_by(population) %>%
   summarize(n_atlases     = dplyr::n_distinct(atlas),
@@ -1268,8 +1280,7 @@ pop_summary = nodes %>%
             atlases       = paste(sort(unique(atlas)), collapse = ", "),
             n_clusters    = dplyr::n(),
             split         = dplyr::n() > dplyr::n_distinct(atlas),
-            CellType      = names(sort(table(CellType[CellType != "unassigned"]),
-                                       decreasing = TRUE))[1],
+            CellType      = consensus_celltype(CellType),
             members       = paste(sort(name), collapse = "; "),
             .groups = "drop") %>%
   left_join(link_counts, by = "population") %>%
