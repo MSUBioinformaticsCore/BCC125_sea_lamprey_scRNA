@@ -1577,6 +1577,233 @@ datatable(population_sharing %>%
 ```
 
 
+## Canonical marker check: does cell type identity hold in both stages?
+
+The marker agreement tested above uses data-derived gene lists, which measure
+**state** rather than identity. Those lists are the genes most enriched in a
+cluster relative to the others within a stage, so if expression is remodeled
+broadly between stages they will diverge even when the cells are unambiguously
+the same type.
+
+Identity is a different question, and the curated marker list answers it
+directly: does each cluster express the canonical markers for its annotated cell
+type in larval cells and in transformer cells **separately**? A cluster whose
+assigned markers hold in both stages is the same cell type at both, whatever
+else has changed. A cluster whose markers hold in only one stage has an
+annotation that does not survive the merge, and should be split or relabeled.
+
+This test also decides whether one integrated atlas is defensible or whether the
+stages should be described separately.
+
+```{r}
+# gene identifier mapping, used here and again in section 5
+gene_description =
+  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip = 1) %>%
+  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
+                Gene        = "NCBI_GTF_GENEID",
+                description = "NCBI_GTF_ProteinInfo") %>%
+  dplyr::select(Gene, WangGeneID, description) %>%
+  filter(!is.na(Gene))
+
+s1_file = paste0(data_dir, "/S1(Cell_Type_Marker_Genes_12-12-25).csv")
+
+# two title rows precede the header; the References row and the trailing
+# citation lines carry no gene data and are removed
+s1_raw = read.csv(s1_file, skip = 2, check.names = FALSE,
+                  stringsAsFactors = FALSE)
+s1_raw = s1_raw[!grepl("^References", s1_raw[[1]]), , drop = FALSE]
+
+s1_body   = s1_raw[, -1, drop = FALSE]
+keep_rows = rowSums(!is.na(as.matrix(s1_body)) &
+                    trimws(as.matrix(s1_body)) != "") > 0
+s1_body   = s1_body[keep_rows, , drop = FALSE]
+
+canonical = s1_body %>%
+  pivot_longer(cols = everything(), names_to = "CellTypeMarkerSet",
+               values_to = "raw", values_drop_na = TRUE) %>%
+  filter(trimws(raw) != "") %>%
+  mutate(symbol   = trimws(str_remove(raw, "\\s*\\(.*\\)")),
+         loc_id   = trimws(str_extract(raw, "(?<=\\().*(?=\\))"))) %>%
+  tidyr::separate_rows(symbol, sep = "/") %>%
+  mutate(symbol = trimws(symbol)) %>%
+  filter(symbol != "")
+
+datatable(canonical %>% dplyr::count(CellTypeMarkerSet, name = "n_markers"),
+          rownames = FALSE)
+```
+
+The parenthesised identifier in this list is the NCBI gene ID, so it is tried
+first when resolving against `rownames`, falling back to the symbol and then to
+the `WangGeneID` mapping.
+
+```{r}
+resolve_canonical = function(symbol, loc_id, rn, gd) {
+  if (!is.na(loc_id) && loc_id %in% rn) return(loc_id)
+  if (symbol %in% rn) return(symbol)
+  g = gd$Gene[gd$WangGeneID == symbol]
+  g = g[g %in% rn]
+  if (length(g) > 0) return(g[1])
+  NA_character_
+}
+
+rn_all = rownames(combined.sce)
+
+canonical = canonical %>%
+  rowwise() %>%
+  mutate(gene_id = resolve_canonical(symbol, loc_id, rn_all, gene_description)) %>%
+  ungroup()
+
+canon_resolved   = canonical %>% filter(!is.na(gene_id))
+canon_unresolved = canonical %>% filter(is.na(gene_id))
+```
+
+* Canonical markers listed: `r nrow(canonical)`
+* Resolved in `rownames(combined.sce)`: `r nrow(canon_resolved)`
+* Not found, and therefore excluded: `r if (nrow(canon_unresolved) == 0) "none" else paste(unique(canon_unresolved$symbol), collapse = ", ")`
+
+### Mapping clusters to marker sets
+
+The cluster annotations and the marker set names differ in wording, so the
+mapping is written out explicitly rather than matched by string similarity.
+Clusters with no corresponding marker set cannot be tested and are reported as
+such.
+
+```{r}
+cluster_to_set = tribble(
+  ~label, ~marker_set,
+  "1",  "Fibroblasts",
+  "2",  "Mesonephric cells",
+  "3",  "Granulosa cells",
+  "4",  "Granulosa cells",
+  "5",  "Oocyte",
+  "6",  "Endothelial cells",
+  "7",  "Primordial germ cells",
+  "8",  "Erythrocytes",
+  "9",  "Pre-granulosa cells",
+  "10", NA_character_,
+  "11", "Hemopoietic stem cells",
+  "12", "Mesenephric podocytes",
+  "13", "Macrophages",
+  "14", "Pre-granulosa cells",
+  "15", NA_character_,
+  "16", "Spermatocytes",
+  "17", "Migrating germ cells",
+  "18", "Spermatocytes",
+  "19", "Spermatocytes") %>%
+  mutate(CellType = anno_all[as.integer(label)],
+         testable = !is.na(marker_set))
+
+datatable(cluster_to_set, rownames = FALSE)
+
+untestable = cluster_to_set %>% filter(!testable)
+```
+
+`r if (nrow(untestable) == 0) "Every cluster has a corresponding marker set." else paste0(nrow(untestable), " cluster(s) have no corresponding set in the curated list and cannot be tested: ", paste0(untestable$CellType, collapse = "; "), ". The list contains 14 cell types where the earlier version contained 17, having dropped migrating immune cells, oogonia and spermatogonia.")`
+
+### Expression of each cluster's own markers, by stage
+
+```{r}
+stopifnot(identical(colnames(combined.sce), colnames(merged.sce)))
+
+canon_ids = unique(canon_resolved$gene_id)
+canon_mat = as.matrix(logcounts(combined.sce)[canon_ids, , drop = FALSE])
+
+cell_key = data.frame(barcode = colnames(combined.sce),
+                      label   = as.character(colData(merged.sce)$label),
+                      stringsAsFactors = FALSE) %>%
+  left_join(all_meta %>% dplyr::select(barcode, stage, library), by = "barcode")
+
+canon_long = t(canon_mat) %>%
+  as.data.frame() %>%
+  tibble::rownames_to_column("barcode") %>%
+  tidyr::pivot_longer(-barcode, names_to = "gene_id", values_to = "logexpr") %>%
+  left_join(cell_key, by = "barcode")
+
+# each cluster is scored only against the markers of its own assigned type
+canon_scored = canon_long %>%
+  inner_join(canon_resolved %>%
+               dplyr::select(gene_id, symbol, marker_set = CellTypeMarkerSet),
+             by = "gene_id", relationship = "many-to-many") %>%
+  inner_join(cluster_to_set %>% filter(testable) %>%
+               dplyr::select(label, marker_set, CellType),
+             by = c("label", "marker_set"))
+
+canon_summary = canon_scored %>%
+  group_by(CellType, label, marker_set, symbol, stage) %>%
+  summarize(n_cells        = dplyr::n(),
+            mean_logexpr   = mean(logexpr),
+            pct_expressing = 100 * mean(logexpr > 0),
+            .groups = "drop")
+
+write.csv(canon_summary,
+          file = paste0(results_dir, "/SuppTable_canonical_markers_by_stage.csv"),
+          row.names = FALSE)
+
+datatable(canon_summary %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r}
+detect_pct = 10
+
+canon_verdict = canon_summary %>%
+  mutate(expressed = pct_expressing >= detect_pct) %>%
+  group_by(CellType, label, marker_set, stage) %>%
+  summarize(n_markers          = dplyr::n(),
+            n_expressed        = sum(expressed),
+            pct_markers_expressed = 100 * mean(expressed),
+            .groups = "drop") %>%
+  tidyr::pivot_wider(id_cols = c(CellType, label, marker_set),
+                     names_from = stage,
+                     values_from = c(n_markers, n_expressed,
+                                     pct_markers_expressed)) %>%
+  mutate(holds_larva       = pct_markers_expressed_larva >= 50,
+         holds_transformer = pct_markers_expressed_transformer >= 50,
+         identity_holds_both = holds_larva & holds_transformer) %>%
+  arrange(desc(identity_holds_both), CellType)
+
+write.csv(canon_verdict,
+          file = paste0(results_dir, "/SuppTable_canonical_identity_verdict.csv"),
+          row.names = FALSE)
+
+datatable(canon_verdict %>% mutate(across(where(is.numeric), ~round(., 1))),
+          filter = "top", rownames = FALSE)
+```
+
+A marker counts as expressed in a stage if it is detected in at least
+`r detect_pct`% of that cluster's cells from that stage, and a cluster's
+identity holds in a stage if at least half its assigned markers are expressed.
+
+```{r}
+n_tested_clusters = nrow(canon_verdict)
+n_holds_both      = sum(canon_verdict$identity_holds_both, na.rm = TRUE)
+one_stage_only    = canon_verdict %>% filter(!identity_holds_both)
+```
+
+`r n_holds_both` of `r n_tested_clusters` testable clusters express at least
+half their assigned canonical markers in **both** stages.
+
+`r if (n_holds_both == n_tested_clusters) "**Cell type identity is preserved across the stages for every cluster tested.** A single integrated atlas is therefore defensible: the clusters name the same cell types at both stages, and the poor agreement between data-derived marker lists reflects extensive remodeling of expression state rather than a failure of the identity assignment. Those are separable claims and this test separates them." else paste0("**", nrow(one_stage_only), " cluster(s) do not express half their assigned markers in both stages: ", paste0(one_stage_only$CellType, collapse = "; "), ".** For these the annotation does not hold across the merge, and grouping the two stages into one cluster asserts an identity the canonical markers do not support. They should be split by stage, relabeled, or described separately. If this affects many clusters, describing the stages as two atlases is the more honest presentation than one integrated atlas.")`
+
+```{r, fig.width=11, fig.height=9}
+p_canon = ggplot(canon_summary,
+                 aes(x = stage, y = symbol,
+                     size = pct_expressing, color = mean_logexpr)) +
+  geom_point() +
+  scale_color_viridis_c() +
+  scale_size_continuous(range = c(0.5, 5)) +
+  facet_wrap(~ paste0(label, ". ", marker_set), scales = "free_y") +
+  theme(axis.text.y = element_text(size = 6),
+        axis.text.x = element_text(angle = 45, hjust = 1)) +
+  xlab(NULL) + ylab(NULL) +
+  labs(size = "% expressing", color = "mean logexpr")
+
+p_canon
+ggsave(p_canon,
+       file = paste0(results_dir, "/canonical_markers_by_stage.png"),
+       width = 11, height = 9)
+```
+
 # 5. Marker behavior along pseudotime
 
 Uncorrected, per-library normalized log-expression is used here, not the
@@ -1590,14 +1817,6 @@ within-library trend, reported separately below, does not depend on that
 comparability; the pooled trend does.
 
 ```{r}
-gene_description =
-  read_excel(paste0(data_dir, "/41467_2024_55019_MOESM3_ESM.xlsx"), skip = 1) %>%
-  dplyr::rename(WangGeneID = "CountMatrix_GeneID",
-                Gene        = "NCBI_GTF_GENEID",
-                description = "NCBI_GTF_ProteinInfo") %>%
-  dplyr::select(Gene, WangGeneID, description) %>%
-  filter(!is.na(Gene))
-
 markers_wide = read.csv(paste0(data_dir, "/Cell_Type_Marker_Genes_12-12-25.csv"))
 markers_wide = markers_wide[, 2:ncol(markers_wide)]
 
