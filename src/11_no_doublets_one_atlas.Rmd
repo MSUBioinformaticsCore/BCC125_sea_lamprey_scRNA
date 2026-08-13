@@ -45,29 +45,48 @@ no_dbl_dir  = paste0(params$project_dir, "/results/20260803_no_doublets")
 
 # Purpose
 
-**Should the four doublet-filtered libraries be reported as one integrated
-atlas, or as separate atlases?**
-
-Two different questions decide that, and they are easy to confuse. This
-document runs both, on the doublet-filtered clustering, and nothing else.
-
-**Question 1: how large is the difference between the stages?** Section 2
-measures it. It does not call that difference a batch effect, because nothing
+**Question 1: how large is the difference between the stages?** Measured in Section 2. 
+It does not call that difference a batch effect, because nothing
 in this data can attribute it: larvae and transformers differ by developmental
 stage and by collection date at once, so a large difference is equally what
 real developmental biology produces and what a confounded technical batch
 produces.
 
-Marker genes are computed separately within each library and the agreement
-between libraries is compared, against a **replicate floor**.
-Undifferentiated.1 and Undifferentiated.2 are the same stage from the same July
-collection and differ only by animal and library preparation, so disagreement
-between them is animal and library variation with no biological difference
-behind it. That floor bounds the technical variation **within** a collection.
-It does not bound the July-to-November component, which is the one confounded
-with stage and which this design cannot measure at all.
+Nothing here can measure the July-to-November technical component directly,
+because it is the same variable as stage. What can be asked is **which cell
+types the difference falls on**, and a technical effect and a developmental
+effect predict different answers.
 
-**Question 2: does cell type identity survive it?** Section 3 measures that,
+A technical batch effect arises from dissociation, capture, library chemistry
+and sequencing. Those act on every cell in a library. It should therefore
+degrade agreement across most cell types at once, including ones with no
+developmental reason to differ between July and November, such as erythrocytes
+and immune cells.
+
+A developmental effect should be concentrated. The somatic gonad differentiates
+between a sex-labile larva and a newly transformed animal. Blood and immune
+cells passing through the tissue do not.
+
+So a difference spread evenly across cell types is what a technical effect looks
+like, and one concentrated in the tissue that is developing is hard to explain
+technically, because a reagent lot or a sequencing run has no way to know which
+cells belong to the gonad.
+
+**This is evidence and not proof, and the limit should be stated wherever the
+result is used.** Batch effects are not guaranteed to be uniform: cell types
+differ in RNA content and capture efficiency, so a technical effect can interact
+with cell type. Non-uniformity argues against a purely technical explanation
+without excluding one.
+
+The measurement uses a **per-cluster replicate floor**. Undifferentiated.1 and
+Undifferentiated.2 are the same stage from the same July collection and differ
+only by animal and library preparation, so disagreement between them is animal
+and library variation with no biological difference behind it. Each cluster is
+scored against its own floor, because clusters differ enormously in how
+reproducible their markers are and pooling would let that spread swamp the
+comparison.
+
+**Question 2: does cell type identity survive across stages?** Section 3 measures that,
 using the curated markers. A cluster is one cell type across the merge if it
 expresses the canonical markers for its annotated type in larval cells and in
 transformer cells **separately**.
@@ -296,7 +315,7 @@ ggsave(p_stage, file = paste0(results_dir, "/cluster_composition_by_stage.png"),
        width = 8, height = 5)
 ```
 
-# 2. How large is the difference between the stages?
+# 2. Does the stage difference look technical or developmental?
 
 Marker genes are computed separately within each single library and the
 agreement between libraries is measured, with two metrics used throughout:
@@ -639,12 +658,89 @@ stage_contrast_large = nrow(lt_row) == 1 && isTRUE(lt_row$exceeds_floor)
 
 `r if (nrow(fm_row) == 0) "" else paste0("**Second floor.** Female versus Male gives a median overlap of ", round(fm_row$median_comparison, 1), "%, a ratio of ", round(fm_row$median_ratio, 2), " to the July floor. If the two floors are close, both the residual sex effect in shared somatic types and any difference in batch noise between collections are small, which makes the July floor a trustworthy reference for the stage contrast.")`
 
-**This section cannot tell you whether the discordance is batch or biology.**
-Stage is perfectly confounded with collection date and library, so a large stage
-contrast is equally consistent with a technical batch effect and with genuine
-developmental remodeling. That is why section 3 exists: the curated markers ask
-whether the cells are still the same types, which is a question the confound
-does not touch.
+## Is the difference spread evenly across cell types?
+
+The size of the stage contrast says nothing about its source. Where it falls
+does, at least partly.
+
+Each cluster has its own stage contrast and its own replicate floor, so each
+has a ratio of the two. **If the stage difference were a uniform technical
+effect, that ratio would be roughly constant across clusters**, since
+dissociation and library chemistry act on every cell. If it is developmental,
+the ratio should vary, and should be lowest in the cell types that are actually
+changing between a sex-labile larva and a newly transformed animal.
+
+The ratio is computed per draw, so between-cluster variation can be compared
+against the draw-to-draw noise within each cluster rather than assumed to
+exceed it.
+
+```{r}
+ratio_by_draw = disc_results %>%
+  filter(comparison %in% c("UND1_vs_UND2", "larvae_vs_transformers")) %>%
+  dplyr::select(label, draw, comparison, overlap_pct) %>%
+  tidyr::pivot_wider(names_from = comparison, values_from = overlap_pct) %>%
+  filter(!is.na(UND1_vs_UND2), !is.na(larvae_vs_transformers),
+         UND1_vs_UND2 > 0) %>%
+  mutate(ratio = larvae_vs_transformers / UND1_vs_UND2,
+         CellType = anno[as.integer(label)])
+
+uniformity = if (dplyr::n_distinct(ratio_by_draw$label) < 2) NULL else
+  kruskal.test(ratio ~ factor(label), data = ratio_by_draw)
+
+ratio_summary = ratio_by_draw %>%
+  group_by(label, CellType) %>%
+  summarize(n_draws      = dplyr::n(),
+            ratio_median = median(ratio),
+            ratio_min    = min(ratio),
+            ratio_max    = max(ratio),
+            .groups = "drop") %>%
+  arrange(ratio_median)
+
+write.csv(ratio_summary,
+          file = paste0(results_dir, "/stage_to_floor_ratio_by_cluster.csv"),
+          row.names = FALSE)
+
+datatable(ratio_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
+          rownames = FALSE)
+```
+
+`r if (is.null(uniformity)) "Too few eligible clusters to test uniformity." else paste0("Ratios differ across clusters at Kruskal-Wallis p = ", signif(uniformity$p.value, 2), ". ", if (uniformity$p.value < .05) "**The stage difference does not fall evenly on every cell type.** Some clusters lose far more agreement across the stage boundary than others, by more than the draw-to-draw noise accounts for. A purely technical effect has no mechanism for that, since a reagent lot or a sequencing run cannot distinguish one cell type from another. This argues against a purely technical explanation without excluding one, because cell types differ in RNA content and capture efficiency and so a technical effect can interact with cell type." else "The ratios are consistent with being constant across clusters. That is what a uniform technical effect would produce, and it is also what a developmental effect would produce if it happened to touch every sampled cell type similarly. This test does not separate them here.")`
+
+```{r, fig.width=9, fig.height=5}
+p_ratio = ggplot(ratio_summary,
+                 aes(x = ratio_median, y = reorder(CellType, ratio_median))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  geom_linerange(aes(xmin = ratio_min, xmax = ratio_max)) +
+  geom_point(size = 2) +
+  xlab("stage agreement divided by that cluster's own replicate floor") +
+  ylab(NULL) +
+  labs(caption = paste0("1 means the stage contrast is no worse than replicate ",
+                        "libraries of the same stage. Lower means more ",
+                        "stage-specific change. Bars are the range across draws."))
+
+p_ratio
+ggsave(p_ratio, file = paste0(results_dir, "/stage_to_floor_ratio_by_cluster.png"),
+       width = 9, height = 5)
+```
+
+**The germ cells cannot enter this comparison at all, and that is biology
+rather than a filter setting.** A stage contrast is only defined for a cell type
+present at both stages. Spermatocytes and oocytes have no larval counterpart to
+compare against, so no threshold choice would admit them. The comparison runs on
+the somatic compartment because that is where a larva-to-transformer comparison
+exists.
+
+That is the setting where a developmental effect should be hardest to detect,
+which is what makes a positive result here worth something. Germ cells changing
+a great deal between a sex-labile larva and a newly transformed animal would
+surprise nobody and would discriminate poorly, since a technical effect could
+also hit cells with unusual RNA content. Somatic cells are the harder test.
+
+**The general limit.** This asks where the difference falls, not what it is
+made of. Stage is perfectly confounded with collection date and library, so
+nothing here attributes the contrast outright. Section 3 sidesteps the confound
+instead of testing it, by asking whether the cells are still the same types.
+
 
 # 3. Canonical marker check
 
