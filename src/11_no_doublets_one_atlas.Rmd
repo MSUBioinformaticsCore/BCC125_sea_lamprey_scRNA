@@ -607,11 +607,170 @@ need one.
 
 # 3. Canonical marker check
 
+Two different things are asked of each cluster's assigned markers, and both are
+asked in the combined clustering and within each stage separately.
+
+**Detected** means the gene is on: expressed in at least `detect_pct`% of that
+cluster's cells. It is a weak test on its own, because a ubiquitous gene is
+detected everywhere and says nothing about identity.
+
+**Enriched** means the gene is higher in that cluster than in the others, which
+is what makes it a marker at all. This is the assumption the document was
+resting on without checking: `cluster_to_set` assigns a marker set to a cluster
+on the strength of the existing annotation, and if that annotation is wrong the
+detection test asks whether a non-marker happens to be on, which it often will
+be.
+
+Enrichment is also checked **per stage**, not only in the combined data. A
+cluster whose assigned markers are enriched in it among larval cells and again
+among transformer cells is far better supported than one that merely detects
+them on both sides.
+
+## Are the assigned markers enriched at all?
+
+Three `findMarkers` runs: all cells, larval cells only, transformer cells only.
+Library is blocked in each, so no result depends on the correction.
+
+All three use **the same cluster set**, the clusters with enough cells in both
+stages from section 1. Marker lists computed against different competing
+backgrounds are not comparable, so the per-stage runs would otherwise be
+measuring different things from each other and from the combined run.
+
+```{r}
+fdr_enrich  = 0.01
+canon_ids   = unique(canon_resolved$gene_id)
+enrich_file = paste0(Robject_out_dir, "/marker_enrichment.Rds")
+
+if (file.exists(enrich_file)) {
+  enrich = readRDS(enrich_file)
+} else {
+  common_labels = stage_cells$label[stage_cells$in_both]
+  in_common     = cell_key$label %in% common_labels
+
+  run_fm = function(keep) {
+    lab = droplevels(factor(cell_key$label[keep], levels = common_labels))
+    blk = cell_key$library[keep]
+    # a single library in the subset leaves nothing to block on
+    if (dplyr::n_distinct(blk) < 2) blk = NULL
+    findMarkers(combined.sce[, keep], lab, test.type = "t", block = blk,
+                direction = "up", pval.type = "some")
+  }
+
+  enrich = list(
+    combined    = run_fm(in_common),
+    larva       = run_fm(in_common & cell_key$stage == "larva"),
+    transformer = run_fm(in_common & cell_key$stage == "transformer"))
+  saveRDS(enrich, file = enrich_file)
+}
+```
+
+```{r}
+extract_enrich = function(fm, run_name) {
+  purrr::map_dfr(names(fm), function(lab) {
+    df   = fm[[lab]]
+    keep = rownames(df) %in% canon_ids
+    if (!any(keep)) return(NULL)
+    eff = marker_effect(df)
+    data.frame(run       = run_name,
+               label     = lab,
+               gene_id   = rownames(df)[keep],
+               FDR       = df$FDR[keep],
+               meanLogFC = if (is.null(eff)) NA_real_ else eff[keep],
+               stringsAsFactors = FALSE)
+  })
+}
+
+enrich_long = bind_rows(lapply(names(enrich),
+                               function(n) extract_enrich(enrich[[n]], n)))
+
+# each canonical gene paired with the cluster its marker set is assigned to
+assigned = canon_resolved %>%
+  dplyr::select(gene_id, symbol, marker_set = CellTypeMarkerSet) %>%
+  inner_join(cluster_to_set %>% filter(testable) %>%
+               dplyr::select(label, marker_set, CellType),
+             by = "marker_set")
+
+enrich_assigned = assigned %>%
+  left_join(enrich_long, by = c("gene_id", "label"),
+            relationship = "many-to-many") %>%
+  mutate(enriched = !is.na(FDR) & FDR < fdr_enrich)
+
+write.csv(enrich_assigned,
+          file = paste0(results_dir, "/SuppTable_marker_enrichment.csv"),
+          row.names = FALSE)
+
+enrich_summary = enrich_assigned %>%
+  filter(!is.na(run)) %>%
+  group_by(CellType, label, marker_set, run) %>%
+  summarize(n_markers    = dplyr::n_distinct(gene_id),
+            n_enriched   = dplyr::n_distinct(gene_id[enriched]),
+            pct_enriched = 100 * dplyr::n_distinct(gene_id[enriched]) /
+                                 dplyr::n_distinct(gene_id),
+            .groups = "drop") %>%
+  tidyr::pivot_wider(id_cols = c(CellType, label, marker_set),
+                     names_from = run, values_from = pct_enriched,
+                     names_prefix = "pct_enriched_")
+
+datatable(enrich_summary %>% mutate(across(where(is.numeric), ~round(., 1))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r, fig.width=10, fig.height=6}
+p_enrich = ggplot(enrich_assigned %>% filter(!is.na(run)),
+                  aes(x = run, y = symbol, fill = enriched)) +
+  geom_tile(color = "white") +
+  facet_wrap(~ paste0(label, ". ", marker_set), scales = "free_y") +
+  scale_fill_manual(values = c(`TRUE` = "#7fbf7b", `FALSE` = "#d6604d"),
+                    name = paste0("FDR < ", fdr_enrich)) +
+  theme(axis.text.y = element_text(size = 6),
+        axis.text.x = element_text(angle = 30, hjust = 1),
+        strip.text  = element_text(size = 7)) +
+  xlab(NULL) + ylab(NULL)
+
+p_enrich
+ggsave(p_enrich, file = paste0(results_dir, "/marker_enrichment.png"),
+       width = 10, height = 6)
+```
+
+## Is any marker set enriched somewhere else instead?
+
+A marker set that is not enriched in its assigned cluster may still be enriched
+in a different one, which would mean the label is on the wrong cluster rather
+than the marker being uninformative. This uses the combined run.
+
+```{r}
+best_cluster = enrich_long %>%
+  filter(run == "combined") %>%
+  group_by(gene_id) %>%
+  slice_min(FDR, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  dplyr::select(gene_id, best_label = label, best_FDR = FDR)
+
+misassigned = assigned %>%
+  left_join(best_cluster, by = "gene_id") %>%
+  mutate(best_CellType = anno[as.integer(best_label)],
+         on_assigned   = !is.na(best_label) & best_label == label) %>%
+  filter(!is.na(best_label), !on_assigned, best_FDR < fdr_enrich) %>%
+  dplyr::select(symbol, marker_set, assigned_to = CellType,
+                most_enriched_in = best_CellType, best_FDR) %>%
+  arrange(marker_set, best_FDR)
+
+write.csv(misassigned,
+          file = paste0(results_dir, "/SuppTable_markers_enriched_elsewhere.csv"),
+          row.names = FALSE)
+
+datatable(misassigned %>% mutate(best_FDR = signif(best_FDR, 3)),
+          filter = "top", rownames = FALSE)
+```
+
+`r if (nrow(misassigned) == 0) "Every canonical marker that is significantly enriched anywhere is most enriched in the cluster its set is assigned to." else paste0(nrow(misassigned), " canonical marker(s) are most strongly enriched in a cluster other than the one their set is assigned to. That is a pointer to a mislabeled cluster rather than to an uninformative marker, and it is worth reading alongside the per-cluster table above: a set whose members are scattered across other clusters is not describing the cluster it is attached to.")`
+
+## Detection, by stage
+
 Each cluster is scored only against the markers of its own assigned type, in
 each stage separately, on uncorrected depth-normalized values.
 
 ```{r}
-canon_ids = unique(canon_resolved$gene_id)
 canon_mat = as.matrix(logcounts(combined.sce)[canon_ids, , drop = FALSE])
 
 canon_long = t(canon_mat) %>%
@@ -720,6 +879,15 @@ score_stage = function(detect, frac) {
 }
 
 canon_verdict = score_stage(detect_pct, marker_frac) %>%
+  # carry the enrichment result alongside, so a cluster can be seen to pass on
+  # detection while its markers are not markers of it at all
+  left_join(enrich_summary %>%
+              dplyr::select(label, pct_enriched_combined,
+                            pct_enriched_larva, pct_enriched_transformer),
+            by = "label") %>%
+  mutate(markers_enriched = !is.na(pct_enriched_combined) &
+                            pct_enriched_combined >= marker_frac,
+         interpretable = markers_enriched) %>%
   arrange(verdict, as.integer(label))
 
 write.csv(canon_verdict,
@@ -743,12 +911,24 @@ one_stage_clusters = canon_verdict %>% filter(verdict == "present in one stage o
 
 # no cluster may fall outside the four outcomes
 stopifnot(n_holds + n_fails + n_one_stage + n_unsampled == n_tested)
+
+# a detection result is only meaningful where the markers are markers of that
+# cluster in the first place
+n_uninterpretable = sum(!canon_verdict$interpretable, na.rm = TRUE)
+holds_and_enriched = sum(canon_verdict$verdict == "holds in both stages" &
+                           canon_verdict$interpretable, na.rm = TRUE)
 ```
 
 Of the `r n_tested` clusters with a marker set, `r n_comparable` have at least
 `r min_cells_stage` cells in both stages and can be compared across the merge
 at all. Of those, **`r n_holds` express at least half their assigned canonical
 markers in both stages** and `r n_fails` do not.
+
+**`r holds_and_enriched` clusters both hold on detection and have their assigned
+markers actually enriched in them.** That is the number to quote. A cluster that
+detects its markers without them being enriched there has not passed anything:
+the genes are on, but they are not markers of that cluster, so the annotation is
+untested rather than confirmed.
 
 `r if (n_one_stage == 0) "Every testable cluster is present in both stages." else paste0(n_one_stage, " cluster(s) are present in one stage only: ", paste(one_stage_clusters$CellType, collapse = "; "), ". A cluster that exists in one stage cannot agree or disagree with itself across the merge, so these are neither evidence for nor against an integrated atlas and are reported rather than counted.")`
 
@@ -869,6 +1049,7 @@ summary_tbl = data.frame(
     "Methods. stage contrast exceeds the July replicate floor",
     "Methods. clusters eligible for the discordance test",
     "clusters with a curated marker set",
+    "assigned markers enriched in their own cluster",
     "comparable across stages",
     "identity holds in both stages",
     "identity fails in at least one stage",
@@ -878,7 +1059,9 @@ summary_tbl = data.frame(
     if (nrow(lt_row) == 0) "not testable" else
       if (stage_contrast_large) "yes, stage contrast exceeds the floor" else "no",
     as.character(length(discordance$eligible)),
-    as.character(n_tested), as.character(n_comparable),
+    as.character(n_tested),
+    as.character(sum(canon_verdict$interpretable, na.rm = TRUE)),
+    as.character(n_comparable),
     as.character(n_holds), as.character(n_fails), as.character(n_one_stage),
     as.character(sum(lib_verdict$holds_everywhere))))
 
