@@ -1,10 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=sra_download       # Job name
-#SBATCH --nodes=1                     # Run on a single node
-#SBATCH --cpus-per-task=8             # Match fasterq-dump threading
-#SBATCH --mem=32G                     # Memory required for caching/processing
-#SBATCH --time=04:00:00               # Time limit (Hrs:Min:Sec)
-#SBATCH --output=sra_job_%j.out       # Standard output log
+#SBATCH --job-name=sra_download       
+#SBATCH --nodes=1                     
+#SBATCH --cpus-per-task=8             
+#SBATCH --mem=32G                     
+#SBATCH --time=04:00:00              
+#SBATCH --output=run/sra_job_%j.out       
+#SBATCH --account=bioinformaticscore
 
 # 1. Load the SRA Toolkit module (update the name to match your HPCC exact module path)
 module purge
