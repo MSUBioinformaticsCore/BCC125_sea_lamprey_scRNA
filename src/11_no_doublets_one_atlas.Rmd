@@ -45,89 +45,29 @@ no_dbl_dir  = paste0(params$project_dir, "/results/20260803_no_doublets")
 
 # Purpose
 
-**Question 1: how large is the difference between the stages?** Measured in Section 2. 
-It does not call that difference a batch effect, because nothing
-in this data can attribute it: larvae and transformers differ by developmental
-stage and by collection date at once, so a large difference is equally what
-real developmental biology produces and what a confounded technical batch
-produces.
+**Do the 20 clusters of the doublet-filtered atlas name the same cell types in larval and in transformer cells, or should the stages be described separately?**
 
-Nothing here can measure the July-to-November technical component directly,
-because it is the same variable as stage. What can be asked is **which cell
-types the difference falls on**, and a technical effect and a developmental
-effect predict different answers.
+Section 3 answers it, using the curated markers. A cluster is one cell type
+across the merge if it expresses the canonical markers for its annotated type in
+larval cells and in transformer cells **separately**.
 
-A technical batch effect arises from dissociation, capture, library chemistry
-and sequencing. Those act on every cell in a library. It should therefore
-degrade agreement across most cell types at once, including ones with no
-developmental reason to differ between July and November, such as erythrocytes
-and immune cells.
+**Why this is the question, given the confound.** Larvae were collected in July
+and transformers in November, so developmental stage, collection date and
+technical batch are one variable. Nothing computed from this dataset can say how
+much of the larva-to-transformer difference is developmental and how much is
+technical, and no amount of analysis will change that.
 
-A developmental effect should be concentrated. The somatic gonad differentiates
-between a sex-labile larva and a newly transformed animal. Blood and immune
-cells passing through the tissue do not.
+The identity test sidesteps the confound rather than trying to resolve it. If a
+cluster expresses fibroblast markers in larval cells and in transformer cells,
+it is fibroblasts on both sides whatever the difference between July and
+November is made of. That claim does not require attributing the contrast, which
+is why it survives the confound.
 
-So a difference spread evenly across cell types is what a technical effect looks
-like, and one concentrated in the tissue that is developing is hard to explain
-technically, because a reagent lot or a sequencing run has no way to know which
-cells belong to the gonad.
-
-**This is evidence and not proof, and the limit should be stated wherever the
-result is used.** Batch effects are not guaranteed to be uniform: cell types
-differ in RNA content and capture efficiency, so a technical effect can interact
-with cell type. Non-uniformity argues against a purely technical explanation
-without excluding one.
-
-The measurement uses a **per-cluster replicate floor**. Undifferentiated.1 and
-Undifferentiated.2 are the same stage from the same July collection and differ
-only by animal and library preparation, so disagreement between them is animal
-and library variation with no biological difference behind it. Each cluster is
-scored against its own floor, because clusters differ enormously in how
-reproducible their markers are and pooling would let that spread swamp the
-comparison.
-
-**Question 2: does cell type identity survive across stages?** Section 3 measures that,
-using the curated markers. A cluster is one cell type across the merge if it
-expresses the canonical markers for its annotated type in larval cells and in
-transformer cells **separately**.
-
-**Why both are needed, and why either alone would mislead.** The two can
-disagree, and it is the combination that decides:
-
-```{r, echo=FALSE}
-datatable(
-  data.frame(
-    `stage difference` = c("small", "large", "large", "small"),
-    identity       = c("holds", "holds", "fails", "fails"),
-    verdict        = c("one atlas, correction optional",
-                       "one atlas, with correction",
-                       "separate atlases",
-                       "check the annotation"),
-    check.names = FALSE, stringsAsFactors = FALSE),
-  rownames = FALSE,
-  options  = list(dom = "t", ordering = FALSE))
-```
-
-The second row is the one to watch, because each analysis alone gives the wrong
-answer there. A large stage contrast with identity intact means the cells are
-the same types but with heavily remodeled expression. The discordance alone
-would say the stages are too different to combine; the marker check alone would
-say the stage difference can be ignored. Together they say integrate with
-correction, and
-treat the remodeling as a result to report rather than a problem to remove.
-
-Question 1 on its own cannot decide anything, because a cell type that remodels
-its transcriptome between life stages will show large discordance while
-remaining the same cell type. That is biology, not a batch artifact, and this
-design cannot separate the two since stage is perfectly confounded with
-collection date and batch. Question 2 is what distinguishes them.
-
-**What decides nothing.** A cluster present in only one stage. That is a
-stage-restricted population, a result rather than a failure, and it is counted
-in its own category rather than folded into either the passes or the failures.
-
-Everything else in `06`, the MST node composition, the pseudotime distributions
-and the pseudotime marker trends, is trajectory machinery and is not here.
+**Section 2 is methods justification, not evidence about the confound.** It
+establishes two things needed to defend how the atlas was built: that the two
+larval libraries agree closely enough to pool, and that the stage contrast is
+large enough to warrant correcting across it. Neither speaks to how much of that
+contrast is technical, and neither is claimed to.
 
 # Load
 
@@ -315,7 +255,7 @@ ggsave(p_stage, file = paste0(results_dir, "/cluster_composition_by_stage.png"),
        width = 8, height = 5)
 ```
 
-# 2. Does the stage difference look technical or developmental?
+# 2. Library agreement: justification for pooling and for correcting
 
 Marker genes are computed separately within each single library and the
 agreement between libraries is measured, with two metrics used throughout:
@@ -658,88 +598,18 @@ stage_contrast_large = nrow(lt_row) == 1 && isTRUE(lt_row$exceeds_floor)
 
 `r if (nrow(fm_row) == 0) "" else paste0("**Second floor.** Female versus Male gives a median overlap of ", round(fm_row$median_comparison, 1), "%, a ratio of ", round(fm_row$median_ratio, 2), " to the July floor. If the two floors are close, both the residual sex effect in shared somatic types and any difference in batch noise between collections are small, which makes the July floor a trustworthy reference for the stage contrast.")`
 
-## Is the difference spread evenly across cell types?
+**What these two numbers are for.** The replicate floor shows that
+Undifferentiated.1 and Undifferentiated.2 agree closely, which is what justifies
+pooling them as one larval group. The stage contrast sitting well below that
+floor is what justifies applying a correction across the stage boundary at all,
+since without it an integration would cluster largely by stage rather than by
+cell type.
 
-The size of the stage contrast says nothing about its source. Where it falls
-does, at least partly.
-
-Each cluster has its own stage contrast and its own replicate floor, so each
-has a ratio of the two. **If the stage difference were a uniform technical
-effect, that ratio would be roughly constant across clusters**, since
-dissociation and library chemistry act on every cell. If it is developmental,
-the ratio should vary, and should be lowest in the cell types that are actually
-changing between a sex-labile larva and a newly transformed animal.
-
-The ratio is computed per draw, so between-cluster variation can be compared
-against the draw-to-draw noise within each cluster rather than assumed to
-exceed it.
-
-```{r}
-ratio_by_draw = disc_results %>%
-  filter(comparison %in% c("UND1_vs_UND2", "larvae_vs_transformers")) %>%
-  dplyr::select(label, draw, comparison, overlap_pct) %>%
-  tidyr::pivot_wider(names_from = comparison, values_from = overlap_pct) %>%
-  filter(!is.na(UND1_vs_UND2), !is.na(larvae_vs_transformers),
-         UND1_vs_UND2 > 0) %>%
-  mutate(ratio = larvae_vs_transformers / UND1_vs_UND2,
-         CellType = anno[as.integer(label)])
-
-uniformity = if (dplyr::n_distinct(ratio_by_draw$label) < 2) NULL else
-  kruskal.test(ratio ~ factor(label), data = ratio_by_draw)
-
-ratio_summary = ratio_by_draw %>%
-  group_by(label, CellType) %>%
-  summarize(n_draws      = dplyr::n(),
-            ratio_median = median(ratio),
-            ratio_min    = min(ratio),
-            ratio_max    = max(ratio),
-            .groups = "drop") %>%
-  arrange(ratio_median)
-
-write.csv(ratio_summary,
-          file = paste0(results_dir, "/stage_to_floor_ratio_by_cluster.csv"),
-          row.names = FALSE)
-
-datatable(ratio_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
-          rownames = FALSE)
-```
-
-`r if (is.null(uniformity)) "Too few eligible clusters to test uniformity." else paste0("Ratios differ across clusters at Kruskal-Wallis p = ", signif(uniformity$p.value, 2), ". ", if (uniformity$p.value < .05) "**The stage difference does not fall evenly on every cell type.** Some clusters lose far more agreement across the stage boundary than others, by more than the draw-to-draw noise accounts for. A purely technical effect has no mechanism for that, since a reagent lot or a sequencing run cannot distinguish one cell type from another. This argues against a purely technical explanation without excluding one, because cell types differ in RNA content and capture efficiency and so a technical effect can interact with cell type." else "The ratios are consistent with being constant across clusters. That is what a uniform technical effect would produce, and it is also what a developmental effect would produce if it happened to touch every sampled cell type similarly. This test does not separate them here.")`
-
-```{r, fig.width=9, fig.height=5}
-p_ratio = ggplot(ratio_summary,
-                 aes(x = ratio_median, y = reorder(CellType, ratio_median))) +
-  geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
-  geom_linerange(aes(xmin = ratio_min, xmax = ratio_max)) +
-  geom_point(size = 2) +
-  xlab("stage agreement divided by that cluster's own replicate floor") +
-  ylab(NULL) +
-  labs(caption = paste0("1 means the stage contrast is no worse than replicate ",
-                        "libraries of the same stage. Lower means more ",
-                        "stage-specific change. Bars are the range across draws."))
-
-p_ratio
-ggsave(p_ratio, file = paste0(results_dir, "/stage_to_floor_ratio_by_cluster.png"),
-       width = 9, height = 5)
-```
-
-**The germ cells cannot enter this comparison at all, and that is biology
-rather than a filter setting.** A stage contrast is only defined for a cell type
-present at both stages. Spermatocytes and oocytes have no larval counterpart to
-compare against, so no threshold choice would admit them. The comparison runs on
-the somatic compartment because that is where a larva-to-transformer comparison
-exists.
-
-That is the setting where a developmental effect should be hardest to detect,
-which is what makes a positive result here worth something. Germ cells changing
-a great deal between a sex-labile larva and a newly transformed animal would
-surprise nobody and would discriminate poorly, since a technical effect could
-also hit cells with unusual RNA content. Somatic cells are the harder test.
-
-**The general limit.** This asks where the difference falls, not what it is
-made of. Stage is perfectly confounded with collection date and library, so
-nothing here attributes the contrast outright. Section 3 sidesteps the confound
-instead of testing it, by asking whether the cells are still the same types.
+**Neither says anything about the confound.** Stage, collection date and library
+are one variable, so how much of the stage contrast is developmental and how
+much is technical cannot be determined here, by this or by any other analysis of
+this dataset. No claim about that is made from these numbers. Section 3 does not
+need one.
 
 
 # 3. Canonical marker check
@@ -1003,14 +873,14 @@ ggsave(p_lib, file = paste0(results_dir, "/canonical_identity_by_library.png"),
 ```{r}
 summary_tbl = data.frame(
   question = c(
-    "Q1. stage contrast more discordant than the July replicate floor",
-    "Q1. clusters eligible for the discordance test",
-    "Q2. clusters with a curated marker set",
-    "Q2. comparable across stages",
-    "Q2. identity holds in both stages",
-    "Q2. identity fails in at least one stage",
-    "Q2. present in one stage only",
-    "Q2. holds in every library sampled"),
+    "Methods. stage contrast exceeds the July replicate floor",
+    "Methods. clusters eligible for the discordance test",
+    "clusters with a curated marker set",
+    "comparable across stages",
+    "identity holds in both stages",
+    "identity fails in at least one stage",
+    "present in one stage only",
+    "holds in every library sampled"),
   answer = c(
     if (nrow(lt_row) == 0) "not testable" else
       if (stage_contrast_large) "yes, stage contrast exceeds the floor" else "no",
@@ -1024,13 +894,19 @@ datatable(summary_tbl, rownames = FALSE)
 
 ## The recommendation
 
+The atlas decision rests on the identity test alone. The stage contrast is
+reported separately, because it bears on whether to correct, not on whether to
+split.
+
 ```{r}
 identity_holds = n_comparable > 0 && n_fails == 0
 identity_mixed = n_comparable > 0 && n_fails > 0 && n_fails < n_holds
 identity_fails = n_comparable > 0 && n_fails >= n_holds
 ```
 
-`r if (n_comparable == 0) "**This document cannot decide.** No cluster has enough cells in both stages for the identity test to run, so neither presentation is supported over the other by this evidence." else if (stage_contrast_large && identity_holds) "**Correct across the stages, and do not split the atlas.** The larva to transformer contrast is far larger than replicate libraries of the same stage produce, so an uncorrected integration would cluster largely by stage rather than by cell type. What that contrast is made of cannot be determined here: developmental remodeling and a July-to-November technical batch are perfectly confounded and this design cannot separate them. The identity test is what makes the integration defensible anyway, because every cluster that can be compared still expresses its canonical markers in both stages, so the clusters name the same cell types on both sides whatever the source of the contrast. Report one integrated atlas with correction, state the confound explicitly, and attribute the contrast only with independent evidence such as staining or a published bulk RNA-seq series." else if (stage_contrast_large && identity_fails) "**Report the stages separately.** The stage contrast is far more discordant than the replicate floor, and the curated markers do not hold across it for most comparable clusters, so the integrated clustering is asserting identities the markers do not support." else if (stage_contrast_large && identity_mixed) "**Integrate with correction, but name the exceptions.** The stage contrast is much more discordant than the replicate floor, and most comparable clusters keep their identity across it, but a minority do not. Report the integrated atlas, name those clusters in the text, and either split them by stage or relabel them." else if (!stage_contrast_large && identity_holds) "**The stage contrast is not larger than replicate variation, and identity holds everywhere it can be tested.** One integrated atlas is defensible and the correction is doing little work. Worth confirming that the correction is not removing real signal, since there is little here for it to remove." else "**The stage contrast is not larger than replicate variation, yet identity fails for some clusters.** That points at the annotation: a cluster whose curated markers do not hold across stages, in the absence of a large technical difference, is more likely mislabeled than mis-integrated. Revisit those annotations before deciding on the presentation."`
+`r if (n_comparable == 0) "**This document cannot decide.** No cluster has enough cells in both stages for the identity test to run, so neither presentation is supported over the other by this evidence." else if (identity_holds) "**Do not split the atlas.** Every cluster that can be compared expresses its canonical markers in larval and in transformer cells alike, so the clusters name the same cell types on both sides. That holds whatever the larva-to-transformer contrast is made of, which is why it survives the confound between stage, collection date and batch. Report one integrated atlas, and state the confound as a limitation rather than as something the analysis resolved." else if (identity_fails) "**Report the stages separately.** The curated markers do not hold across the stage boundary for most comparable clusters, so the integrated clustering asserts identities the markers do not support." else "**Integrate, but name the exceptions.** Most comparable clusters keep their identity across the stage boundary and a minority do not. Report the integrated atlas, name those clusters in the text, and either split them by stage or relabel them."`
+
+`r if (nrow(lt_row) == 0) "" else if (stage_contrast_large) "**Separately, on whether to correct.** The stage contrast is far larger than replicate libraries of the same stage produce, so an uncorrected integration would cluster largely by stage rather than by cell type. That justifies the correction as a methods choice. It says nothing about how much of the contrast is developmental and how much is technical, which this design cannot determine." else "**Separately, on whether to correct.** The stage contrast is no larger than replicate libraries of the same stage produce, so the correction is doing little work and an uncorrected integration would look much the same. Worth confirming the correction is not removing real signal, since there is little here for it to remove."`
 
 ## What this document does not answer
 
