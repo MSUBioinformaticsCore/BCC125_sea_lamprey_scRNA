@@ -1,0 +1,707 @@
+---
+title: "12_doublets_versus_intermediates"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    dbr: 0.08
+    dbr_sd: 0.02
+    prop_random: 0.5
+    k: 30
+    n_hvg: 5000
+    n_pcs: 50
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(RColorBrewer)
+library(DT)
+library(scDblFinder)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+```{r}
+results_dir     = paste0(params$project_dir, "/results/20260813_doublet_recalibration")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+
+Robject_dir  = paste0(params$project_dir, "/results/20260312/Robjects")
+
+```
+
+# Purpose
+
+**Is doublet filtering removing real transitional cells?**
+
+The worry is structural rather than a tuning problem. A doublet is two cells'
+RNA in one droplet, so it reads as a mixture of two cell types. A genuine
+transitional cell also reads as a mixture of two cell types. Any method scoring
+"looks like a mixture" will flag both, and no amount of care with the same
+method separates them.
+
+This document does two things.
+
+**Section 1 calls doublets at the platform rate**, against the unfiltered data
+as baseline.
+
+**Sections 2 to 6 test whether the flagged cells behave like collisions or like
+biology**, using four properties that separate them.
+
+## Why the default rate is wrong here
+
+`scDblFinder` documents its `dbr` argument as: *"The expected doublet rate. By
+default this is assumed to be 1% per thousand cells captured (so 4% among 4000
+thousand cells), which is appropriate for 10x datasets."*
+
+At roughly 16,700 cells per library that default expects about **16.7%**
+doublets.
+
+The PIPseq T20 3' v4.0 user guide, for the protocol actually used here, states
+that 40,000 cells added per reaction gives recovery above 20,000 cells and a
+**multiplet rate below 8%**. Cell concentration was adjusted to 4 x 10^6
+cells/ml with 10 ul loaded, which is 40,000 cells, so the standard protocol
+applies.
+
+`dbr` sets where the cutoff falls on the doublet score, so expecting twice as
+many doublets as the chemistry produces pushes the cutoff down and flags more
+cells than warranted. The rate is therefore set from the platform specification
+rather than left at the default.
+
+**Two caveats on the replacement value.** Under 8% is an upper bound rather than
+a point estimate, so `r params$dbr` is conservative and `dbr.sd` sets the
+tolerance around it; both are document parameters and worth varying. And the
+manufacturer figure comes from well-behaved cell suspensions, while dissociated
+gonad may genuinely multiplet more, so the recalibrated rate is a better
+estimate rather than ground truth.
+
+# Load
+
+```{r}
+all.sce      = readRDS(paste0(Robject_dir, "/all.sce.Rds"))
+merged.sce   = readRDS(paste0(Robject_dir, "/merged.sce.Rds"))
+combined.sce = readRDS(paste0(Robject_dir, "/combined.sce.Rds"))
+
+stopifnot(identical(colnames(combined.sce), colnames(merged.sce)))
+
+anno = c(
+  "1. Fibroblasts (migrating)", "2. Mesonephric cells",
+  "3. Granulosa cells (migrating)", "4. Granulosa cells",
+  "5. Oogonia/Oocytes", "6. Endothelial cells",
+  "7. Primordial germ cells (migrating)", "8. Erythrocytes",
+  "9. Pre-granulosa cells (migrating)", "10. Leukocytes",
+  "11. Hemopoietic stem cells", "12. Podocytes", "13. Macrophages",
+  "14. Pre-granulosa cells (mitotic)", "15. Immune cells (migrating, mitotic)",
+  "16. Spermatocytes (cytokinetic)", "17. Male germ cells (migrating)",
+  "18. Spermatocytes (apoptotic)", "19. Spermatocytes (GPCR-activated)")
+
+stopifnot(length(anno) == nlevels(colData(merged.sce)$label))
+
+cell_key = data.frame(
+  barcode = colnames(combined.sce),
+  batch   = as.character(colData(merged.sce)$batch),
+  label   = as.character(colData(merged.sce)$label),
+  stringsAsFactors = FALSE) %>%
+  mutate(CellType = anno[as.integer(label)])
+
+cells_per_library = cell_key %>% dplyr::count(batch, name = "n_cells")
+datatable(cells_per_library, rownames = FALSE)
+```
+
+`r paste0("Default dbr would be ", paste(round(cells_per_library$n_cells / 1000, 1), collapse = ", "), "% for these libraries, against a platform specification below 8%.")`
+
+# 1. Call doublets at the platform rate
+
+`scDblFinder` is run once per library at the platform rate, with `clusters`
+supplied so that each call carries a putative origin, which sections 3 and 4
+need.
+
+## What is supplied as `clusters`
+
+A per-library clustering computed here: log-normalise, model variance, top
+`r params$n_hvg` highly variable genes, PCA to `r params$n_pcs` components,
+shared nearest neighbour graph at k = `r params$k`, Louvain. Groups under 10 cells
+are pooled so their cells are still scored.
+
+These settings match `01`, so cluster granularity is comparable to the rest of
+the project. All three are document parameters.
+
+A clustering derived from data that still contains doublets can give a doublet
+population its own cluster, which the simulation would then treat as a source.
+`propRandom` sets the share of artificial doublets built from random cell pairs
+rather than cluster combinations, and is raised above its default here so that a
+proportion of them never depend on the clustering being right.
+
+```{r}
+dbl_file = paste0(Robject_out_dir, "/scdbl_recalibrated.Rds")
+
+if (file.exists(dbl_file)) {
+  dbl = readRDS(dbl_file)
+} else {
+  dbl = lapply(names(all.sce), function(s) {
+    x = all.sce[[s]]
+
+    # populations for the simulation, computed per library
+    set.seed(1)
+    xc  = logNormCounts(x)
+    dec = modelGeneVar(xc)
+    hvg = getTopHVGs(dec, n = params$n_hvg)
+    xc  = runPCA(xc, subset_row = hvg, ncomponents = params$n_pcs)
+    g   = buildSNNGraph(xc, use.dimred = "PCA", k = params$k)
+    loc = as.character(igraph::cluster_louvain(g)$membership)
+
+    # a group too small to seed simulation is pooled rather than dropped
+    tab = table(loc)
+    loc[loc %in% names(tab)[tab < 10]] = "small"
+
+    set.seed(100)
+    d_platform = scDblFinder(x, dbr = params$dbr, dbr.sd = params$dbr_sd,
+                             clusters = loc, propRandom = params$prop_random)
+
+    data.frame(
+      sample          = s,
+      barcode         = colnames(x),
+      local_cluster   = paste(s, loc, sep = ":"),
+      sum             = colData(x)$sum,
+      detected        = colData(x)$detected,
+      class_platform  = as.character(d_platform$scDblFinder.class),
+      score_platform  = d_platform$scDblFinder.score,
+      origin          = as.character(d_platform$scDblFinder.mostLikelyOrigin),
+      origin_ambig    = d_platform$scDblFinder.originAmbiguous,
+      stringsAsFactors = FALSE)
+  })
+  dbl = do.call(rbind, dbl)
+  saveRDS(dbl, file = dbl_file)
+}
+
+# the annotated cluster is attached afterwards and used only for reporting
+# which populations the flagged cells belong to. It plays no part in the
+# doublet calls or in the parent identification.
+dbl = dbl %>%
+  left_join(cell_key %>% dplyr::select(barcode, label, CellType), by = "barcode") %>%
+  mutate(flagged = class_platform == "doublet")
+
+write.csv(dbl, file = paste0(results_dir, "/doublet_calls_both_rates.csv"),
+          row.names = FALSE)
+```
+
+```{r}
+rate_tbl = dbl %>%
+  group_by(sample) %>%
+  summarize(n_cells   = dplyr::n(),
+            n_flagged = sum(flagged),
+            pct_flagged = 100 * mean(flagged),
+            .groups = "drop")
+
+rate_tbl = bind_rows(rate_tbl,
+  dbl %>% summarize(sample = "all", n_cells = dplyr::n(),
+                    n_flagged = sum(flagged),
+                    pct_flagged = 100 * mean(flagged)))
+
+write.csv(rate_tbl, file = paste0(results_dir, "/doublet_rate_by_calibration.csv"),
+          row.names = FALSE)
+
+datatable(rate_tbl %>% mutate(across(where(is.numeric), ~round(., 2))),
+          rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+
+n_flagged = sum(dbl$flagged)
+```
+
+`r paste0("Filtering at the platform rate would remove ", n_flagged, " cells, ", round(100 * n_flagged / nrow(dbl), 2), "% of the dataset. Those cells are the subject of the rest of this document.")`
+
+**Loading was constant across libraries**, 4 x 10^6 cells/ml and 10 ul into
+every reaction, so the expected collision rate is the same in each. Per-library
+rates that differ substantially are therefore not explained by loading, and the
+excess in a high library is worth attention.
+
+```{r, fig.width=8, fig.height=4}
+p_rate = rate_tbl %>%
+  filter(sample != "all") %>%
+  ggplot(aes(x = sample, y = pct_flagged)) +
+  geom_col(fill = "#9ecae1") +
+  geom_hline(yintercept = 8, linetype = "dashed", colour = "grey30") +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1)) +
+  xlab(NULL) + ylab("percent of cells called doublet") +
+  labs(caption = "Dashed line is the PIPseq specified multiplet rate ceiling.")
+
+p_rate
+ggsave(p_rate, file = paste0(results_dir, "/doublet_rate_by_calibration.png"),
+       width = 8, height = 4)
+```
+
+# 2. Where do the flagged cells sit?
+
+If the flagged cells are scattered across clusters, filtering thins every
+population slightly and removes none of them. If they concentrate in a few
+clusters, those clusters are what the concern is about, and the tests below
+apply to them rather than to everything.
+
+```{r}
+concentration = dbl %>%
+  group_by(label, CellType) %>%
+  summarize(n_cells          = dplyr::n(),
+            n_flagged        = sum(flagged),
+            pct_of_cluster   = 100 * mean(flagged),
+            .groups = "drop") %>%
+  mutate(pct_of_all_flagged = 100 * n_flagged / sum(n_flagged)) %>%
+  arrange(desc(pct_of_cluster))
+
+write.csv(concentration,
+          file = paste0(results_dir, "/flagged_cells_by_cluster.csv"),
+          row.names = FALSE)
+
+datatable(concentration %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+
+# clusters where recalibration changes a material share of the cluster
+focus = concentration %>% filter(pct_of_cluster >= 5, n_flagged >= 20)
+```
+
+`r if (nrow(focus) == 0) "No cluster loses 5% or more of its cells to recalibration. The change is spread thinly, which means the default rate was not selectively removing any one population, and the concern does not have a specific target in this dataset." else paste0(nrow(focus), " cluster(s) have at least 5% of their cells flagged: ", paste(focus$CellType, collapse = "; "), ". The tests below run on these.")`
+
+```{r}
+# scDblFinder documents mostLikelyOrigin only as "the presumed cluster
+# combination", without specifying the separator. Rather than assume one, split
+# on any non-alphanumeric run and keep the pieces that are known cluster
+# labels. Longest labels are matched first so "1" cannot be taken from "10".
+known_labels = sort(unique(sub("^[^:]*:", "", dbl$local_cluster)))
+# these are curated cell type names, not cluster numbers
+
+parse_origin = function(x) {
+  if (is.na(x)) return(character(0))
+  parts = strsplit(x, "[^[:alnum:]]+")[[1]]
+  parts = parts[nzchar(parts)]
+  parts[parts %in% known_labels]
+}
+
+# origins refer to the per-library clusters computed above, so they are mapped
+# back to annotated clusters for interpretation
+local_to_anno = dbl %>%
+  dplyr::count(local_cluster, CellType, name = "n") %>%
+  group_by(local_cluster) %>%
+  slice_max(n, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  dplyr::rename(dominant_CellType = CellType)
+
+datatable(local_to_anno, filter = "top", rownames = FALSE)
+
+origin_examples = dbl %>%
+  filter(!is.na(origin)) %>%
+  dplyr::count(origin, name = "n") %>%
+  arrange(desc(n)) %>%
+  head(10) %>%
+  rowwise() %>%
+  mutate(parsed = paste(parse_origin(origin), collapse = " + "),
+         n_parsed = length(parse_origin(origin))) %>%
+  ungroup()
+
+datatable(origin_examples, rownames = FALSE,
+          options = list(dom = "t", ordering = FALSE))
+```
+
+**Check this table before trusting sections 3 and 4.** `parsed` should contain
+two cluster labels for every row. If `n_parsed` is not 2, the separator is
+something the split does not handle and `parse_origin` needs adjusting; the two
+tests below depend on it.
+
+# 3. Test 1: can these cells express what neither parent does?
+
+The decisive test, and the only one that can falsify the doublet explanation
+outright.
+
+A doublet is two real cells' RNA added together. It cannot express a gene above
+the level of **both** contributing cell types, because it contains nothing that
+was not in one of them. A transitional cell can, and often does, since
+transitions involve genes transiently high at the intermediate state that are
+low at both endpoints.
+
+`scDblFinder.mostLikelyOrigin` gives the putative parent pair. The test compares
+the flagged cells against both parents at once, using `pval.type = "all"`,
+which requires a gene to be significantly up against **every** other group
+rather than merely against one.
+
+```{r}
+novel_expression = function(cl, min_cells = 20, fdr = 0.01) {
+  cells = dbl %>% filter(flagged, label == cl, !is.na(origin))
+  if (nrow(cells) < min_cells) return(NULL)
+
+  # the commonest putative origin for this group
+  top_origin = names(sort(table(cells$origin), decreasing = TRUE))[1]
+  parents    = parse_origin(top_origin)
+  if (length(parents) != 2) return(NULL)
+
+  test_bc = cells$barcode
+  pa_bc   = cell_key$barcode[cell_key$label == parents[1]]
+  pb_bc   = cell_key$barcode[cell_key$label == parents[2]]
+  pa_bc   = setdiff(pa_bc, test_bc)
+  pb_bc   = setdiff(pb_bc, test_bc)
+  if (length(pa_bc) < min_cells || length(pb_bc) < min_cells) return(NULL)
+
+  keep = c(test_bc, pa_bc, pb_bc)
+  grp  = factor(c(rep("flagged", length(test_bc)),
+                  rep("parentA", length(pa_bc)),
+                  rep("parentB", length(pb_bc))),
+                levels = c("flagged", "parentA", "parentB"))
+
+  sub = combined.sce[, match(keep, colnames(combined.sce))]
+
+  # pval.type = "all" requires a gene to be up against BOTH parents, which is
+  # what "above what either parent could contribute" means
+  fm = findMarkers(sub, grp, test.type = "t", direction = "up",
+                   pval.type = "all")
+
+  res = as.data.frame(fm[["flagged"]])
+  res$Gene = rownames(res)
+
+  data.frame(
+    label        = cl,
+    CellType     = anno[as.integer(cl)],
+    origin       = top_origin,
+    parentA      = anno[as.integer(parents[1])],
+    parentB      = anno[as.integer(parents[2])],
+    n_tested     = length(test_bc),
+    n_above_both = sum(res$FDR < fdr, na.rm = TRUE),
+    top_genes    = paste(head(res$Gene[order(res$FDR)], 10), collapse = ", "),
+    stringsAsFactors = FALSE)
+}
+
+novel_file = paste0(Robject_out_dir, "/novel_expression.Rds")
+
+if (file.exists(novel_file)) {
+  novel = readRDS(novel_file)
+} else {
+  novel = if (nrow(focus) == 0) NULL else
+    purrr::map_dfr(focus$label, novel_expression)
+  saveRDS(novel, file = novel_file)
+}
+
+if (!is.null(novel)) {
+  write.csv(novel, file = paste0(results_dir, "/novel_expression_test.csv"),
+            row.names = FALSE)
+  datatable(novel, rownames = FALSE)
+}
+```
+
+`r if (is.null(novel) || nrow(novel) == 0) "No cluster had enough flagged cells with an unambiguous origin to run this test." else paste0("Genes expressed above **both** putative parents, at FDR < 0.01: ", paste(paste0(novel$CellType, " ", novel$n_above_both), collapse = "; "), ". A count above zero means those cells contain expression that no mixture of the two parent types could produce, which is evidence they are not doublets. A count of zero is consistent with a mixture, though it does not prove one, since a transitional state can also lie between its endpoints without exceeding either.")`
+
+# 4. Test 2: are they commoner than collision allows?
+
+Doublets form by random co-encapsulation, so the rate for a pair of types is
+proportional to their abundances. A biological population has no reason to obey
+that.
+
+For clusters i and j, the expected share of doublets is proportional to
+`2 * p_i * p_j`, where `p` is the proportion of cells in that cluster. The
+observed share comes from `mostLikelyOrigin`.
+
+```{r}
+p_cluster = cell_key %>%
+  dplyr::count(label, name = "n") %>%
+  mutate(p = n / sum(n))
+
+origin_counts = dbl %>%
+  filter(class_platform == "doublet", !is.na(origin)) %>%
+  dplyr::count(origin, name = "observed")
+
+expected_pairs = expand.grid(i = p_cluster$label, j = p_cluster$label,
+                             stringsAsFactors = FALSE) %>%
+  filter(i < j) %>%
+  left_join(p_cluster %>% dplyr::select(i = label, p_i = p), by = "i") %>%
+  left_join(p_cluster %>% dplyr::select(j = label, p_j = p), by = "j") %>%
+  mutate(w = 2 * p_i * p_j,
+         expected_share = w / sum(w))
+
+collision = origin_counts %>%
+  mutate(pair = origin) %>%
+  rowwise() %>%
+  mutate(parts = list(sort(parse_origin(pair)))) %>%
+  ungroup() %>%
+  filter(lengths(parts) == 2) %>%
+  mutate(i = vapply(parts, function(x) x[1], character(1)),
+         j = vapply(parts, function(x) x[2], character(1))) %>%
+  dplyr::select(-parts) %>%
+  left_join(expected_pairs %>% dplyr::select(i, j, expected_share),
+            by = c("i", "j")) %>%
+  filter(!is.na(expected_share)) %>%
+  mutate(observed_share = observed / sum(observed),
+         enrichment     = observed_share / expected_share) %>%
+  arrange(desc(enrichment))
+
+write.csv(collision, file = paste0(results_dir, "/collision_enrichment.csv"),
+          row.names = FALSE)
+
+datatable(collision %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+An enrichment near 1 means the pair occurs about as often as random collision
+predicts. Values far above 1 mean the pair is commoner than collision can
+account for, which is evidence for a real population rather than a coincidence
+of loading.
+
+`scDblFinder` also ships `doubletPairwiseEnrichment()` and
+`clusterStickiness()`, which test this with their own null. They are worth
+running alongside the arithmetic above; the calculation here is kept explicit so
+the expectation is visible rather than delegated.
+
+# 5. Test 3: do they carry two cells' worth of RNA?
+
+**First, whether this test is independent of the score.** `scDblFinder`
+documents `includePCs`, `use.cxds` and kNN-derived features, but does not say
+whether total counts are among the classifier's predictors. If they are, this
+test partly restates the score rather than checking it. That can be settled from
+the data instead of the documentation: if the score were being driven by library
+size, the two would be strongly monotonically related.
+
+```{r, fig.width=8, fig.height=4}
+lib_vs_score = dbl %>%
+  group_by(sample) %>%
+  summarize(rho = suppressWarnings(cor(sum, score_platform, method = "spearman")),
+            .groups = "drop")
+
+datatable(lib_vs_score %>% mutate(rho = round(rho, 3)),
+          rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+
+p_libscore = ggplot(dbl, aes(x = sum, y = score_platform)) +
+  geom_point(size = .2, alpha = .2) +
+  scale_x_log10() +
+  facet_wrap(~ sample, nrow = 1) +
+  xlab("total counts") + ylab("doublet score")
+
+p_libscore
+ggsave(p_libscore, file = paste0(results_dir, "/score_vs_library_size.png"),
+       width = 8, height = 4)
+```
+
+`r paste0("Spearman correlation between total counts and doublet score: ", paste(paste0(lib_vs_score$sample, " ", round(lib_vs_score$rho, 2)), collapse = "; "), ". A weak correlation means the score is not simply tracking RNA content and the test below is close to independent of it. A strong one means the two are largely the same measurement and the ratios should be read as corroboration rather than as a check.")`
+
+Oocytes have the highest median UMI in this dataset and a below-average doublet
+rate, which points toward the score not tracking RNA content.
+
+## Is 2x attainable at this depth?
+
+The expectation that a doublet carries twice the UMIs assumes recovery is
+roughly linear in input molecules. Shallow sequencing makes the ratio noisy.
+Saturation compresses it, because once the same molecules are being resequenced
+a cell with twice the mRNA no longer returns twice the UMIs.
+
+Both are checkable here. If the UMI distribution has no mass near twice the
+median, the test cannot detect a doublet signature however many doublets are
+present, and a low ratio below would carry no information.
+
+```{r, fig.width=9, fig.height=4}
+depth_headroom = dbl %>%
+  group_by(sample) %>%
+  summarize(median_umi = median(sum),
+            p95_ratio  = quantile(sum, .95) / median(sum),
+            p99_ratio  = quantile(sum, .99) / median(sum),
+            max_ratio  = max(sum) / median(sum),
+            pct_over_2x = 100 * mean(sum > 2 * median(sum)),
+            median_genes = median(detected),
+            .groups = "drop")
+
+write.csv(depth_headroom, file = paste0(results_dir, "/depth_headroom.csv"),
+          row.names = FALSE)
+
+datatable(depth_headroom %>% mutate(across(where(is.numeric), ~round(., 2))),
+          rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+
+p_depth = ggplot(dbl, aes(x = sum / median(sum), fill = flagged)) +
+  geom_histogram(bins = 60, position = "identity", alpha = .55) +
+  geom_vline(xintercept = 2, linetype = "dashed", colour = "grey30") +
+  scale_x_log10() +
+  scale_fill_brewer(palette = "Set1", direction = -1) +
+  facet_wrap(~ sample, nrow = 1) +
+  xlab("total counts, relative to the library median") + ylab("cells") +
+  labs(fill = "flagged",
+       caption = "Dashed line is twice the median. If little mass sits at or beyond it, the ratio test has no room to work.")
+
+p_depth
+ggsave(p_depth, file = paste0(results_dir, "/depth_headroom.png"),
+       width = 9, height = 4)
+```
+
+`r paste0("Cells above twice their library median: ", paste(paste0(depth_headroom$sample, " ", round(depth_headroom$pct_over_2x, 1), "%"), collapse = "; "), ".")`
+
+**How to read this before reading the ratios.** If a few percent of cells sit at
+or beyond twice the median, the distribution has the range needed and the ratios
+below mean what they say. If almost nothing does, the library is compressed,
+whether by saturation or by a narrow range of cell sizes, and a ratio near 1 is
+then uninformative rather than evidence against collisions.
+
+Sequencing saturation from the PIPseq run would settle the mechanism directly if
+those per-library metrics are to hand. The distribution above answers the
+practical question without them.
+
+## The ratios
+
+
+A true doublet holds roughly twice the transcripts of a singlet of the same
+type. A transitional cell holds one cell's worth. Comparison is within cluster,
+because cell types differ in RNA content and a global comparison would only
+recover that difference.
+
+```{r}
+umi_ratio = dbl %>%
+  group_by(label, CellType) %>%
+  summarize(
+    n_singlet      = sum(class_platform == "singlet"),
+    n_doublet      = sum(class_platform == "doublet"),
+    med_singlet    = median(sum[!flagged]),
+    med_flagged    = if (sum(flagged) >= 10) median(sum[flagged]) else NA_real_,
+    .groups = "drop") %>%
+  mutate(ratio_flagged = med_flagged / med_singlet) %>%
+  arrange(desc(n_doublet))
+
+write.csv(umi_ratio, file = paste0(results_dir, "/umi_ratio_by_cluster.csv"),
+          row.names = FALSE)
+
+datatable(umi_ratio %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+`ratio_doublet` near 2 is what collisions look like. **`ratio_flagged` is the
+column that matters**: it is the flagged cells against the singlets of
+their own cluster. Near 1 means they carry one cell's worth of RNA and were
+being removed for looking like mixtures rather than for being them. Near 2 means
+the default rate was catching genuine collisions and recalibration is losing
+them.
+
+# 6. Test 4: coherence, and where reproducibility does not apply
+
+Doublets arise from many independent random pairings, so they should not form a
+tight group with markers of their own. A real transitional population should.
+
+```{r}
+coherence = function(cl, min_cells = 20, fdr = 0.01) {
+  bc_r = dbl$barcode[dbl$flagged & dbl$label == cl]
+  bc_s = dbl$barcode[!dbl$flagged & dbl$label == cl]
+  if (length(bc_r) < min_cells || length(bc_s) < min_cells) return(NULL)
+
+  keep = c(bc_r, bc_s)
+  grp  = factor(c(rep("flagged", length(bc_r)),
+                  rep("singlet", length(bc_s))))
+  sub  = combined.sce[, match(keep, colnames(combined.sce))]
+
+  fm  = findMarkers(sub, grp, test.type = "t", direction = "up",
+                    pval.type = "any")
+  res = as.data.frame(fm[["flagged"]])
+
+  data.frame(label = cl, CellType = anno[as.integer(cl)],
+             n_flagged = length(bc_r),
+             n_own_markers  = sum(res$FDR < fdr, na.rm = TRUE),
+             stringsAsFactors = FALSE)
+}
+
+coh = if (nrow(focus) == 0) NULL else purrr::map_dfr(focus$label, coherence)
+
+if (!is.null(coh)) {
+  write.csv(coh, file = paste0(results_dir, "/coherence_test.csv"),
+            row.names = FALSE)
+  datatable(coh, rownames = FALSE)
+}
+```
+
+`r if (is.null(coh) || nrow(coh) == 0) "No cluster had enough flagged cells to test coherence." else "A high count of markers distinguishing the flagged cells from the singlets of their own cluster means they are a distinct group rather than a random scatter of mixtures. A low count means they look like their neighbours plus noise."`
+
+## Reproducibility, and why it applies to only one comparison
+
+Cross-library reproducibility sounds like the obvious check and mostly is not
+available here.
+
+**Undifferentiated.1 against Undifferentiated.2 is the only replicate pair.**
+Same stage, same collection, same sex-labile status, differing by animal and
+library preparation. A real population present in one should appear in the
+other.
+
+**Everywhere else it does not apply.** A transitional state occurring during
+metamorphosis exists only in TF and TM. A female-specific one exists only in TF.
+Absence from the larval libraries is then biology, not evidence of doublethood,
+and for a population confined to a single library there is no replicate at all.
+For those, tests 1 and 2 carry the weight.
+
+Even between the larval libraries the test is weak, since collisions occur in
+both. Presence in both discriminates nothing; only the rate relative to
+collision does, which is test 2.
+
+```{r}
+larval = c("UND1_C00004336", "UND2_C00004362")
+
+repro = dbl %>%
+  filter(sample %in% larval) %>%
+  group_by(label, CellType, sample) %>%
+  summarize(pct_flagged = 100 * mean(flagged), .groups = "drop") %>%
+  tidyr::pivot_wider(id_cols = c(label, CellType), names_from = sample,
+                     values_from = pct_flagged) %>%
+  filter(!is.na(.data[[larval[1]]]), !is.na(.data[[larval[2]]]))
+
+datatable(repro %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+```
+
+# 7. Summary
+
+```{r}
+summary_tbl = data.frame(
+  question = c(
+    "cells in the unfiltered dataset",
+    "cells flagged at the PIPseq rate",
+    "clusters losing 5% or more of their cells to filtering"),
+  value = c(
+    as.character(nrow(dbl)),
+    paste0(n_flagged, " (", round(100 * n_flagged / nrow(dbl), 2), "%)"),
+    as.character(nrow(focus))))
+
+datatable(summary_tbl, rownames = FALSE,
+          options = list(dom = "t", ordering = FALSE))
+```
+
+**How to read the four tests together.** Test 1 is the only one that can falsify
+the doublet explanation, and the reason is worth stating because it is easy to
+build a test that cannot. `scDblFinder` scores a cell by its similarity to
+artificial doublets built from pairs of real cells, so any test asking "does
+this look like a mixture of two cells" restates the criterion that flagged it
+and will always agree. Test 1 asks something different: a sum of two cells
+cannot exceed the higher of its two contributors in any gene. That is a
+constraint rather than a similarity, and a cell can sit on top of the simulated
+mixtures while still breaking it.
+
+Test 2 is strong and independent, since collision rates come from loading rather
+than from expression. Test 3 is good but not decisive, for three
+reasons: a heterotypic doublet of a small cell and a large one need not reach
+twice the median, its independence from the score should be judged from the
+correlation reported in section 5, and the 2x expectation itself only holds if
+the depth allows it, which the headroom check in section 5 establishes. Test 4 is supporting.
+
+**What none of them can do.** None proves a cell is transitional. They establish
+whether the doublet explanation survives, and it is possible for it to survive
+while the cells are still real. A negative result across all four means the
+cells behave like collisions in every respect measurable here, which is the
+strongest available reason to keep filtering them.
+
+# Session info
+
+```{r}
+sessionInfo()
+```
