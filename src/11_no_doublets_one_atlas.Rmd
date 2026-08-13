@@ -68,12 +68,19 @@ transformer cells **separately**.
 **Why both are needed, and why either alone would mislead.** The two can
 disagree, and it is the combination that decides:
 
-| batch effect | identity | verdict |
-| --- | --- | --- |
-| small | holds | one atlas, correction optional |
-| large | holds | one atlas, with correction |
-| large | fails | separate atlases |
-| small | fails | check the annotation, not the batch |
+```{r, echo=FALSE}
+datatable(
+  data.frame(
+    `batch effect` = c("small", "large", "large", "small"),
+    identity       = c("holds", "holds", "fails", "fails"),
+    verdict        = c("one atlas, correction optional",
+                       "one atlas, with correction",
+                       "separate atlases",
+                       "check the annotation, not the batch"),
+    check.names = FALSE, stringsAsFactors = FALSE),
+  rownames = FALSE,
+  options  = list(dom = "t", ordering = FALSE))
+```
 
 The second row is the one to watch, because each analysis alone gives the wrong
 answer there. A large stage contrast with identity intact means the cells are
