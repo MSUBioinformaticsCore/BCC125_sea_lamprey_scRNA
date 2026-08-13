@@ -51,14 +51,21 @@ atlas, or as separate atlases?**
 Two different questions decide that, and they are easy to confuse. This
 document runs both, on the doublet-filtered clustering, and nothing else.
 
-**Question 1: how large is the batch effect?** Section 2 measures it. Marker
-genes are computed separately within each library and the agreement between
-libraries is compared. The comparison that matters is against a **replicate
-floor**: Undifferentiated.1 against Undifferentiated.2 are the same stage, same
-collection date and differ only by animal and library preparation, so whatever
-disagreement appears there is what "no batch effect" looks like in this data.
-Larvae against transformers is then read relative to that floor rather than
-against zero.
+**Question 1: how large is the difference between the stages?** Section 2
+measures it. It does not call that difference a batch effect, because nothing
+in this data can attribute it: larvae and transformers differ by developmental
+stage and by collection date at once, so a large difference is equally what
+real developmental biology produces and what a confounded technical batch
+produces.
+
+Marker genes are computed separately within each library and the agreement
+between libraries is compared, against a **replicate floor**.
+Undifferentiated.1 and Undifferentiated.2 are the same stage from the same July
+collection and differ only by animal and library preparation, so disagreement
+between them is animal and library variation with no biological difference
+behind it. That floor bounds the technical variation **within** a collection.
+It does not bound the July-to-November component, which is the one confounded
+with stage and which this design cannot measure at all.
 
 **Question 2: does cell type identity survive it?** Section 3 measures that,
 using the curated markers. A cluster is one cell type across the merge if it
@@ -71,12 +78,12 @@ disagree, and it is the combination that decides:
 ```{r, echo=FALSE}
 datatable(
   data.frame(
-    `batch effect` = c("small", "large", "large", "small"),
+    `stage difference` = c("small", "large", "large", "small"),
     identity       = c("holds", "holds", "fails", "fails"),
     verdict        = c("one atlas, correction optional",
                        "one atlas, with correction",
                        "separate atlases",
-                       "check the annotation, not the batch"),
+                       "check the annotation"),
     check.names = FALSE, stringsAsFactors = FALSE),
   rownames = FALSE,
   options  = list(dom = "t", ordering = FALSE))
@@ -86,7 +93,8 @@ The second row is the one to watch, because each analysis alone gives the wrong
 answer there. A large stage contrast with identity intact means the cells are
 the same types but with heavily remodeled expression. The discordance alone
 would say the stages are too different to combine; the marker check alone would
-say the batch can be ignored. Together they say integrate with correction, and
+say the stage difference can be ignored. Together they say integrate with
+correction, and
 treat the remodeling as a result to report rather than a problem to remove.
 
 Question 1 on its own cannot decide anything, because a cell type that remodels
@@ -288,7 +296,7 @@ ggsave(p_stage, file = paste0(results_dir, "/cluster_composition_by_stage.png"),
        width = 8, height = 5)
 ```
 
-# 2. How large is the batch effect?
+# 2. How large is the difference between the stages?
 
 Marker genes are computed separately within each single library and the
 agreement between libraries is measured, with two metrics used throughout:
@@ -306,13 +314,13 @@ Three comparisons, two of which are references:
   date, no sex difference. Disagreement here is produced by replicate animals
   and library preparation alone, so it is the **replicate floor**. Everything
   else is reported relative to it.
-* **Female versus Male.** Same stage, same collection date, different sex. A
-  second floor, measured in the November batch, so the two floors together show
-  whether replicate variation is stable across collections. Any cluster
-  reaching this comparison has cells in both transformer libraries, which
-  excludes sex-specific populations. The caveat: these differ by animal *and*
-  by sex, so any residual sex effect in shared somatic types is included,
-  making this an upper bound on replicate variation rather than a clean floor.
+* **Female versus Male.** Same stage, same collection date, different sex.
+  **This is not a second floor.** TF and TM differ by animal, by library prep
+  and by sex, and sex differences in expression are biology, so disagreement
+  here is not an estimate of technical variation. It is reported because if it
+  comes out close to the July floor, then both the sex effect in shared somatic
+  types and any difference in noise between the two collections are small. A
+  gap is uninformative, since it could be either.
 * **Larvae pooled versus transformers pooled.** The stage contrast, which is
   also the collection date contrast. The two cannot be separated in this
   design.
@@ -491,7 +499,7 @@ n_low_power   = if (length(discordance$n_by_cluster) == 0) 0 else
 
 `r if (length(discordance$n_by_cluster) == 0) "**Fewer than two clusters have enough cells in all four libraries, so this analysis cannot run.** That is a result rather than an error, and it would mean the clusters are too library-restricted for a within-library marker comparison to be possible at all." else paste0(length(discordance$eligible), " cluster(s) are eligible, matched at ", min(discordance$n_by_cluster), " to ", max(discordance$n_by_cluster), " cells per cluster per group (median ", round(median(discordance$n_by_cluster)), ").")`
 
-`r if (nrow(disc_excluded) == 0) "No cluster was excluded." else paste0(nrow(disc_excluded), " cluster(s) were excluded for having too few cells in at least one library. A cluster confined to one sex, such as the oocyte and spermatocyte clusters, cannot appear here at all, since the Female versus Male comparison requires cells of that cluster in both transformer libraries. Their absence is structural and says nothing about the batch effect.")`
+`r if (nrow(disc_excluded) == 0) "No cluster was excluded." else paste0(nrow(disc_excluded), " cluster(s) were excluded for having too few cells in at least one library. A cluster confined to one sex, such as the oocyte and spermatocyte clusters, cannot appear here at all, since the Female versus Male comparison requires cells of that cluster in both transformer libraries. Their absence is structural and says nothing about the stage difference.")`
 
 `r if (n_low_power == 0) "" else paste0(n_low_power, " cluster(s) are matched at fewer than 50 cells per group. Marker rankings are noisy at that depth, so their values carry little information in either direction and should not be read as evidence of agreement or disagreement.")`
 
@@ -624,10 +632,10 @@ lt_row = paired_test %>%
 fm_row = paired_test %>%
   filter(comparison == "Female_vs_Male", metric == "overlap_median")
 
-batch_effect_large = nrow(lt_row) == 1 && isTRUE(lt_row$exceeds_floor)
+stage_contrast_large = nrow(lt_row) == 1 && isTRUE(lt_row$exceeds_floor)
 ```
 
-`r if (nrow(lt_row) == 0) "The stage contrast could not be tested, so the size of the batch effect is not established here." else paste0("**Stage contrast.** Median top 50 overlap is ", round(lt_row$median_comparison, 1), "% against a replicate floor of ", round(lt_row$median_floor, 1), "%, a ratio of ", round(lt_row$median_ratio, 2), ", with ", lt_row$n_below_floor, " of ", lt_row$n_clusters, " clusters below their own floor", if (!is.na(lt_row$wilcox_p)) paste0(" (Wilcoxon signed rank p = ", signif(lt_row$wilcox_p, 2), ")") else "", ". ", if (isTRUE(lt_row$exceeds_floor)) "**The stage contrast is substantially more discordant than replicate libraries of the same stage.** Expression is heavily remodeled across the stage boundary, so an uncorrected integration would cluster largely by stage." else "**The stage contrast is not more discordant than the replicate floor**, so there is little to correct for.")`
+`r if (nrow(lt_row) == 0) "The stage contrast could not be tested, so its size is not established here." else paste0("**Stage contrast.** Median top 50 overlap is ", round(lt_row$median_comparison, 1), "% against a replicate floor of ", round(lt_row$median_floor, 1), "%, a ratio of ", round(lt_row$median_ratio, 2), ", with ", lt_row$n_below_floor, " of ", lt_row$n_clusters, " clusters below their own floor", if (!is.na(lt_row$wilcox_p)) paste0(" (Wilcoxon signed rank p = ", signif(lt_row$wilcox_p, 2), ")") else "", ". ", if (isTRUE(lt_row$exceeds_floor)) "**The stage contrast is substantially larger than replicate libraries of the same stage produce.** An uncorrected integration would therefore cluster largely by stage rather than by cell type. What that contrast consists of is not established by this test: developmental remodeling and a July-to-November technical batch are confounded and cannot be told apart here." else "**The stage contrast is not more discordant than the replicate floor**, so there is little to correct for.")`
 
 `r if (nrow(fm_row) == 0) "" else paste0("**Second floor.** Female versus Male gives a median overlap of ", round(fm_row$median_comparison, 1), "%, a ratio of ", round(fm_row$median_ratio, 2), " to the July floor. If the two floors are close, both the residual sex effect in shared somatic types and any difference in batch noise between collections are small, which makes the July floor a trustworthy reference for the stage contrast.")`
 
@@ -899,7 +907,7 @@ ggsave(p_lib, file = paste0(results_dir, "/canonical_identity_by_library.png"),
 ```{r}
 summary_tbl = data.frame(
   question = c(
-    "Q1. stage contrast more discordant than the replicate floor",
+    "Q1. stage contrast more discordant than the July replicate floor",
     "Q1. clusters eligible for the discordance test",
     "Q2. clusters with a curated marker set",
     "Q2. comparable across stages",
@@ -909,7 +917,7 @@ summary_tbl = data.frame(
     "Q2. holds in every library sampled"),
   answer = c(
     if (nrow(lt_row) == 0) "not testable" else
-      if (batch_effect_large) "yes, batch effect is large" else "no",
+      if (stage_contrast_large) "yes, stage contrast exceeds the floor" else "no",
     as.character(length(discordance$eligible)),
     as.character(n_tested), as.character(n_comparable),
     as.character(n_holds), as.character(n_fails), as.character(n_one_stage),
@@ -926,7 +934,7 @@ identity_mixed = n_comparable > 0 && n_fails > 0 && n_fails < n_holds
 identity_fails = n_comparable > 0 && n_fails >= n_holds
 ```
 
-`r if (n_comparable == 0) "**This document cannot decide.** No cluster has enough cells in both stages for the identity test to run, so neither presentation is supported over the other by this evidence." else if (batch_effect_large && identity_holds) "**Do not ignore the batch effect, and do not split the atlas.** The stage contrast is far more discordant than replicate libraries of the same stage, so an uncorrected integration would cluster largely by stage rather than by cell type. But every cluster that can be compared still expresses its canonical markers in both stages, so the clusters do name the same cell types at both. One integrated atlas **with** correction is the supported presentation, and the large discordance is itself a result to report: these cell types are extensively remodeled between larva and transformer. Since stage is perfectly confounded with collection date and library, the manuscript should say that the remodeling cannot be separated from a technical batch effect, and that the identity test is what licenses the integration." else if (batch_effect_large && identity_fails) "**Report the stages separately.** The stage contrast is far more discordant than the replicate floor, and the curated markers do not hold across it for most comparable clusters, so the integrated clustering is asserting identities the markers do not support." else if (batch_effect_large && identity_mixed) "**Integrate with correction, but name the exceptions.** The stage contrast is much more discordant than the replicate floor, and most comparable clusters keep their identity across it, but a minority do not. Report the integrated atlas, name those clusters in the text, and either split them by stage or relabel them." else if (!batch_effect_large && identity_holds) "**The batch effect is not larger than replicate variation, and identity holds everywhere it can be tested.** One integrated atlas is defensible and the correction is doing little work. Worth confirming that the correction is not removing real signal, since there is little here for it to remove." else "**The batch effect is not larger than replicate variation, yet identity fails for some clusters.** That points at the annotation rather than the batch: a cluster whose curated markers do not hold across stages, in the absence of a large technical difference, is more likely mislabeled than mis-integrated. Revisit those annotations before deciding on the presentation."`
+`r if (n_comparable == 0) "**This document cannot decide.** No cluster has enough cells in both stages for the identity test to run, so neither presentation is supported over the other by this evidence." else if (stage_contrast_large && identity_holds) "**Correct across the stages, and do not split the atlas.** The larva to transformer contrast is far larger than replicate libraries of the same stage produce, so an uncorrected integration would cluster largely by stage rather than by cell type. What that contrast is made of cannot be determined here: developmental remodeling and a July-to-November technical batch are perfectly confounded and this design cannot separate them. The identity test is what makes the integration defensible anyway, because every cluster that can be compared still expresses its canonical markers in both stages, so the clusters name the same cell types on both sides whatever the source of the contrast. Report one integrated atlas with correction, state the confound explicitly, and attribute the contrast only with independent evidence such as staining or a published bulk RNA-seq series." else if (stage_contrast_large && identity_fails) "**Report the stages separately.** The stage contrast is far more discordant than the replicate floor, and the curated markers do not hold across it for most comparable clusters, so the integrated clustering is asserting identities the markers do not support." else if (stage_contrast_large && identity_mixed) "**Integrate with correction, but name the exceptions.** The stage contrast is much more discordant than the replicate floor, and most comparable clusters keep their identity across it, but a minority do not. Report the integrated atlas, name those clusters in the text, and either split them by stage or relabel them." else if (!stage_contrast_large && identity_holds) "**The stage contrast is not larger than replicate variation, and identity holds everywhere it can be tested.** One integrated atlas is defensible and the correction is doing little work. Worth confirming that the correction is not removing real signal, since there is little here for it to remove." else "**The stage contrast is not larger than replicate variation, yet identity fails for some clusters.** That points at the annotation: a cluster whose curated markers do not hold across stages, in the absence of a large technical difference, is more likely mislabeled than mis-integrated. Revisit those annotations before deciding on the presentation."`
 
 ## What this document does not answer
 
