@@ -267,19 +267,12 @@ agreement between libraries is measured, with two metrics used throughout:
 * **Spearman rank correlation across all tested genes.** Uses all the
   information rather than a cutoff and is far less sensitive to cell number.
 
-Three comparisons, two of which are references:
+Two comparisons, one of which is the reference:
 
 * **Undifferentiated.1 versus Undifferentiated.2.** Same stage, same collection
   date, no sex difference. Disagreement here is produced by replicate animals
   and library preparation alone, so it is the **replicate floor**. Everything
   else is reported relative to it.
-* **Female versus Male.** Same stage, same collection date, different sex.
-  **This is not a second floor.** TF and TM differ by animal, by library prep
-  and by sex, and sex differences in expression are biology, so disagreement
-  here is not an estimate of technical variation. It is reported because if it
-  comes out close to the July floor, then both the sex effect in shared somatic
-  types and any difference in noise between the two collections are small. A
-  gap is uninformative, since it could be either.
 * **Larvae pooled versus transformers pooled.** The stage contrast, which is
   also the collection date contrast. The two cannot be separated in this
   design.
@@ -344,31 +337,37 @@ library_discordance = function(sce, labels, library_vec, min_cells = 20,
   labels      = as.character(labels)
   library_vec = as.character(library_vec)
 
-  singles = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male")
   group_defs = list(
     "Undifferentiated.1"  = "Undifferentiated.1",
     "Undifferentiated.2"  = "Undifferentiated.2",
-    "Female"              = "Female",
-    "Male"                = "Male",
     "larvae_pooled"       = c("Undifferentiated.1", "Undifferentiated.2"),
     "transformers_pooled" = c("Female", "Male"))
 
   comparisons = list(
     UND1_vs_UND2           = c("Undifferentiated.1", "Undifferentiated.2"),
-    Female_vs_Male         = c("Female", "Male"),
     larvae_vs_transformers = c("larvae_pooled", "transformers_pooled"))
 
   clusters_all = sort(unique(labels))
-  cnt = sapply(singles, function(lb)
-    sapply(clusters_all, function(cl) sum(labels == cl & library_vec == lb)))
-  if (is.null(dim(cnt))) cnt = matrix(cnt, nrow = length(clusters_all),
-                                      dimnames = list(clusters_all, singles))
+
+  # counts per cluster in each group a comparison needs. Transformers are
+  # counted pooled rather than per sex, so a cluster concentrated in one
+  # transformer library is not excluded for being scarce in the other.
+  cnt = sapply(names(group_defs), function(g)
+    sapply(clusters_all, function(cl)
+      sum(labels == cl & library_vec %in% group_defs[[g]])))
+  if (is.null(dim(cnt)))
+    cnt = matrix(cnt, nrow = length(clusters_all),
+                 dimnames = list(clusters_all, names(group_defs)))
   rownames(cnt) = clusters_all
+
+  # larvae_pooled is at least as large as either larval library, so it never
+  # binds and is left out of the minimum
+  need = c("Undifferentiated.1", "Undifferentiated.2", "transformers_pooled")
 
   eligibility = as.data.frame(cnt)
   eligibility$label = clusters_all
-  eligibility$min_across_libraries = apply(cnt, 1, min)
-  eligibility$eligible = eligibility$min_across_libraries >= min_cells
+  eligibility$min_across_groups = apply(cnt[, need, drop = FALSE], 1, min)
+  eligibility$eligible = eligibility$min_across_groups >= min_cells
   rownames(eligibility) = NULL
 
   eligible = clusters_all[eligibility$eligible]
@@ -383,7 +382,7 @@ library_discordance = function(sce, labels, library_vec, min_cells = 20,
   # groups being compared, and that holds cluster by cluster. A single global n
   # would force every cluster down to the sparsest one for no gain, since
   # clusters are never compared against each other here.
-  n_by_cluster = apply(cnt[eligible, , drop = FALSE], 1, min)
+  n_by_cluster = apply(cnt[eligible, need, drop = FALSE], 1, min)
   names(n_by_cluster) = eligible
 
   set.seed(seed)
@@ -496,8 +495,7 @@ datatable(disc_per_cluster %>% mutate(across(where(is.numeric), ~round(., 3))),
 ```
 
 ```{r, fig.width=10, fig.height=7}
-cmp_cols = c(UND1_vs_UND2 = "#009292", Female_vs_Male = "#006ddb",
-             larvae_vs_transformers = "#9e2f7f")
+cmp_cols = c(UND1_vs_UND2 = "#009292", larvae_vs_transformers = "#9e2f7f")
 
 disc_long = disc_per_cluster %>%
   tidyr::pivot_longer(
@@ -554,7 +552,7 @@ paired_test = if (!"UND1_vs_UND2" %in% colnames(paired) || nrow(paired) == 0) {
 } else {
   paired %>%
     filter(!is.na(UND1_vs_UND2)) %>%
-    tidyr::pivot_longer(any_of(c("Female_vs_Male", "larvae_vs_transformers")),
+    tidyr::pivot_longer(any_of("larvae_vs_transformers"),
                         names_to = "comparison", values_to = "value") %>%
     filter(!is.na(value)) %>%
     group_by(metric, comparison) %>%
@@ -588,15 +586,10 @@ clusters individually fall below their own floor.
 ```{r}
 lt_row = paired_test %>%
   filter(comparison == "larvae_vs_transformers", metric == "overlap_median")
-fm_row = paired_test %>%
-  filter(comparison == "Female_vs_Male", metric == "overlap_median")
-
 stage_contrast_large = nrow(lt_row) == 1 && isTRUE(lt_row$exceeds_floor)
 ```
 
 `r if (nrow(lt_row) == 0) "The stage contrast could not be tested, so its size is not established here." else paste0("**Stage contrast.** Median top 50 overlap is ", round(lt_row$median_comparison, 1), "% against a replicate floor of ", round(lt_row$median_floor, 1), "%, a ratio of ", round(lt_row$median_ratio, 2), ", with ", lt_row$n_below_floor, " of ", lt_row$n_clusters, " clusters below their own floor", if (!is.na(lt_row$wilcox_p)) paste0(" (Wilcoxon signed rank p = ", signif(lt_row$wilcox_p, 2), ")") else "", ". ", if (isTRUE(lt_row$exceeds_floor)) "**The stage contrast is substantially larger than replicate libraries of the same stage produce.** An uncorrected integration would therefore cluster largely by stage rather than by cell type. What that contrast consists of is not established by this test: developmental remodeling and a July-to-November technical batch are confounded and cannot be told apart here." else "**The stage contrast is not more discordant than the replicate floor**, so there is little to correct for.")`
-
-`r if (nrow(fm_row) == 0) "" else paste0("**Second floor.** Female versus Male gives a median overlap of ", round(fm_row$median_comparison, 1), "%, a ratio of ", round(fm_row$median_ratio, 2), " to the July floor. If the two floors are close, both the residual sex effect in shared somatic types and any difference in batch noise between collections are small, which makes the July floor a trustworthy reference for the stage contrast.")`
 
 **What these two numbers are for.** The replicate floor shows that
 Undifferentiated.1 and Undifferentiated.2 agree closely, which is what justifies
