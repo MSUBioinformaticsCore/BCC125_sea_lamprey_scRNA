@@ -12,6 +12,7 @@ params:
     project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
+    n_workers: 8
 ---
 
 ```{r setup, include=FALSE}
@@ -50,17 +51,48 @@ data_dir        = paste0(params$project_dir, "/data")
 no_dbl_dir = paste0(params$project_dir, "/results/20260803_no_doublets")
 ```
 
+```{r}
+# Parallel backend for the expensive steps, the SingleR runs above all.
+#
+# On SLURM the allocation is what matters, not the node's core count, so
+# SLURM_CPUS_PER_TASK wins over the n_workers parameter when it is set.
+# Requesting more workers than the job was allocated oversubscribes the node
+# and usually runs slower than serial.
+slurm_cpus = suppressWarnings(as.integer(Sys.getenv("SLURM_CPUS_PER_TASK")))
+
+n_workers = if (!is.na(slurm_cpus) && slurm_cpus > 0) slurm_cpus else
+  as.integer(params$n_workers)
+n_workers = max(1, min(n_workers, parallel::detectCores(), na.rm = TRUE))
+
+bp = if (n_workers > 1) BiocParallel::MulticoreParam(n_workers) else
+  BiocParallel::SerialParam()
+```
+
+Parallel workers in use: **`r n_workers`**`r if (!is.na(slurm_cpus) && slurm_cpus > 0) ", taken from SLURM_CPUS_PER_TASK" else ", taken from the n_workers parameter"`.
+
+`MulticoreParam` forks, so it will not work on Windows; set `n_workers: 1` there
+and it falls back to `SerialParam`. If the machine also has a threaded BLAS,
+workers and BLAS threads can oversubscribe each other, in which case setting
+`OMP_NUM_THREADS=1` before starting R is usually faster than tuning either
+alone.
+
 # Purpose
 
 Four atlases are built from the doublet-filtered cells, clustered independently,
 and then compared to establish which populations are shared between them.
 
-| atlas | libraries | stage | correction |
-| --- | --- | --- | --- |
-| Larva | UND1, UND2 | larva | none |
-| Transformer | TF, TM | transformer | `fastMNN` |
-| Female | TF | transformer | none, single library |
-| Male | TM | transformer | none, single library |
+```{r, echo=FALSE}
+datatable(
+  data.frame(
+    atlas      = c("Larva", "Transformer", "Female", "Male"),
+    libraries  = c("UND1, UND2", "TF, TM", "TF", "TM"),
+    stage      = c("larva", "transformer", "transformer", "transformer"),
+    correction = c("none", "fastMNN", "none, single library",
+                   "none, single library"),
+    stringsAsFactors = FALSE),
+  rownames = FALSE,
+  options  = list(dom = "t", ordering = FALSE))
+```
 
 Building the stages separately removes the reason the integrated atlas was
 contested. Nothing here requires a correction to span the stage boundary,
@@ -330,7 +362,8 @@ if (file.exists(marker_file)) {
     e     = atlases[[nm]]$expr
     blk   = if (length(unique(e$batch)) > 1) e$batch else NULL
     fm    = findMarkers(e, e$label, test.type = "t", block = blk,
-                        direction = "up", pval.type = "some")
+                        direction = "up", pval.type = "some",
+                        BPPARAM = bp)
     lapply(fm, function(df) {
       df$meanLogFC = marker_effect(df)
       df[order(df$FDR, df$p.value), ]
@@ -619,12 +652,14 @@ if (file.exists(transfer_file)) {
                                ref  = ref_a[g, ],
                                labels = ref_a$label, de.method = "wilcox",
                                assay.type.test = "logcounts",
-                               assay.type.ref  = "logcounts")
+                               assay.type.ref  = "logcounts",
+                               BPPARAM = bp)
     pred_ba = SingleR::SingleR(test = atlases[[a]]$expr[g, ],
                                ref  = ref_b[g, ],
                                labels = ref_b$label, de.method = "wilcox",
                                assay.type.test = "logcounts",
-                               assay.type.ref  = "logcounts")
+                               assay.type.ref  = "logcounts",
+                               BPPARAM = bp)
 
     transfer[[paste(a, b, sep = " vs ")]] =
       list(a = a, b = b,
@@ -1029,6 +1064,50 @@ coherence_summary = coherence %>%
 
 ## Verdict
 
+The two columns that decide it read the cross-tabulation from opposite sides,
+and the difference between them is the whole test.
+
+**`concentration_Male`** is read from the transformer cluster's side: of this
+cluster's **male** cells, what fraction landed in one male cluster. High means
+the cells hold together in the male atlas.
+
+**`share_of_sub_cluster_Male`** is read from the male cluster's side: of that
+**male cluster's** cells, what fraction are in this transformer cluster. Low
+means this cluster is only a small piece of a larger male cluster.
+
+So a cluster with `concentration_Male = 0.95` and
+`share_of_sub_cluster_Male = 0.10` means nearly all its male cells sit together
+in one male cluster, but they make up only a tenth of it. The male atlas has
+these cells and folded them into something bigger rather than resolving them,
+which is a real population the split lacks the power to separate. A cluster
+with both values high is one the male atlas resolves on its own.
+
+```{r, echo=FALSE}
+datatable(
+  data.frame(
+    column = c("n_TF, n_TM", "best_sub_cluster_Male",
+               "concentration_Male", "share_of_sub_cluster_Male",
+               "coheres_male, coheres_female", "absorbed", "both_libraries",
+               "n_markers_tested", "pct_markers_in_both", "verdict",
+               "singleR_match_in"),
+    meaning = c(
+      "cells in this transformer cluster from the female and male libraries",
+      "the male cluster most of this cluster's male cells landed in",
+      "fraction of this cluster's male cells in that one male cluster; high means they cohere in the male atlas",
+      "fraction of that male cluster's cells that are in this transformer cluster; low means this cluster was absorbed into something larger",
+      "TRUE when concentration reaches conc_min, so the cells cohere in that library",
+      "TRUE when share_of_sub_cluster is low on either side, so the population was absorbed rather than resolved",
+      "TRUE when both libraries contribute at least min_cells_lib cells",
+      "markers used for the TF against TM comparison within this cluster",
+      "percent of those markers detected in its female cells and its male cells alike; NA when a library has too few cells to judge",
+      "the four-way call; see the text below the table",
+      "which sub-atlases gave a reciprocal SingleR match. Reported only, it does not drive the verdict"),
+    stringsAsFactors = FALSE),
+  rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+```
+
+The Female columns mirror the Male ones exactly.
+
 ```{r}
 conc_min = 0.5
 
@@ -1248,6 +1327,27 @@ A negative result is only meaningful with enough cells to detect a difference.
 A split whose smallest piece is small is reported as underpowered rather than
 as arbitrary, since absence of evidence at low `n` is not evidence of absence.
 
+```{r, echo=FALSE}
+datatable(
+  data.frame(
+    column = c("n_cells", "top_tr_cluster", "largest_share", "n_tr_clusters",
+               "redistributed", "n_groups", "smallest_group",
+               "min_sig_genes", "max_sig_genes", "split_verdict"),
+    meaning = c(
+      "cells in this single-library cluster",
+      "the transformer cluster that took the most of them",
+      "fraction of this cluster's cells that went to that one transformer cluster",
+      "how many transformer clusters took more than 10% of it",
+      "TRUE when largest_share is below conc_min, so no transformer cluster holds a majority",
+      "pieces large enough to test, at min_cells_group each",
+      "cells in the smallest piece tested; small values make a null result uninformative",
+      "significant genes for the least distinct piece. This is the criterion: every piece must be distinguishable",
+      "significant genes for the most distinct piece, shown for context",
+      "whether the split found real subtypes, partitioned arbitrarily, or cannot be decided"),
+    stringsAsFactors = FALSE),
+  rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+```
+
 ```{r}
 min_cells_group = 20   # a piece smaller than this is not tested at all
 min_power_group = 50   # below this, a null result is called underpowered
@@ -1449,6 +1549,27 @@ significance threshold without being the top overlap, which usually means
 several clusters in the other atlas are plausible and the population is real
 while the specific correspondence is not settled.
 
+```{r, echo=FALSE}
+datatable(
+  data.frame(
+    column = c("a_cluster, b_cluster", "frac_ab", "frac_ba",
+               "unassigned_a, unassigned_b", "nSharedGenes", "FDR",
+               "Enrichment", "methods_agree", "independent", "call"),
+    meaning = c(
+      "the matched pair, one cluster from each atlas",
+      "fraction of b_cluster's cells that SingleR labeled a_cluster, counting unassigned cells in the denominator",
+      "the same in the other direction",
+      "fraction of each cluster's cells SingleR could not confidently assign at all; high values mean the population has no counterpart",
+      "genes shared between the two clusters' top marker lists",
+      "significance of that overlap, BH adjusted within the atlas pair",
+      "log2 enrichment of the overlap over what chance would give",
+      "TRUE when the marker overlap independently picks the same partner in both directions, which is stronger than passing the FDR cutoff",
+      "TRUE when the two atlases are disjoint sets of cells. FALSE for male or female against transformer, which share cells",
+      "shared, or which method carried it alone"),
+    stringsAsFactors = FALSE),
+  rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+```
+
 ```{r, eval=have_singler}
 fdr_cut = 0.01
 
@@ -1594,6 +1715,28 @@ male and female cells, so a population present in male, female and transformer
 spans three atlases but only two animals. `n_independent` counts only the
 larval, female and male atlases, which are disjoint sets of cells, and is the
 number to use when asking how reproducible a population is.
+
+```{r, echo=FALSE}
+datatable(
+  data.frame(
+    column = c("population", "n_atlases", "n_independent", "atlases",
+               "n_clusters", "split", "CellType", "members",
+               "n_possible", "n_actual", "fully_linked"),
+    meaning = c(
+      "an arbitrary identifier for the connected component",
+      "how many of the four atlases it appears in",
+      "how many disjoint cell sets it appears in, counting only larva, female and male. Transformer is excluded because it is built from the male and female cells, so it adds no new sampling. This is the number to use for reproducibility",
+      "which atlases, by name",
+      "member clusters, which can exceed n_atlases when one atlas splits the population",
+      "TRUE when some atlas resolves this population into more than one cluster",
+      "most frequent curated cell type among the member clusters",
+      "the member clusters, as atlas:cluster",
+      "cross-atlas cluster pairs inside this population",
+      "how many of those were independently called shared",
+      "TRUE when every cross-atlas pair was called, rather than the population being chained together through a third cluster"),
+    stringsAsFactors = FALSE),
+  rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+```
 
 ```{r, eval=have_singler}
 nodes = purrr::map_dfr(atlas_names, function(nm)
