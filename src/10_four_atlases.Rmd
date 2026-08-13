@@ -78,8 +78,53 @@ alone.
 
 # Purpose
 
-Four atlases are built from the doublet-filtered cells, clustered independently,
-and then compared to establish which populations are shared between them.
+This document answers three questions:
+
+1. **Which cell types are shared among the four libraries?** Answered in Section 7 as a list of populations with the atlases each one appears in.
+2. **Is there evidence to merge male and female?** Sections 5 and 6.
+3. **Is there evidence to merge larva and transformer?** Sections 6 and 7.
+
+**How each merge question is answered.** Male and female are the same cells as
+the transformer atlas, so every cell can be looked up in both clusterings by
+its barcode and the two labels counted against each other. Section 5 asks
+whether the merged clustering keeps together what each library resolves on its own and joins
+populations to their counterpart in the other sex rather than to something
+unrelated.
+
+Larva and transformer are different cells from different animals, so no
+cell-by-cell check is possible. The evidence there is **how many cell types
+appear in both atlases**. Section 6 finds matching cluster pairs and section 7
+groups them into populations, each labeled with the atlases it was found in.
+
+Note what this count is and is not evidence about. `fastMNN` assumes only that
+**at least one** population is shared between the batches, not that most are.
+It does not assume equal or known composition, which was the point of the
+method ([Haghverdi et al. 2018](https://www.nature.com/articles/nbt.4091)). A
+population with no counterpart generally forms no mutual nearest neighbor pairs
+and is left alone rather than dragged onto something else. So a low count is
+not, on its own, a technical objection to correcting.
+
+Two things do follow from a low count. The correction is estimated from
+whichever populations are shared, so if that is a narrow slice of expression
+space, the assumption that the batch effect is orthogonal to biology has been
+tested only there and its extension to distant populations rests on less. And a
+merged atlas whose clusters are mostly stage-specific anyway buys little: it
+adds a correction step and makes the stage comparison harder to read, without
+bringing many populations into register.
+
+So read the count as a question of whether a merged atlas is worth building,
+not whether the correction would be valid. Many shared cell types means the
+stages have substantial common ground and a merged object has something to
+show. Few means the stages are largely different populations, and reporting
+them separately loses nothing.
+
+Neither question is answered by building a merged atlas and inspecting it,
+which would assume what is being tested.
+
+**What this document does not do.** It does not test whether the *existing*
+integrated atlas holds together as one atlas across the stage boundary, which
+is a question about cell type identity rather than about shared populations.
+That is `11_no_doublets_one_atlas.Rmd`.
 
 ```{r, echo=FALSE}
 datatable(
@@ -100,23 +145,53 @@ because no atlas spans it.
 
 ## Design decisions, and what they cost
 
-**The larval atlas is not corrected.** UND1 and UND2 interleave at 0.9 to 1.0
+**The larval atlas is not corrected.** UND1 and UND2 interleave
 uncorrected in every cell type, so there is no batch effect to remove and
-applying `fastMNN` would only risk removing real structure. `use_mnn` is a
-parameter of the atlas builder, so this can be flipped and rerun if the mixing
-diagnostic below disagrees.
+applying `fastMNN` would only risk removing real structure.  
 
-**The transformer atlas is corrected, and this is the one place a correction
-carries risk.** `fastMNN` assumes the libraries being merged share cell
-populations. TF and TM do not fully: oocytes exist only in TF and spermatocytes
-only in TM. Mutual nearest neighbor pairs cannot exist for a population with no
-counterpart, and forcing an alignment between unmatched populations is exactly
-how a correction manufactures a cluster that is not real.
+**The transformer atlas is corrected which carries risk.** 
+`fastMNN` needs only one shared population and tolerates
+populations that appear in one batch alone, so the sex-specific populations are
+not in themselves a problem: oocytes exist only in TF and spermatocytes only in
+TM, and neither should form mutual nearest neighbor pairs at all.
 
-The male and female atlases are the control for this. They contain the same
-cells, uncorrected and unmerged, so a transformer cluster that fuses a
-male-only and a female-only population will have no reciprocal match in either.
-Section 5 reports that comparison directly, and it is the check to read first.
+The risk is narrower than that. A pair forms whenever two cells are each
+other's nearest neighbors across the batches, whether or not they are the same
+cell type. If a population in one library is transcriptionally closer to some
+non-counterpart population in the other than to anything else, spurious pairs
+can form and pull two distinct populations together. That is a possibility to
+test rather than assume, and section 5 tests it against the male and female
+atlases directly.
+
+But a cluster that appears only in the transformer atlas is not automatically an artifact. It can be a real population that only the merge has the power to
+resolve. A population present in both TF and TM at, say, 60
+cells each sits at 60 cells in a 16,700-cell male graph and 60 in a 12,600-cell
+female graph, too few and too sparsely connected at `k = 30` to separate from a
+larger neighbor. Pooled, it is 120 cells with roughly twice the neighbors
+available to link them, and it can cross the threshold to become its own
+community. The cells were always there, but neither
+library alone had the numbers to pull them apart from what surrounds them.
+
+A transformer cluster might fail to reappear when the libraries are clustered
+separately for two reasons:
+
+* the population is real but under-resolved when split
+* `fastMNN` grouped cells that cohere in neither library
+
+Only the second is a failure of the merge.
+
+A sex-restricted population is a separate case and not a failure to reappear at
+all. Oocytes reappear in the female atlas and are absent from the male one, so
+the comparison across both libraries does not apply to them. Section 5 reports
+those on their own rather than counting them for or against the merge.
+
+They are distinguishable, because the male and female atlases contain the same
+cells rather than similar ones, so every cell can be looked up in both
+clusterings by its barcode and the two labels counted against each other. A real but under-resolved population has its cells concentrated
+in one cluster in each library, just folded into something larger. A
+correction-induced grouping has them scattered across many. Section 5 does that
+comparison directly and reports the three-way verdict, and it is the check to
+read first.
 
 **Male and female cells are subsets of the transformer atlas.** Those three
 comparisons therefore share cells and are not independent evidence. They
@@ -923,34 +998,36 @@ The check to read first, and the only section that does not need `SingleR`.
 The male and female atlases contain **the same cells** as the transformer
 atlas, not similar cells, so there is no need to infer a correspondence. Every
 cell can be looked up in both clusterings by its barcode and the two labels
-cross-tabulated directly. That is exact where label transfer is inferential,
+counted against each other. That is exact where label transfer is inferential,
 and it yields cell counts, so the question of whether a population was simply
 too small to resolve becomes a measurement rather than an argument.
 
-## The three explanations this has to separate
+## The explanations this has to separate
 
-A transformer cluster that does not reappear when the libraries are clustered
-separately has more than one possible cause, and an earlier version of this
-section wrongly treated them as one.
+Before comparing anything, a transformer cluster has to be sorted by whether
+the comparison applies to it. A cluster drawn almost entirely from one library
+is a **sex-restricted population**. It reappears in that sex's atlas and is
+absent from the other, so asking whether it reappears in both is the wrong
+question. Those are reported on their own.
+
+For the clusters that do draw on both libraries, two explanations remain when
+one fails to reappear:
 
 1. **Real but under-resolved.** The population exists in both TF and TM at
    numbers too small for Louvain at `k = 30` to split it out of a larger
    neighbor. Pooling raises both the cell count and the connectivity of the
    nearest neighbor graph, so it separates only in the combined data. This is a
    genuine result, not an artifact.
-2. **Single sex.** Nearly all the cells come from one library. The cluster is
-   real but it is a female or a male population, and the label should say so.
-3. **Correction induced.** `fastMNN` grouped cells that do not cohere in either
+2. **Correction induced.** `fastMNN` grouped cells that do not cohere in either
    library on its own.
 
 They are separated by where the cells go when the libraries are clustered
 separately. For a transformer cluster, take its TM cells and ask which male
 cluster each one landed in. If most land in a single male cluster, the cells
-cohere in the male data and explanation 1 or 2 applies; whether that male
-cluster is much larger tells you whether the population was absorbed rather
-than resolved. If the cells scatter across many male clusters, they do not
-cohere without the correction, which is explanation 3. Then the same for TF
-cells against the female atlas.
+cohere in the male data, and whether that male cluster is much larger tells you
+whether the population was absorbed rather than resolved. If the cells scatter
+across many male clusters, they do not cohere without the correction. Then the
+same for TF cells against the female atlas.
 
 ```{r}
 tf_batch = library_meta$batch[library_meta$library == "Female"]
@@ -964,7 +1041,7 @@ cell_labels = purrr::map_dfr(atlas_names, function(nm)
              stringsAsFactors = FALSE))
 
 # the transformer atlas must be exactly the male and female cells, or the
-# cross-tabulation below is comparing different cell sets
+# comparison below is between different cell sets
 tr_bc  = cell_labels$barcode[cell_labels$atlas == "Transformer"]
 sub_bc = cell_labels$barcode[cell_labels$atlas %in% c("Male", "Female")]
 stopifnot(setequal(tr_bc, sub_bc))
@@ -1064,7 +1141,7 @@ coherence_summary = coherence %>%
 
 ## Verdict
 
-The two columns that decide it read the cross-tabulation from opposite sides,
+The two columns that decide it read the same counts from opposite sides,
 and the difference between them is the whole test.
 
 **`concentration_Male`** is read from the transformer cluster's side: of this
@@ -1446,7 +1523,7 @@ cluster and exactly one male or female cluster.
 ```{r}
 n_tr_cells = ncol(atlases[["Transformer"]]$expr)
 
-# ledger 1: every transformer cell, by what the cross-tabulation concluded
+# ledger 1: every transformer cell, by what the label counts concluded
 # about the transformer cluster it sits in. Exhaustive, sums to 100 percent.
 ledger_tr = tr_verdict %>%
   mutate(n_cells = n_TF + n_TM) %>%
