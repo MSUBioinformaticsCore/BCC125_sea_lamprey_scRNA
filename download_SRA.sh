@@ -24,9 +24,9 @@ prefetch --option-file $SRR_ACC_LIST
 echo "Prefetch complete. Starting conversion to FASTQ format..."
 
 # 4. Multi-threaded conversion using local node temp space ($TMPDIR) for peak speed
-cat $SRR_ACC_LIST | xargs fasterq-dump \
-    --threads 8 \
-    --split-files \
+cat $SRR_ACC_LIST | xargs -n 1 -P 4 fasterq-dump \
+    --threads 2 \
+    --split-3 \
     --temp "$TMPDIR" \
     --outdir "$OUTPUT_DIR"
 
