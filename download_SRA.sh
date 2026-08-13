@@ -12,8 +12,8 @@ module purge
 module load SRA-Toolkit/3.0.10-gompi-2023a
 
 # 2. Define directories/files
-OUTPUT_DIR=""
-$SRR_ACC_LIST = 
+OUTPUT_DIR="/mnt/scratch/hickeys6/yasmin_et_at_PRJNA749754"
+$SRR_ACC_LIST = "/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/data/SRR_Acc_List.txt"
 mkdir -p "$OUTPUT_DIR"
 
 echo "Starting SRA batch download..."
