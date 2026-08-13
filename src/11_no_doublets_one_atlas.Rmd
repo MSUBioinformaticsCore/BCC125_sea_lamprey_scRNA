@@ -66,14 +66,21 @@ expresses the canonical markers for its annotated type in larval cells and in
 transformer cells **separately**.
 
 **Why both are needed, and why either alone would mislead.** The two can
-disagree, and the combination is what determines the answer:
+disagree, and it is the combination that decides:
 
-| batch effect | identity holds | what it means |
+| batch effect | identity | verdict |
 | --- | --- | --- |
-| small | yes | integrate freely, correction barely matters |
-| **large** | **yes** | the cells are the same types but heavily remodeled between stages. One atlas is defensible **with** correction, and the remodeling is a result to report, not a problem to remove |
-| large | no | the clusters do not name the same things at both stages. Report the stages separately |
-| small | no | unlikely; would suggest the annotation rather than the batch is at fault |
+| small | holds | one atlas, correction optional |
+| large | holds | one atlas, with correction |
+| large | fails | separate atlases |
+| small | fails | check the annotation, not the batch |
+
+The second row is the one to watch, because each analysis alone gives the wrong
+answer there. A large stage contrast with identity intact means the cells are
+the same types but with heavily remodeled expression. The discordance alone
+would say the stages are too different to combine; the marker check alone would
+say the batch can be ignored. Together they say integrate with correction, and
+treat the remodeling as a result to report rather than a problem to remove.
 
 Question 1 on its own cannot decide anything, because a cell type that remodels
 its transcriptome between life stages will show large discordance while
