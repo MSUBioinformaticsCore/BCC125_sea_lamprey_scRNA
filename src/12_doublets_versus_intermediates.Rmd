@@ -15,6 +15,7 @@ params:
     dbr: 0.08
     dbr_sd: 0.02
     prop_random: 0.5
+    umi_split: 1.5
     k: 30
     n_hvg: 5000
     n_pcs: 50
@@ -60,6 +61,17 @@ RNA in one droplet, so it reads as a mixture of two cell types. A genuine
 transitional cell also reads as a mixture of two cell types. Any method scoring
 "looks like a mixture" will flag both, and no amount of care with the same
 method separates them.
+
+`scDblFinder`'s own documentation makes this concrete. Describing how artificial
+doublets are generated: *"A proportion of the doublets will simply use the sum of
+counts of the composing cells, while the rest will undergo a library size
+adjustment and poisson resampling."*
+
+The second kind is a mixture of two profiles rescaled to one cell's worth of
+RNA. That is also a description of a transitional cell. Those artificial
+doublets exist so that real doublets without elevated RNA content are still
+caught, and the cost is that a cell which is genuinely intermediate at normal
+depth matches them equally well.
 
 This document does two things.
 
@@ -200,7 +212,10 @@ if (file.exists(dbl_file)) {
 # doublet calls or in the parent identification.
 dbl = dbl %>%
   left_join(cell_key %>% dplyr::select(barcode, label, CellType), by = "barcode") %>%
-  mutate(flagged = class_platform == "doublet")
+  mutate(flagged = class_platform == "doublet") %>%
+  group_by(local_cluster) %>%
+  mutate(umi_ratio_local = sum / median(sum[!flagged])) %>%
+  ungroup()
 
 write.csv(dbl, file = paste0(results_dir, "/doublet_calls_both_rates.csv"),
           row.names = FALSE)
@@ -293,7 +308,7 @@ datatable(local_focus %>% mutate(across(where(is.numeric), ~round(., 2))),
 focus = local_focus %>% filter(pct_flagged >= 5, n_flagged >= 20)
 ```
 
-`r if (nrow(focus) == 0) "No cluster loses 5% or more of its cells to recalibration. The change is spread thinly, which means the default rate was not selectively removing any one population, and the concern does not have a specific target in this dataset." else paste0(nrow(focus), " per-library cluster(s) have at least 5% of their cells flagged, mostly annotated as: ", paste(unique(focus$CellType), collapse = "; "), ". The tests below run on these.")`
+`r if (nrow(focus) == 0) "No cluster loses 5% or more of its cells to recalibration. The change is spread thinly, which means the default rate was not selectively removing any one population, and the concern does not have a specific target in this dataset." else paste0(nrow(focus), " per-library cluster(s) have at least 5% of their cells flagged, mostly annotated as: ", paste(unique(focus$CellType), collapse = "; "), ". Tests 3 and 4 run on these. Test 1 groups the flagged cells differently, by putative origin rather than by cluster, for the reason given there.")`
 
 ```{r}
 # scDblFinder documents mostLikelyOrigin only as "the presumed cluster
@@ -351,10 +366,40 @@ was not in one of them. A transitional cell can, and often does, since
 transitions involve genes transiently high at the intermediate state that are
 low at both endpoints.
 
-`scDblFinder.mostLikelyOrigin` gives the putative parent pair. The test compares
-the flagged cells against both parents at once, using `pval.type = "all"`,
-which requires a gene to be significantly up against **every** other group
-rather than merely against one.
+**The group being tested is an origin group, not a cluster.** Flagged cells are
+grouped by their `mostLikelyOrigin`, so every cell in a group is attributed to
+the same parent pair and is tested against its own parents. Grouping by cluster
+would force a single modal origin onto cells whose origins differ, and test some
+of them against the wrong reference. Cells whose origin is flagged ambiguous by
+`scDblFinder` are excluded rather than assigned a parentage they do not have.
+
+A doublet is a sum of two cells, so after normalisation its expression for any
+gene is a weighted average of the two parents, weighted by their library sizes.
+A weighted average cannot exceed the larger of the two values being averaged. So
+a gene significantly above **both** parents cannot come from mixing them, at any
+mixing proportion.
+
+That is why this test is independent of the score. `scDblFinder` measures
+closeness to simulated mixtures; this measures violation of an upper bound, and
+a cell can sit on top of the simulated mixtures while still breaking it.
+
+`pval.type = "all"` is what enforces "both". It takes the maximum across the
+pairwise contrasts, so a gene counts only if it is up against parentA and
+parentB. The default, `"any"`, would return genes above either parent, which
+every mixture has.
+
+**Each origin group is split on RNA content and tested twice.** A flagged cell
+carrying more than `r params$umi_split` times the unflagged median of its own
+cluster was called on a criterion independent of profile and is plausibly a
+collision. A flagged cell at or below that was called on profile alone, which is
+what both a library-size adjusted artificial doublet and a transitional cell
+look like.
+
+**The `low` rows are the ones the question is about.** Genes above both parents
+there are cells with one cell's worth of RNA expressing something no mixture of
+those parents could produce. The `high` rows are reported alongside as a
+comparison: if they show the same thing, the split is not separating anything
+and the result is about the origin groups rather than about RNA content.
 
 ```{r}
 # a lookup from local cluster to the annotated cell type its cells mostly are
@@ -364,24 +409,63 @@ local_type = dbl %>%
             .groups = "drop") %>%
   tibble::deframe()
 
-novel_expression = function(lc, min_cells = 20, fdr = 0.01) {
-  cells = dbl %>% filter(flagged, local_cluster == lc, !is.na(origin))
+# Flagged cells are grouped by their putative origin rather than by the cluster
+# they sit in. Every cell in an origin group is attributed to the same parent
+# pair, so all of them are tested against their own parents. Grouping by cluster
+# instead would force one modal origin onto cells whose origins differ.
+origin_groups = dbl %>%
+  filter(flagged, !is.na(origin), !origin_ambig) %>%
+  dplyr::count(sample, origin, name = "n_flagged") %>%
+  rowwise() %>%
+  mutate(parts = list(parse_origin(origin))) %>%
+  ungroup() %>%
+  filter(lengths(parts) == 2) %>%
+  mutate(pa_lc = paste(sample, vapply(parts, `[`, character(1), 1), sep = ":"),
+         pb_lc = paste(sample, vapply(parts, `[`, character(1), 2), sep = ":"),
+         parentA = unname(local_type[pa_lc]),
+         parentB = unname(local_type[pb_lc])) %>%
+  dplyr::select(-parts) %>%
+  arrange(desc(n_flagged))
+
+write.csv(origin_groups,
+          file = paste0(results_dir, "/origin_groups.csv"), row.names = FALSE)
+
+datatable(origin_groups %>% dplyr::select(sample, origin, parentA, parentB,
+                                          n_flagged),
+          filter = "top", rownames = FALSE)
+
+# origin groups large enough to test
+min_origin_cells = 20
+focus_origin = origin_groups %>% filter(n_flagged >= min_origin_cells)
+```
+
+`r if (nrow(focus_origin) == 0) paste0("No origin group has at least ", min_origin_cells, " flagged cells with an unambiguous origin, so this test cannot run. Ambiguous origins are excluded, so a large ambiguous fraction is one reason this can be empty.") else paste0(nrow(focus_origin), " origin group(s) have at least ", min_origin_cells, " flagged cells. The commonest pairs their cells are attributed to: ", paste(head(paste0(focus_origin$parentA, " + ", focus_origin$parentB), 5), collapse = "; "), ".")`
+
+```{r}
+novel_expression = function(i, subset = c("low", "high"),
+                            min_cells = 20, fdr = 0.01) {
+  subset = match.arg(subset)
+  row    = focus_origin[i, ]
+
+  cells = dbl %>% filter(flagged, sample == row$sample, origin == row$origin,
+                         !origin_ambig)
+
+  # Split on RNA content relative to the unflagged median of the cell's own
+  # cluster. A flagged cell at 2x was called on a criterion independent of
+  # profile and is plausibly a collision. A flagged cell at 1x was called on
+  # profile alone, which is what both a library-size adjusted artificial
+  # doublet and a transitional cell look like. The low subset is the one the
+  # question is about; pooling the two dilutes it.
+  cells = if (subset == "low") {
+    cells %>% filter(umi_ratio_local <= params$umi_split)
+  } else {
+    cells %>% filter(umi_ratio_local > params$umi_split)
+  }
   if (nrow(cells) < min_cells) return(NULL)
 
-  samp       = unique(cells$sample)
-  top_origin = names(sort(table(cells$origin), decreasing = TRUE))[1]
-  parents    = parse_origin(top_origin)
-  if (length(parents) != 2) return(NULL)
-
-  # parents are local clusters of THIS library, so they are prefixed with the
-  # sample before being matched. Using the annotated label here would select
-  # the wrong cells and name them after the wrong cluster.
-  pa_lc = paste(samp, parents[1], sep = ":")
-  pb_lc = paste(samp, parents[2], sep = ":")
-
   test_bc = cells$barcode
-  pa_bc   = setdiff(dbl$barcode[dbl$local_cluster == pa_lc], test_bc)
-  pb_bc   = setdiff(dbl$barcode[dbl$local_cluster == pb_lc], test_bc)
+  pa_bc   = setdiff(dbl$barcode[dbl$local_cluster == row$pa_lc], test_bc)
+  pb_bc   = setdiff(dbl$barcode[dbl$local_cluster == row$pb_lc], test_bc)
   if (length(pa_bc) < min_cells || length(pb_bc) < min_cells) return(NULL)
 
   keep = c(test_bc, pa_bc, pb_bc)
@@ -392,8 +476,9 @@ novel_expression = function(lc, min_cells = 20, fdr = 0.01) {
 
   sub = combined.sce[, match(keep, colnames(combined.sce))]
 
-  # pval.type = "all" requires a gene to be up against BOTH parents, which is
-  # what "above what either parent could contribute" means
+  # pval.type = "all" takes the maximum across the pairwise contrasts, so a
+  # gene counts only if it is up against parentA AND parentB. The default,
+  # "any", would return genes above either parent, which every mixture has.
   fm = findMarkers(sub, grp, test.type = "t", direction = "up",
                    pval.type = "all")
 
@@ -401,12 +486,14 @@ novel_expression = function(lc, min_cells = 20, fdr = 0.01) {
   res$Gene = rownames(res)
 
   data.frame(
-    local_cluster = lc,
-    CellType      = unname(local_type[lc]),
-    origin        = top_origin,
-    parentA       = unname(local_type[pa_lc]),
-    parentB       = unname(local_type[pb_lc]),
+    sample        = row$sample,
+    subset        = subset,
+    origin        = row$origin,
+    parentA       = row$parentA,
+    parentB       = row$parentB,
     n_tested      = length(test_bc),
+    n_parentA     = length(pa_bc),
+    n_parentB     = length(pb_bc),
     n_above_both  = sum(res$FDR < fdr, na.rm = TRUE),
     top_genes     = paste(head(res$Gene[order(res$FDR)], 10), collapse = ", "),
     stringsAsFactors = FALSE)
@@ -417,8 +504,12 @@ novel_file = paste0(Robject_out_dir, "/novel_expression.Rds")
 if (file.exists(novel_file)) {
   novel = readRDS(novel_file)
 } else {
-  novel = if (nrow(focus) == 0) NULL else
-    purrr::map_dfr(focus$local_cluster, novel_expression)
+  novel = if (nrow(focus_origin) == 0) NULL else
+    bind_rows(
+      purrr::map_dfr(seq_len(nrow(focus_origin)), novel_expression,
+                     subset = "low"),
+      purrr::map_dfr(seq_len(nrow(focus_origin)), novel_expression,
+                     subset = "high"))
   saveRDS(novel, file = novel_file)
 }
 
@@ -429,7 +520,7 @@ if (!is.null(novel)) {
 }
 ```
 
-`r if (is.null(novel) || nrow(novel) == 0) "No cluster had enough flagged cells with an unambiguous origin to run this test." else paste0("Genes expressed above **both** putative parents, at FDR < 0.01: ", paste(paste0(novel$CellType, " ", novel$n_above_both), collapse = "; "), ". A count above zero means those cells contain expression that no mixture of the two parent types could produce, which is evidence they are not doublets. A count of zero is consistent with a mixture, though it does not prove one, since a transitional state can also lie between its endpoints without exceeding either.")`
+`r if (is.null(novel) || nrow(novel) == 0) "No cluster had enough flagged cells with an unambiguous origin to run this test." else paste0("Genes expressed above **both** putative parents, at FDR < 0.01: ", paste(paste0(novel$parentA, " + ", novel$parentB, ": ", novel$n_above_both), collapse = "; "), ". A count above zero means those cells contain expression that no mixture of the two parent types could produce, which is evidence they are not doublets. A count of zero is consistent with a mixture, though it does not prove one, since a transitional state can also lie between its endpoints without exceeding either.")`
 
 # 4. Test 2: are they commoner than collision allows?
 
@@ -505,12 +596,21 @@ the expectation is visible rather than delegated.
 
 # 5. Test 3: do they carry two cells' worth of RNA?
 
-**First, whether this test is independent of the score.** `scDblFinder`
-documents `includePCs`, `use.cxds` and kNN-derived features, but does not say
-whether total counts are among the classifier's predictors. If they are, this
-test partly restates the score rather than checking it. That can be settled from
-the data instead of the documentation: if the score were being driven by library
-size, the two would be strongly monotonically related.
+**This test is only informative in one direction, and the documentation says
+why.** Part of the artificial doublet set is raw sums of two cells, carrying
+roughly twice the library size, so library size is part of what the score
+responds to. The rest are library-size adjusted and Poisson resampled, so they
+look like mixtures at one cell's worth of RNA.
+
+That asymmetry sets what the ratios below can support. A ratio near 2 is
+consistent with collisions. **A ratio near 1 is not evidence the cells are
+real**, because it is equally what a doublet flagged through the adjusted
+simulations looks like, and what a transitional cell looks like. The test can
+corroborate the doublet explanation and cannot refute it.
+
+How much of the score is library size in this dataset is still worth measuring,
+since it sets how much of the flagged set could have been caught on RNA content
+alone.
 
 ```{r, fig.width=8, fig.height=4}
 lib_vs_score = dbl %>%
@@ -532,7 +632,7 @@ ggsave(p_libscore, file = paste0(results_dir, "/score_vs_library_size.png"),
        width = 8, height = 4)
 ```
 
-`r paste0("Spearman correlation between total counts and doublet score: ", paste(paste0(lib_vs_score$sample, " ", round(lib_vs_score$rho, 2)), collapse = "; "), ". A weak correlation means the score is not simply tracking RNA content and the test below is close to independent of it. A strong one means the two are largely the same measurement and the ratios should be read as corroboration rather than as a check.")`
+`r paste0("Spearman correlation between total counts and doublet score: ", paste(paste0(lib_vs_score$sample, " ", round(lib_vs_score$rho, 2)), collapse = "; "), ". A strong correlation means much of the flagged set could have been picked out on RNA content alone. A weak one means most of it was flagged on profile, which is the case where the distinction from a transitional cell is hardest and test 1 carries the weight.")`
 
 Oocytes have the highest median UMI in this dataset and a below-average doublet
 rate, which points toward the score not tracking RNA content.
@@ -551,12 +651,13 @@ present, and a low ratio below would carry no information.
 ```{r, fig.width=9, fig.height=4}
 depth_headroom = dbl %>%
   group_by(sample) %>%
-  summarize(median_umi = median(sum),
-            p95_ratio  = quantile(sum, .95) / median(sum),
-            p99_ratio  = quantile(sum, .99) / median(sum),
-            max_ratio  = max(sum) / median(sum),
-            pct_over_2x = 100 * mean(sum > 2 * median(sum)),
-            median_genes = median(detected),
+  summarize(median_umi        = median(sum),
+            med_unflagged     = median(sum[!flagged]),
+            med_flagged       = median(sum[flagged]),
+            flagged_vs_unflag = median(sum[flagged]) / median(sum[!flagged]),
+            p99_ratio         = quantile(umi_ratio_local, .99),
+            pct_over_2x       = 100 * mean(umi_ratio_local > 2),
+            pct_flagged_over_2x = 100 * mean(umi_ratio_local[flagged] > 2),
             .groups = "drop")
 
 write.csv(depth_headroom, file = paste0(results_dir, "/depth_headroom.csv"),
@@ -565,15 +666,24 @@ write.csv(depth_headroom, file = paste0(results_dir, "/depth_headroom.csv"),
 datatable(depth_headroom %>% mutate(across(where(is.numeric), ~round(., 2))),
           rownames = FALSE, options = list(dom = "t", ordering = FALSE))
 
-p_depth = ggplot(dbl, aes(x = sum / median(sum), fill = flagged)) +
+# The reference is the unflagged median of each cell's own local cluster, not
+# the library median. These distributions are right-skewed, so the library
+# median sits well above the mode and comparing against twice it understates
+# the flagged cells.
+p_depth = ggplot(dbl, aes(x = umi_ratio_local, fill = flagged)) +
   geom_histogram(bins = 60, position = "identity", alpha = .55) +
   geom_vline(xintercept = 2, linetype = "dashed", colour = "grey30") +
+  geom_vline(xintercept = params$umi_split, linetype = "dotted",
+             colour = "grey30") +
   scale_x_log10() +
   scale_fill_brewer(palette = "Set1", direction = -1) +
   facet_wrap(~ sample, nrow = 1) +
-  xlab("total counts, relative to the library median") + ylab("cells") +
+  xlab("total counts, relative to the unflagged median of the same cluster") +
+  ylab("cells") +
   labs(fill = "flagged",
-       caption = "Dashed line is twice the median. If little mass sits at or beyond it, the ratio test has no room to work.")
+       caption = paste0("Dashed line is 2x, what a collision should reach. ",
+                        "Dotted line at ", params$umi_split,
+                        "x is where test 1 splits the flagged cells."))
 
 p_depth
 ggsave(p_depth, file = paste0(results_dir, "/depth_headroom.png"),
@@ -730,11 +840,12 @@ constraint rather than a similarity, and a cell can sit on top of the simulated
 mixtures while still breaking it.
 
 Test 2 is strong and independent, since collision rates come from loading rather
-than from expression. Test 3 is good but not decisive, for three
-reasons: a heterotypic doublet of a small cell and a large one need not reach
-twice the median, its independence from the score should be judged from the
-correlation reported in section 5, and the 2x expectation itself only holds if
-the depth allows it, which the headroom check in section 5 establishes. Test 4 is supporting.
+than from expression. Test 3 can corroborate the doublet
+explanation but cannot refute it, because part of the artificial doublet set is
+library-size adjusted, so a normal-depth mixture is something the score is built
+to flag. A heterotypic doublet of a small cell and a large one need not reach
+twice the median either, and the 2x expectation only holds if the depth allows
+it, which the headroom check establishes. Test 4 is supporting.
 
 **What none of them can do.** None proves a cell is transitional. They establish
 whether the doublet explanation survives, and it is possible for it to survive
