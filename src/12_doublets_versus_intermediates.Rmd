@@ -274,11 +274,26 @@ write.csv(concentration,
 datatable(concentration %>% mutate(across(where(is.numeric), ~round(., 2))),
           filter = "top", rownames = FALSE)
 
-# clusters where recalibration changes a material share of the cluster
-focus = concentration %>% filter(pct_of_cluster >= 5, n_flagged >= 20)
+# The tests below need the per-library clusters, since that is what
+# mostLikelyOrigin refers to. Each is labelled with the annotated cell type its
+# cells mostly belong to, so the output is readable.
+local_focus = dbl %>%
+  group_by(sample, local_cluster) %>%
+  summarize(n_cells   = dplyr::n(),
+            n_flagged = sum(flagged),
+            pct_flagged = 100 * mean(flagged),
+            CellType  = names(sort(table(CellType), decreasing = TRUE))[1],
+            .groups = "drop") %>%
+  arrange(desc(pct_flagged))
+
+datatable(local_focus %>% mutate(across(where(is.numeric), ~round(., 2))),
+          filter = "top", rownames = FALSE)
+
+# local clusters losing a material share of their cells
+focus = local_focus %>% filter(pct_flagged >= 5, n_flagged >= 20)
 ```
 
-`r if (nrow(focus) == 0) "No cluster loses 5% or more of its cells to recalibration. The change is spread thinly, which means the default rate was not selectively removing any one population, and the concern does not have a specific target in this dataset." else paste0(nrow(focus), " cluster(s) have at least 5% of their cells flagged: ", paste(focus$CellType, collapse = "; "), ". The tests below run on these.")`
+`r if (nrow(focus) == 0) "No cluster loses 5% or more of its cells to recalibration. The change is spread thinly, which means the default rate was not selectively removing any one population, and the concern does not have a specific target in this dataset." else paste0(nrow(focus), " per-library cluster(s) have at least 5% of their cells flagged, mostly annotated as: ", paste(unique(focus$CellType), collapse = "; "), ". The tests below run on these.")`
 
 ```{r}
 # scDblFinder documents mostLikelyOrigin only as "the presumed cluster
@@ -342,20 +357,31 @@ which requires a gene to be significantly up against **every** other group
 rather than merely against one.
 
 ```{r}
-novel_expression = function(cl, min_cells = 20, fdr = 0.01) {
-  cells = dbl %>% filter(flagged, label == cl, !is.na(origin))
+# a lookup from local cluster to the annotated cell type its cells mostly are
+local_type = dbl %>%
+  group_by(local_cluster) %>%
+  summarize(CellType = names(sort(table(CellType), decreasing = TRUE))[1],
+            .groups = "drop") %>%
+  tibble::deframe()
+
+novel_expression = function(lc, min_cells = 20, fdr = 0.01) {
+  cells = dbl %>% filter(flagged, local_cluster == lc, !is.na(origin))
   if (nrow(cells) < min_cells) return(NULL)
 
-  # the commonest putative origin for this group
+  samp       = unique(cells$sample)
   top_origin = names(sort(table(cells$origin), decreasing = TRUE))[1]
   parents    = parse_origin(top_origin)
   if (length(parents) != 2) return(NULL)
 
+  # parents are local clusters of THIS library, so they are prefixed with the
+  # sample before being matched. Using the annotated label here would select
+  # the wrong cells and name them after the wrong cluster.
+  pa_lc = paste(samp, parents[1], sep = ":")
+  pb_lc = paste(samp, parents[2], sep = ":")
+
   test_bc = cells$barcode
-  pa_bc   = cell_key$barcode[cell_key$label == parents[1]]
-  pb_bc   = cell_key$barcode[cell_key$label == parents[2]]
-  pa_bc   = setdiff(pa_bc, test_bc)
-  pb_bc   = setdiff(pb_bc, test_bc)
+  pa_bc   = setdiff(dbl$barcode[dbl$local_cluster == pa_lc], test_bc)
+  pb_bc   = setdiff(dbl$barcode[dbl$local_cluster == pb_lc], test_bc)
   if (length(pa_bc) < min_cells || length(pb_bc) < min_cells) return(NULL)
 
   keep = c(test_bc, pa_bc, pb_bc)
@@ -375,14 +401,14 @@ novel_expression = function(cl, min_cells = 20, fdr = 0.01) {
   res$Gene = rownames(res)
 
   data.frame(
-    label        = cl,
-    CellType     = anno[as.integer(cl)],
-    origin       = top_origin,
-    parentA      = anno[as.integer(parents[1])],
-    parentB      = anno[as.integer(parents[2])],
-    n_tested     = length(test_bc),
-    n_above_both = sum(res$FDR < fdr, na.rm = TRUE),
-    top_genes    = paste(head(res$Gene[order(res$FDR)], 10), collapse = ", "),
+    local_cluster = lc,
+    CellType      = unname(local_type[lc]),
+    origin        = top_origin,
+    parentA       = unname(local_type[pa_lc]),
+    parentB       = unname(local_type[pb_lc]),
+    n_tested      = length(test_bc),
+    n_above_both  = sum(res$FDR < fdr, na.rm = TRUE),
+    top_genes     = paste(head(res$Gene[order(res$FDR)], 10), collapse = ", "),
     stringsAsFactors = FALSE)
 }
 
@@ -392,7 +418,7 @@ if (file.exists(novel_file)) {
   novel = readRDS(novel_file)
 } else {
   novel = if (nrow(focus) == 0) NULL else
-    purrr::map_dfr(focus$label, novel_expression)
+    purrr::map_dfr(focus$local_cluster, novel_expression)
   saveRDS(novel, file = novel_file)
 }
 
@@ -416,36 +442,48 @@ For clusters i and j, the expected share of doublets is proportional to
 observed share comes from `mostLikelyOrigin`.
 
 ```{r}
-p_cluster = cell_key %>%
-  dplyr::count(label, name = "n") %>%
-  mutate(p = n / sum(n))
+# Abundances are per library over the per-library clusters, because that is
+# what origins refer to and because collisions happen within a reaction.
+p_cluster = dbl %>%
+  dplyr::count(sample, local_cluster, name = "n") %>%
+  group_by(sample) %>%
+  mutate(p = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(cl = sub("^[^:]*:", "", local_cluster))
+
+expected_pairs = p_cluster %>%
+  dplyr::select(sample, i = cl, p_i = p) %>%
+  inner_join(p_cluster %>% dplyr::select(sample, j = cl, p_j = p),
+             by = "sample", relationship = "many-to-many") %>%
+  filter(i < j) %>%
+  mutate(w = 2 * p_i * p_j) %>%
+  group_by(sample) %>%
+  mutate(expected_share = w / sum(w)) %>%
+  ungroup()
 
 origin_counts = dbl %>%
-  filter(class_platform == "doublet", !is.na(origin)) %>%
-  dplyr::count(origin, name = "observed")
-
-expected_pairs = expand.grid(i = p_cluster$label, j = p_cluster$label,
-                             stringsAsFactors = FALSE) %>%
-  filter(i < j) %>%
-  left_join(p_cluster %>% dplyr::select(i = label, p_i = p), by = "i") %>%
-  left_join(p_cluster %>% dplyr::select(j = label, p_j = p), by = "j") %>%
-  mutate(w = 2 * p_i * p_j,
-         expected_share = w / sum(w))
+  filter(flagged, !is.na(origin)) %>%
+  dplyr::count(sample, origin, name = "observed")
 
 collision = origin_counts %>%
-  mutate(pair = origin) %>%
   rowwise() %>%
-  mutate(parts = list(sort(parse_origin(pair)))) %>%
+  mutate(parts = list(sort(parse_origin(origin)))) %>%
   ungroup() %>%
   filter(lengths(parts) == 2) %>%
   mutate(i = vapply(parts, function(x) x[1], character(1)),
          j = vapply(parts, function(x) x[2], character(1))) %>%
   dplyr::select(-parts) %>%
-  left_join(expected_pairs %>% dplyr::select(i, j, expected_share),
-            by = c("i", "j")) %>%
+  left_join(expected_pairs %>% dplyr::select(sample, i, j, expected_share),
+            by = c("sample", "i", "j")) %>%
   filter(!is.na(expected_share)) %>%
-  mutate(observed_share = observed / sum(observed),
-         enrichment     = observed_share / expected_share) %>%
+  group_by(sample) %>%
+  mutate(observed_share = observed / sum(observed)) %>%
+  ungroup() %>%
+  mutate(enrichment = observed_share / expected_share,
+         typeA = unname(local_type[paste(sample, i, sep = ":")]),
+         typeB = unname(local_type[paste(sample, j, sep = ":")])) %>%
+  dplyr::select(sample, i, j, typeA, typeB, observed, observed_share,
+                expected_share, enrichment) %>%
   arrange(desc(enrichment))
 
 write.csv(collision, file = paste0(results_dir, "/collision_enrichment.csv"),
@@ -564,15 +602,15 @@ recover that difference.
 
 ```{r}
 umi_ratio = dbl %>%
-  group_by(label, CellType) %>%
+  group_by(local_cluster, CellType) %>%
   summarize(
-    n_singlet      = sum(class_platform == "singlet"),
-    n_doublet      = sum(class_platform == "doublet"),
+    n_singlet      = sum(!flagged),
+    n_flagged      = sum(flagged),
     med_singlet    = median(sum[!flagged]),
     med_flagged    = if (sum(flagged) >= 10) median(sum[flagged]) else NA_real_,
     .groups = "drop") %>%
   mutate(ratio_flagged = med_flagged / med_singlet) %>%
-  arrange(desc(n_doublet))
+  arrange(desc(n_flagged))
 
 write.csv(umi_ratio, file = paste0(results_dir, "/umi_ratio_by_cluster.csv"),
           row.names = FALSE)
@@ -594,9 +632,11 @@ Doublets arise from many independent random pairings, so they should not form a
 tight group with markers of their own. A real transitional population should.
 
 ```{r}
-coherence = function(cl, min_cells = 20, fdr = 0.01) {
-  bc_r = dbl$barcode[dbl$flagged & dbl$label == cl]
-  bc_s = dbl$barcode[!dbl$flagged & dbl$label == cl]
+coherence = function(lc, min_cells = 20, fdr = 0.01) {
+  # compared within the per-library cluster, so the flagged cells are set
+  # against the cells that would be retained from the same population
+  bc_r = dbl$barcode[dbl$flagged  & dbl$local_cluster == lc]
+  bc_s = dbl$barcode[!dbl$flagged & dbl$local_cluster == lc]
   if (length(bc_r) < min_cells || length(bc_s) < min_cells) return(NULL)
 
   keep = c(bc_r, bc_s)
@@ -608,13 +648,15 @@ coherence = function(cl, min_cells = 20, fdr = 0.01) {
                     pval.type = "any")
   res = as.data.frame(fm[["flagged"]])
 
-  data.frame(label = cl, CellType = anno[as.integer(cl)],
-             n_flagged = length(bc_r),
-             n_own_markers  = sum(res$FDR < fdr, na.rm = TRUE),
+  data.frame(local_cluster = lc,
+             CellType      = unname(local_type[lc]),
+             n_flagged     = length(bc_r),
+             n_own_markers = sum(res$FDR < fdr, na.rm = TRUE),
              stringsAsFactors = FALSE)
 }
 
-coh = if (nrow(focus) == 0) NULL else purrr::map_dfr(focus$label, coherence)
+coh = if (nrow(focus) == 0) NULL else
+  purrr::map_dfr(focus$local_cluster, coherence)
 
 if (!is.null(coh)) {
   write.csv(coh, file = paste0(results_dir, "/coherence_test.csv"),
