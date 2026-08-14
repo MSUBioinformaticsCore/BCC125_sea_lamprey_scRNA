@@ -12,6 +12,7 @@ params:
     project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
+    no_dbl_date: "20260813"
 ---
 
 ```{r setup, include=FALSE}
@@ -42,10 +43,13 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir       = paste0(params$project_dir, "/results/20260803_comparison")
+results_dir       = paste0(params$project_dir, "/results/", params$no_dbl_date, "_comparison")
 with_dbl_robjects = paste0(params$project_dir, "/results/20260312/Robjects")
 with_dbl_results  = paste0(params$project_dir, "/results/20260615")
-no_dbl_dir        = paste0(params$project_dir, "/results/20260803_no_doublets")
+# which no-doublets run to compare against. Set no_dbl_date to 20260803 to
+# reproduce the comparison against the earlier run, which used scDblFinder's
+# 10x-calibrated default rate rather than the PIPseq specification.
+no_dbl_dir        = paste0(params$project_dir, "/results/", params$no_dbl_date, "_no_doublets")
 if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
 ```
 
