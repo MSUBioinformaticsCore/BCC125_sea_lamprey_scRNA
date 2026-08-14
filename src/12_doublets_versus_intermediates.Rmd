@@ -51,6 +51,15 @@ if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 
 Robject_dir  = paste0(params$project_dir, "/results/20260312/Robjects")
 
+# Cache filenames carry the parameters that produced them, so changing a
+# parameter writes a new file rather than silently reusing a stale one. A cache
+# keyed only on existence is how a parameter change appears to do nothing.
+tag_dbl = paste0("dbr", params$dbr, "_sd", params$dbr_sd,
+                 "_pr", params$prop_random, "_k", params$k,
+                 "_hvg", params$n_hvg, "_pc", params$n_pcs)
+
+tag_novel = paste0(tag_dbl, "_lfc", params$lfc, "_split", params$umi_split)
+
 ```
 
 # Purpose
@@ -179,7 +188,7 @@ rather than cluster combinations, and is raised above its default here so that a
 proportion of them never depend on the clustering being right.
 
 ```{r}
-dbl_file = paste0(Robject_out_dir, "/scdbl_recalibrated.Rds")
+dbl_file = paste0(Robject_out_dir, "/scdbl_", tag_dbl, ".Rds")
 
 if (file.exists(dbl_file)) {
   dbl = readRDS(dbl_file)
@@ -566,7 +575,7 @@ novel_expression = function(i, subset = c("low", "high"),
     stringsAsFactors = FALSE)
 }
 
-novel_file = paste0(Robject_out_dir, "/novel_expression.Rds")
+novel_file = paste0(Robject_out_dir, "/novel_", tag_novel, ".Rds")
 
 if (file.exists(novel_file)) {
   novel = readRDS(novel_file)
