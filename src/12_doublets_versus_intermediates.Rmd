@@ -16,6 +16,7 @@ params:
     dbr_sd: 0.02
     prop_random: 0.5
     umi_split: 1.5
+    lfc: 1
     k: 30
     n_hvg: 5000
     n_pcs: 50
@@ -136,6 +137,18 @@ cell_key = data.frame(
   label   = as.character(colData(merged.sce)$label),
   stringsAsFactors = FALSE) %>%
   mutate(CellType = anno[as.integer(label)])
+
+# gene identifier mapping, so reported genes carry a symbol rather than a LOC
+gene_description = read.csv(
+  paste0(params$project_dir, "/results/20260803_no_doublets/gene_descritption.csv"),
+  stringsAsFactors = FALSE)
+
+gene_label = setNames(
+  ifelse(is.na(gene_description$WangGeneID) |
+           gene_description$WangGeneID == gene_description$Gene,
+         gene_description$Gene,
+         paste0(gene_description$WangGeneID, " (", gene_description$Gene, ")")),
+  gene_description$Gene)
 
 cells_per_library = cell_key %>% dplyr::count(batch, name = "n_cells")
 datatable(cells_per_library, rownames = FALSE)
@@ -395,6 +408,29 @@ collision. A flagged cell at or below that was called on profile alone, which is
 what both a library-size adjusted artificial doublet and a transitional cell
 look like.
 
+**Genes are required to exceed both parents by at least `r params$lfc` on the
+log scale, not merely to differ from them.** `findMarkers` tests against a null
+of no difference by default, so with thousands of cells a log-fold change of
+0.02 clears FDR 0.01 and the count of significant genes measures sample size
+rather than biology. The `lfc` argument shifts the null to a difference of that
+size, following the same logic as `treat`. `median_lfc` reports the margin over
+the **closer** of the two parents, so it is the conservative figure rather than
+the flattering one.
+
+Counts are still not comparable across groups of very different size, since
+power varies, so read `n_tested`, `n_parentA` and `n_parentB` alongside them.
+
+**An implausible parentage is a claim to test, not a contradiction.**
+`mostLikelyOrigin` is the closest simulated pair, so every flagged cell receives
+one whether or not any pair fits well. A group of endothelial cells attributed
+to fibroblasts and macrophages is a case where the mixture explanation is
+biologically implausible, and this test is what adjudicates it: no mixture of
+those two can produce `VWF` or `SOX18`, so if the cells are endothelial the test
+should return a large count with recognisably endothelial genes.
+`self_in_parents` records whether the group's own annotation appears in its
+parentage, which is worth reading first though it proves nothing on its own,
+since a doublet can land in any cluster.
+
 **The `low` rows are the ones the question is about.** Genes above both parents
 there are cells with one cell's worth of RNA expressing something no mixture of
 those parents could produce. The `high` rows are reported alongside as a
@@ -423,15 +459,20 @@ origin_groups = dbl %>%
   mutate(pa_lc = paste(sample, vapply(parts, `[`, character(1), 1), sep = ":"),
          pb_lc = paste(sample, vapply(parts, `[`, character(1), 2), sep = ":"),
          parentA = unname(local_type[pa_lc]),
-         parentB = unname(local_type[pb_lc])) %>%
+         parentB = unname(local_type[pb_lc]),
+         # the two parents are always different local clusters, but the
+         # per-library clustering often splits one annotated cell type across
+         # several of them, so both can carry the same annotation
+         same_annotation = parentA == parentB) %>%
   dplyr::select(-parts) %>%
   arrange(desc(n_flagged))
 
 write.csv(origin_groups,
           file = paste0(results_dir, "/origin_groups.csv"), row.names = FALSE)
 
-datatable(origin_groups %>% dplyr::select(sample, origin, parentA, parentB,
-                                          n_flagged),
+datatable(origin_groups %>%
+            dplyr::select(sample, origin, pa_lc, pb_lc, parentA, parentB,
+                          same_annotation, n_flagged),
           filter = "top", rownames = FALSE)
 
 # origin groups large enough to test
@@ -439,7 +480,7 @@ min_origin_cells = 20
 focus_origin = origin_groups %>% filter(n_flagged >= min_origin_cells)
 ```
 
-`r if (nrow(focus_origin) == 0) paste0("No origin group has at least ", min_origin_cells, " flagged cells with an unambiguous origin, so this test cannot run. Ambiguous origins are excluded, so a large ambiguous fraction is one reason this can be empty.") else paste0(nrow(focus_origin), " origin group(s) have at least ", min_origin_cells, " flagged cells. The commonest pairs their cells are attributed to: ", paste(head(paste0(focus_origin$parentA, " + ", focus_origin$parentB), 5), collapse = "; "), ".")`
+`r if (nrow(focus_origin) == 0) paste0("No origin group has at least ", min_origin_cells, " flagged cells with an unambiguous origin, so this test cannot run. Ambiguous origins are excluded, so a large ambiguous fraction is one reason this can be empty.") else paste0(nrow(focus_origin), " origin group(s) have at least ", min_origin_cells, " flagged cells. ", sum(focus_origin$same_annotation), " of them pair two local clusters carrying the same annotation, which happens because the per-library clustering splits one annotated cell type across several clusters. Those are still valid tests, against two genuinely different cell groups, but weaker ones: the closer the two parents are, the less work the requirement to exceed both is doing. The largest groups, with their local clusters: ", paste(head(paste0(focus_origin$sample, " ", focus_origin$pa_lc, " + ", focus_origin$pb_lc, " (", focus_origin$parentA, " + ", focus_origin$parentB, ")"), 3), collapse = "; "), ".")`
 
 ```{r}
 novel_expression = function(i, subset = c("low", "high"),
@@ -479,23 +520,49 @@ novel_expression = function(i, subset = c("low", "high"),
   # pval.type = "all" takes the maximum across the pairwise contrasts, so a
   # gene counts only if it is up against parentA AND parentB. The default,
   # "any", would return genes above either parent, which every mixture has.
+  # lfc shifts the null from "no difference" to "a difference of lfc", so the
+  # test asks whether the flagged cells are meaningfully above both parents
+  # rather than detectably above them. Without it the counts measure sample
+  # size: with thousands of cells a log-fold change of 0.02 clears FDR 0.01.
   fm = findMarkers(sub, grp, test.type = "t", direction = "up",
-                   pval.type = "all")
+                   pval.type = "all", lfc = params$lfc)
 
   res = as.data.frame(fm[["flagged"]])
   res$Gene = rownames(res)
+
+  lfc_cols = grep("^logFC\\.", colnames(res), value = TRUE)
+  sig      = res$FDR < fdr & !is.na(res$FDR)
+
+  # which annotated types the flagged cells themselves mostly belong to. A
+  # doublet can land in any cluster, so a mismatch is not proof of anything,
+  # but a group whose own annotation appears nowhere in its parentage is worth
+  # reading before one whose annotation is a parent.
+  own_type = names(sort(table(cells$CellType), decreasing = TRUE))[1]
 
   data.frame(
     sample        = row$sample,
     subset        = subset,
     origin        = row$origin,
+    pa_lc         = row$pa_lc,
+    pb_lc         = row$pb_lc,
+    own_CellType  = own_type,
     parentA       = row$parentA,
     parentB       = row$parentB,
+    self_in_parents = own_type %in% c(row$parentA, row$parentB),
+    same_annotation = row$same_annotation,
     n_tested      = length(test_bc),
     n_parentA     = length(pa_bc),
     n_parentB     = length(pb_bc),
-    n_above_both  = sum(res$FDR < fdr, na.rm = TRUE),
-    top_genes     = paste(head(res$Gene[order(res$FDR)], 10), collapse = ", "),
+    n_above_both  = sum(sig),
+    # the smallest of the two parent log-fold changes, so the reported effect
+    # is the margin over the closer parent rather than the easier one
+    median_lfc    = if (any(sig) && length(lfc_cols) > 0)
+      round(median(apply(res[sig, lfc_cols, drop = FALSE], 1, min)), 2)
+      else NA_real_,
+    top_genes     = paste(ifelse(is.na(gene_label[head(res$Gene[order(res$FDR)], 10)]),
+                                 head(res$Gene[order(res$FDR)], 10),
+                                 gene_label[head(res$Gene[order(res$FDR)], 10)]),
+                          collapse = ", "),
     stringsAsFactors = FALSE)
 }
 
