@@ -566,9 +566,11 @@ datatable(scores, filter = "top", rownames = FALSE)
 
 Early germ cell markers.
 
-```{r, fig.width=8, fig.height=4}
+```{r}
 rowData(merged.cds)$gene_short_name = row.names(merged.cds)
 
+# a gene assigned to two sets would be faceted ambiguously, so only genes
+# belonging to exactly one set are plotted
 unique_markers = chung_davidson_markers %>%
   group_by(Gene) %>% tally() %>%
   filter(n == 1) %>%
@@ -576,37 +578,79 @@ unique_markers = chung_davidson_markers %>%
 
 genes_for_plot = chung_davidson_markers %>%
   select(Gene, CellType) %>%
-  filter(Gene %in% unique_markers)
+  filter(Gene %in% unique_markers, Gene %in% rownames(merged.cds))
 
-plot_cells(merged.cds, reduction_method = "tSNE",
-           genes = genes_for_plot %>%
-             filter(CellType %in% c("Migrating.germ.cells", "Primordial.germ.cells")))
+# Set names are spelled out here rather than inline in each plot_cells call, so
+# they can be checked against the curated list before anything is drawn. The
+# previous version carried the wide sheet's syntactic names (Pre.granulosa.cells
+# and so on); one panel matched nothing and errored, and two matched a single
+# set each and would have rendered a partial figure under a heading promising
+# all of them.
+marker_panels = list(
+  early_germ   = "Primordial germ cells",
+  pan_germline = "Germ cells (pan-germline)",
+  female       = c("Oocyte", "Granulosa cells", "Pre-granulosa cells"),
+  male         = c("Spermatocytes", "Spermatogonial stem cells"))
+
+known_sets = unique(chung_davidson_markers$CellType)
+unknown    = setdiff(unlist(marker_panels, use.names = FALSE), known_sets)
+if (length(unknown) > 0)
+  stop("marker set(s) requested for plotting but absent from the curated list: ",
+       paste(unknown, collapse = ", "),
+       ". Sets available: ", paste(sort(known_sets), collapse = ", "))
+
+# plot_cells errors with "None of the provided genes were found in the cds" when
+# handed an empty set, which does not say which panel or why
+plot_marker_panel = function(sets, ...) {
+  g = genes_for_plot %>% filter(CellType %in% sets)
+  if (nrow(g) == 0)
+    stop("no plottable genes for ", paste(sets, collapse = " / "),
+         ". Every marker in these sets is either shared with another set or ",
+         "absent from the count matrix.")
+  plot_cells(merged.cds, reduction_method = "tSNE", genes = g, ...)
+}
+
+panel_counts = purrr::map_dfr(names(marker_panels), function(p)
+  data.frame(panel     = p,
+             sets      = paste(marker_panels[[p]], collapse = "; "),
+             n_genes   = sum(genes_for_plot$CellType %in% marker_panels[[p]])))
+
+datatable(panel_counts, rownames = FALSE,
+          options = list(dom = "t", ordering = FALSE))
+```
+
+```{r, fig.width=8, fig.height=4}
+plot_marker_panel(marker_panels$early_germ)
+```
+
+Pan-germline markers.
+
+```{r, fig.width=12, fig.height=6}
+plot_marker_panel(marker_panels$pan_germline,
+                  show_trajectory_graph = FALSE,
+                  label_cell_groups     = FALSE,
+                  label_leaves          = FALSE,
+                  label_branch_points   = FALSE)
 ```
 
 Female cell markers.
 
 ```{r, fig.height=4, fig.width=12}
-plot_cells(merged.cds, reduction_method = "tSNE",
-           genes = genes_for_plot %>%
-             filter(CellType %in% c("Oogonia", "Oocyte",
-                                    "Granulosa.cells", "Pre.granulosa.cells")),
-           show_trajectory_graph = FALSE,
-           label_cell_groups     = FALSE,
-           label_leaves          = FALSE,
-           label_branch_points   = FALSE)
+plot_marker_panel(marker_panels$female,
+                  show_trajectory_graph = FALSE,
+                  label_cell_groups     = FALSE,
+                  label_leaves          = FALSE,
+                  label_branch_points   = FALSE)
 ```
 
 Male cell markers.
 
 ```{r, fig.height=4, fig.width=12}
-plot_cells(merged.cds, reduction_method = "tSNE",
-           genes = genes_for_plot %>%
-             filter(CellType %in% c("Spermatocytes", "Spermatogonia",
-                                    "Spermatogonial.stem.cells")),
-           show_trajectory_graph = FALSE,
-           label_cell_groups     = FALSE,
-           label_leaves          = FALSE,
-           label_branch_points   = FALSE)
+plot_marker_panel(marker_panels$male,
+                  show_trajectory_graph = FALSE,
+                  label_cell_groups     = FALSE,
+                  label_leaves          = FALSE,
+                  label_branch_points   = FALSE)
 ```
 
 # Annotations, parked
