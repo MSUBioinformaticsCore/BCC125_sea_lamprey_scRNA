@@ -39,5 +39,6 @@ nextflow run $SOFTWARE -resume -profile singularity -work-dir $WORKDIR \
 --skip_bigwig \
 --skip_stringtie \
 -c $PROJECT/src/slurm.config.bioinformaticscore.sh \
---multiqc_config $PROJECT/src/custom_multiqc.yml
+--multiqc_config $PROJECT/src/custom_multiqc.yml \
+--featurecounts_group_type transcript_biotype
 
