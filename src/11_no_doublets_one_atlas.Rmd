@@ -163,6 +163,27 @@ core_clusters = side_counts %>%
 sex_clusters = side_counts %>%
   filter(Female >= min_cells_side, Male >= min_cells_side) %>%
   pull(label)
+
+# One depth per cluster, shared by the replicate and stage comparisons.
+#
+# This matters more than it looks. Subsampling each comparison to its own
+# minimum sounds right and is not: the floor for a transformer-poor cluster then
+# gets measured on many times more cells than the stage test it is supposed to
+# calibrate, and the two margins are no longer comparable. The mismatch runs
+# both ways, since transformer-heavy clusters have the opposite problem.
+#
+# larva is UND1 + UND2 so it never binds, and is left out.
+core_n = side_counts %>%
+  filter(label %in% core_clusters) %>%
+  transmute(label,
+            n = pmin(Undifferentiated.1, Undifferentiated.2, transformer))
+core_n = setNames(core_n$n, core_n$label)
+
+# the sex comparison is on its own scale and is not read against the floor
+sex_n = side_counts %>%
+  filter(label %in% sex_clusters) %>%
+  transmute(label, n = pmin(Female, Male))
+sex_n = setNames(sex_n$n, sex_n$label)
 ```
 
 `r paste0(length(core_clusters), " of ", nrow(side_counts), " clusters have at least ", min_cells_side, " cells in Undifferentiated.1, in Undifferentiated.2 and in the transformers, and carry the replicate and stage comparisons. ", length(sex_clusters), " have at least ", min_cells_side, " cells in both transformer libraries and carry the sex comparison.")`
@@ -182,7 +203,9 @@ Three comparisons. The first is the reference and the second is the question.
 
 Cell numbers are matched per cluster across every side of every comparison, at
 that cluster's own depth, since marker rankings sharpen with cell number and an
-unmatched comparison would measure sample size. Library is deliberately **not**
+unmatched comparison would measure sample size. **The replicate and stage
+comparisons share one depth per cluster**, so the floor is measured on the same
+number of cells as the test it calibrates. Library is deliberately **not**
 blocked, because library is the variable being measured. The procedure repeats
 over independent draws and the similarity matrices are averaged before any
 verdict is read off them.
@@ -239,14 +262,22 @@ similarity_matrix = function(mA, mB, clusters) {
 ```{r}
 # one comparison: subsample both sides to matched depth, compute markers on each
 # side over the same cluster set, average the similarity matrices over draws
-run_comparison = function(sideA_libs, sideB_libs, clusters_keep, seed = 1) {
+run_comparison = function(sideA_libs, sideB_libs, clusters_keep, n_by_cluster,
+                          seed = 1) {
 
   inA = which(cell_key$library %in% sideA_libs)
   inB = which(cell_key$library %in% sideB_libs)
 
-  n_by_cluster = sapply(clusters_keep, function(cl)
+  # depth is supplied rather than derived, so two comparisons can be run at the
+  # same depth and their margins compared
+  stopifnot(all(clusters_keep %in% names(n_by_cluster)))
+  n_by_cluster = n_by_cluster[clusters_keep]
+
+  avail = sapply(clusters_keep, function(cl)
     min(sum(cell_key$label[inA] == cl), sum(cell_key$label[inB] == cl)))
-  names(n_by_cluster) = clusters_keep
+  if (any(avail < n_by_cluster))
+    stop("requested depth exceeds available cells for cluster(s): ",
+         paste(clusters_keep[avail < n_by_cluster], collapse = ", "))
 
   set.seed(seed)
   acc = NULL
@@ -270,18 +301,24 @@ run_comparison = function(sideA_libs, sideB_libs, clusters_keep, seed = 1) {
 ```
 
 ```{r}
-comparison_file = paste0(Robject_out_dir, "/stage_correspondence_",
-                         n_top, "_lfc", lfc_thresh, "_", n_draws, "draws.Rds")
+# The depth scheme is part of the cache key, not just the tuning parameters.
+# An earlier version subsampled each comparison to its own minimum, which put
+# the floor and the stage test on different cell counts; results from that
+# scheme are not comparable with these and must not be silently reused.
+depth_tag = paste0("commonN", sum(core_n))
+
+comparison_file = paste0(Robject_out_dir, "/stage_correspondence_", depth_tag,
+                         "_", n_top, "_lfc", lfc_thresh, "_", n_draws, "draws.Rds")
 
 if (file.exists(comparison_file)) {
   comparisons = readRDS(comparison_file)
 } else {
   comparisons = list(
     replicate = run_comparison("Undifferentiated.1", "Undifferentiated.2",
-                               core_clusters),
+                               core_clusters, core_n),
     stage     = run_comparison(c("Undifferentiated.1", "Undifferentiated.2"),
-                               c("Female", "Male"), core_clusters),
-    sex       = run_comparison("Female", "Male", sex_clusters))
+                               c("Female", "Male"), core_clusters, core_n),
+    sex       = run_comparison("Female", "Male", sex_clusters, sex_n))
   saveRDS(comparisons, file = comparison_file)
 }
 ```
@@ -346,6 +383,64 @@ datatable(summary_by_comparison %>% mutate(across(where(is.numeric), ~round(., 1
           rownames = FALSE, options = list(dom = "t", ordering = FALSE))
 ```
 
+## Which stage results can be read at all
+
+A cluster that does not correspond to itself **between two larval animals**, at
+the depth its stage test runs at, has not shown that it is resolvable at that
+depth by any comparison. Its stage result carries no information, and calling it
+a failure would be reading noise as disagreement.
+
+Because both comparisons now run at the same depth, the replicate result is
+exactly the right control: it asks whether this cluster is recoverable at this
+cell count when only replicate variation separates the sides.
+
+```{r}
+stage_tbl = recip %>% filter(comparison == "stage") %>%
+  dplyr::select(cluster, n_per_side, self_stage = self_similarity,
+                margin_stage = margin, reciprocal_stage = reciprocal)
+
+rep_tbl = recip %>% filter(comparison == "replicate") %>%
+  dplyr::select(cluster, self_rep = self_similarity,
+                margin_rep = margin, reciprocal_rep = reciprocal)
+
+outcome_tbl = stage_tbl %>%
+  left_join(rep_tbl, by = "cluster") %>%
+  left_join(side_counts %>% dplyr::select(cluster = label, larva, transformer),
+            by = "cluster") %>%
+  mutate(outcome = dplyr::case_when(
+    !reciprocal_rep  ~ "untestable at this depth",
+    reciprocal_stage ~ "corresponds across stages",
+    TRUE             ~ "fails across stages")) %>%
+  dplyr::select(cluster, larva, transformer, n_per_side,
+                self_rep, margin_rep, reciprocal_rep,
+                self_stage, margin_stage, reciprocal_stage, outcome) %>%
+  arrange(match(outcome, c("fails across stages", "corresponds across stages",
+                           "untestable at this depth")),
+          as.integer(cluster))
+
+write.csv(outcome_tbl, file = paste0(results_dir, "/SuppTable_stage_outcomes.csv"),
+          row.names = FALSE)
+
+datatable(outcome_tbl %>% mutate(across(where(is.numeric), ~round(., 1))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r}
+n_corresponds = sum(outcome_tbl$outcome == "corresponds across stages")
+n_fails       = sum(outcome_tbl$outcome == "fails across stages")
+n_untestable  = sum(outcome_tbl$outcome == "untestable at this depth")
+n_readable    = n_corresponds + n_fails
+
+fails_tbl      = outcome_tbl %>% filter(outcome == "fails across stages")
+untestable_tbl = outcome_tbl %>% filter(outcome == "untestable at this depth")
+```
+
+`r paste0("Of ", nrow(outcome_tbl), " clusters, ", n_readable, " are resolvable between replicate animals at their own stage-test depth and so give a readable stage result. ", n_corresponds, " correspond across the stage boundary and ", n_fails, " do not.")`
+
+`r if (n_untestable == 0) "Every cluster is resolvable at its own depth." else paste0("**", n_untestable, " cluster(s) are untestable at this depth: ", paste(untestable_tbl$cluster, collapse = ", "), ".** These fail to find themselves even between the two larval animals, so their stage result reflects how few cells they have on their sparser side rather than anything about stage. They are reported and not counted either way. Look at their larva and transformer counts: a cluster with a few dozen cells on one side cannot support a stable marker list on that side, and reciprocity fails in whichever direction depends on it.")`
+
+`r if (n_fails == 0) "" else paste0("The ", n_fails, " genuine failure(s), cluster(s) ", paste(fails_tbl$cluster, collapse = ", "), ", are the ones to examine individually. A cluster that is well populated on both sides, resolves cleanly between replicate animals, and then does not resolve across the stage boundary is describing something real about that population rather than a shortage of cells. Check its library composition before interpreting it: a cluster whose two sides are one transformer library against the larval libraries is separated by animal, sex, stage and batch at once, and this design cannot say which.")`
+
 ```{r}
 rep_row   = summary_by_comparison %>% filter(comparison == "replicate")
 stage_row = summary_by_comparison %>% filter(comparison == "stage")
@@ -404,14 +499,17 @@ ggsave(p_margin, file = paste0(results_dir, "/self_match_margin.png"),
 
 # 3. Verdict
 
+The verdict is taken over the **readable** clusters only, the ones that resolve
+between replicate animals at their own stage-test depth. Clusters that are
+untestable at their depth are excluded from both the numerator and the
+denominator rather than counted as failures.
+
 ```{r}
-stage_holds = nrow(stage_row) == 1 && nrow(rep_row) == 1 &&
-              stage_row$n_reciprocal == stage_row$n_clusters
-stage_mixed = nrow(stage_row) == 1 && stage_row$n_reciprocal > 0 &&
-              stage_row$n_reciprocal < stage_row$n_clusters
+stage_holds = n_readable > 0 && n_fails == 0
+stage_mixed = n_readable > 0 && n_fails > 0 && n_fails < n_corresponds
 ```
 
-`r if (nrow(stage_row) == 0) "**This document cannot decide.** The stage comparison did not run." else if (stage_holds) paste0("**Do not split the atlas.** Every one of the ", stage_row$n_clusters, " comparable clusters finds itself across the stage boundary by its own markers, in both directions. Those clusters are the same populations in larval and in transformer cells. The claim holds whatever the larva-to-transformer contrast is made of, which is why it survives the confound between stage, collection date and batch. Report one integrated atlas and state the confound as a limitation the design cannot resolve.") else if (stage_mixed) paste0("**Integrate, but name the exceptions.** ", stage_row$n_reciprocal, " of ", stage_row$n_clusters, " comparable clusters find themselves across the stage boundary. The ", nrow(fails), " that do not are: ", paste(fails$cluster, collapse = ", "), ". Report the integrated atlas, name those clusters in the text, and either describe them per stage or merge them with whichever cluster they match instead.") else "**Report the stages separately.** No comparable cluster finds itself across the stage boundary by its own markers, so the integrated clustering groups cells the marker evidence does not support grouping."`
+`r if (n_readable == 0) "**This document cannot decide.** No cluster resolves between replicate animals at the depth its stage test runs at, so there is no readable stage result. That is a statement about cell numbers, not about stage." else if (stage_holds) paste0("**Do not split the atlas.** All ", n_readable, " readable clusters find themselves across the stage boundary by their own markers, in both directions. Those clusters are the same populations in larval and in transformer cells. The claim holds whatever the larva-to-transformer contrast is made of, which is why it survives the confound between stage, collection date and batch. Report one integrated atlas and state the confound as a limitation the design cannot resolve.") else if (stage_mixed) paste0("**Integrate, but name the exceptions.** ", n_corresponds, " of ", n_readable, " readable clusters find themselves across the stage boundary. The ", n_fails, " that do not are cluster(s) ", paste(fails_tbl$cluster, collapse = ", "), ". Report the integrated atlas, name those clusters in the text, and either describe them per stage or merge them with whichever cluster they match instead. Their library composition should be checked and reported alongside them, since a cluster split along a single library is not evidence of two cell types.") else paste0("**Report the stages separately.** ", n_fails, " of ", n_readable, " readable clusters fail to find themselves across the stage boundary, so the integrated clustering groups cells the marker evidence does not support grouping.")`
 
 **Read the stage result against the replicate result, not against 100%.** Marker
 rankings shuffle between random halves of identical data, so some loss of
