@@ -320,7 +320,7 @@ plot_stability_metrics <- function(results) {
   
   # Create plots
   p1 <- ggplot(df, aes(x = k, y = mean_n_clusters)) +
-    geom_line(color = "steelblue", size = 1) +
+    geom_line(color = "steelblue", linewidth = 1) +
     geom_point(size = 3) +
     labs(title = "Number of Clusters vs k",
          x = "k (number of neighbors)",
@@ -328,7 +328,7 @@ plot_stability_metrics <- function(results) {
     theme_minimal()
   
   p2 <- ggplot(df, aes(x = k, y = mean_ari)) +
-    geom_line(color = "darkgreen", size = 1) +
+    geom_line(color = "darkgreen", linewidth = 1) +
     geom_point(size = 3) +
     geom_hline(yintercept = 0.9, linetype = "dashed", color = "red") +
     labs(title = "Clustering Stability (ARI) vs k",
@@ -339,7 +339,7 @@ plot_stability_metrics <- function(results) {
     theme_minimal()
   
   p3 <- ggplot(df, aes(x = k, y = cv_n_clusters)) +
-    geom_line(color = "darkorange", size = 1) +
+    geom_line(color = "darkorange", linewidth = 1) +
     geom_point(size = 3) +
     labs(title = "Coefficient of Variation vs k",
          x = "k (number of neighbors)",
