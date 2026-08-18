@@ -47,12 +47,7 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 This is a copy of `01_all_cells_clustering_annotation.Rmd` that removes cells
 called doublets by `scDblFinder` before clustering, integration or trajectory
 analysis, so the effect of removing them on clustering and annotation can be
-assessed directly. `scDblFinder` is rerun here, per sample, rather than
-reusing scores from `04_doublet_qc.Rmd`, so this document is standalone and
-does not depend on that one having been run first. Because `scDblFinder`'s
-doublet simulation is stochastic, the doublet calls made here are not
-guaranteed to be identical to the ones reported in `04_doublet_qc.Rmd`, even
-with the same seed, if package versions differ between runs.
+assessed directly. 
 
 ```{r}
 results_dir = paste0(params$project_dir, "/results/20260813_no_doublets")
@@ -369,8 +364,7 @@ datatable(gene_description)
 
 The curated list is `canonical_markers_long_2026-08-14.csv`, in long format: one
 row per gene per cell type, with the NCBI identifier already resolved. It is the
-collaborators' S1 sheet with the identifiers repaired, plus additions only where
-a source was retrieved for the set.
+table S1 sheet with the identifiers repaired, plus some putative additions.
 
 Every marker is one of three things, recorded in `provenance`:
 
@@ -378,15 +372,7 @@ Every marker is one of three things, recorded in `provenance`:
 * **S1, symbol corrected**, where S1's spelling resolves against nothing in the
   gene table and a corrected spelling resolves. Three cases, each named in
   `repair_note`.
-* **added, set cited**, an addition to a set for which a citation was retrieved
-  and checked. Sixteen genes across three sets.
-
-Nine genes present in the 2026-08-12 draft were added without a retrieved source
-and have been removed. A confidence tier column was also dropped: it graded 40
-genes as having direct support in a non-mammalian vertebrate while the
-supporting text named one for six of them, so it asserted evidence that had not
-been gathered. The per-gene descriptive notes went with it for the same reason.
-What remains is either from the collaborators or checked against a source.
+* **added, set cited**, . Sixteen genes across three sets.
 
 ```{r}
 canonical = read.csv(paste0(data_dir, "/canonical_markers_long_2026-08-14.csv"),
@@ -407,10 +393,7 @@ n_missing = sum(!chung_davidson_markers$Gene %in% rownames(combined.sce))
 ### Sources
 
 Citations attach to the marker **set**, which is the level at which they were
-retrieved, and cover three of the fourteen sets. There is no per-gene citation
-and none is invented here. Each reference was checked against PubMed by author,
-year, journal and volume; the two without a PMID could not be confirmed that way
-and say so.
+retrieved, and cover three of the fourteen sets. 
 
 ```{r}
 datatable(canonical %>%
@@ -448,7 +431,7 @@ thin_sets = set_sizes %>% filter(below_coherence_floor)
 
 Every curated marker against every cluster, on uncorrected depth-normalised
 values. Dot size is the percentage of cells in the cluster expressing the gene,
-colour is the mean log expression.
+color is the mean log expression.
 
 This is the plot to annotate from. The overlap heatmap further down measures
 whether a cell type's markers are *enriched* among a cluster's strongest
@@ -703,6 +686,7 @@ plot_marker_panel(marker_panels$male,
                   label_branch_points   = FALSE)
 ```
 
+```{r, eval=FALSE, echo = FALSE}
 # Annotations, parked
 
 **Nothing in this section runs.** Every chunk below is `eval=FALSE` and the
@@ -757,8 +741,10 @@ Germline identity was confined to cluster 8 (ZP3 and ZP4 family, logFC up to
 3.9) and clusters 17 to 20 (PIWIL1, SYCP3, SYCP2, BOLL, TDRD7, TDRD9, MAEL,
 TEX15). Whether that still holds is a question for the rerun, not something
 this section establishes.
+```
 
-```{r, eval=FALSE}
+
+```{r, eval=FALSE, echo = FALSE}
 anno = c(
   "1. Fibroblasts (migrating)",
   "2. Mesonephric cells",
@@ -794,7 +780,6 @@ if (length(anno) != n_clusters)
   stop("anno has ", length(anno), " labels but this clustering has ",
        n_clusters, " clusters. Re-derive the annotations from ",
        "05_compare_doublet_removal.Rmd before relabeling.")
-```
 
 | no-doublets cluster | best match by cells | purity | annotation |
 | --- | --- | --- | --- |
@@ -819,9 +804,10 @@ if (length(anno) != n_clusters)
 | 19 | 18 | 96.9% | Spermatocytes (apoptotic) |
 | 20 | 19 | 93.8% | Spermatocytes (GPCR-activated) |
 
-## Labeled TSNE, pending
+```
 
-```{r, eval=FALSE, fig.width=8, fig.height=6}
+```{r, eval=FALSE, fig.width=8, fig.height=6, echo=FALSE}
+## Labeled TSNE, pending
 ct = anno[colData(merged.sce)$label]
 merged.sce$CellType = ct
 merged.sce$CellType = factor(merged.sce$CellType, levels = anno)
@@ -837,9 +823,8 @@ plotTSNE(merged.sce, colour_by = "CellType", text_by = "label",
 ggsave(file = paste0(results_dir, "/all_cells_tsne_black.png"), height = 6, width = 8)
 ```
 
+```{r, eval=FALSE, fig.show="hide", echo=FALSE}
 ## Bubble plots per cell type, pending
-
-```{r, eval=FALSE, fig.show="hide"}
 nested_df   <- chung_davidson_markers %>% group_by(CellType) %>% tidyr::nest()
 list_of_dfs <- nested_df$data
 names(list_of_dfs) <- nested_df$CellType

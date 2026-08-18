@@ -30,10 +30,7 @@ This document compares the with-doublets analysis
 (`01_all_cells_clustering_annotation_no_doublets.Rmd`), using two independent
 lines of evidence: whether individual cells common to both analyses land in
 the same or different clusters, and whether each analysis's cluster marker
-genes overlap. These two lines of evidence are meant to resolve the `TODO`
-notes left in `02_sex_cell_subanalysis_no_doublets.Rmd` and
-`03_trajectory_analysis_no_doublets.Rmd` about which no-doublets cluster
-numbers correspond to which with-doublets cluster numbers.
+genes overlap. 
 
 ```{r}
 library(tidyverse)
@@ -52,13 +49,6 @@ with_dbl_results  = paste0(params$project_dir, "/results/20260615")
 no_dbl_dir        = paste0(params$project_dir, "/results/", params$no_dbl_date, "_no_doublets")
 if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
 ```
-
-With-doublets `merged.sce`/`combined.sce` come from `results/20260312/Robjects`,
-the same source `04_doublet_qc.Rmd` treats as canonical, and with-doublets
-marker gene tables come from `results/20260615`, where
-`01_all_cells_clustering_annotation.Rmd` currently writes them. No-doublets
-objects and tables all come from the single directory
-`results/20260803_no_doublets`.
 
 ```{r}
 merged.sce.A   = readRDS(paste0(with_dbl_robjects, "/merged.sce.Rds"))
@@ -205,13 +195,6 @@ Background gene universe for the overlap test is the `r background_n` genes
 shared by both analyses' combined, uncorrected count matrices (the same
 universe `findMarkers` was run over in each analysis).
 
-`phyperOverlapSets` is called directly here rather than through
-`plot_marker_overlap_heatmap`. Comparing an analysis to a near-identical
-reanalysis produces overlaps so significant that the hypergeometric p-values
-underflow to exactly 0, making `-log10(FDR)` infinite and breaking the
-`hclust` row and column ordering inside that helper. The output files are the
-same ones the helper would have written, so the sections below are unaffected.
-
 ```{r}
 cluster_ol = phyperOverlapSets(genes_A, genes_B, background_n)
 
@@ -233,11 +216,6 @@ write.csv(overlap_scores_all,
 
 n_underflow = sum(overlap_scores_all$FDR == 0)
 ```
-
-`r n_underflow` of `r nrow(overlap_scores_all)` cluster pairs have an FDR that
-underflowed to 0. For plotting only, these are capped at the largest finite
-`-log10(FDR)` observed, so they are shown as the most significant color rather
-than dropped. The exported p-value table keeps the raw values.
 
 ```{r, fig.width=10, fig.height=8}
 plot_scores = overlap_scores_all %>% mutate(logFDR = -log10(FDR))
@@ -334,14 +312,7 @@ datatable(combined_correspondence %>% mutate(pct_of_A_cluster = round(pct_of_A_c
 
 `r sum(!combined_correspondence$agree, na.rm = TRUE)` of `r nrow(combined_correspondence)`
 with-doublets clusters have a disagreement between the cell-overlap best
-match and the marker-overlap best match; those rows are the ones to inspect
-manually before filling in the `TODO`s in
-`02_sex_cell_subanalysis_no_doublets.Rmd` and
-`03_trajectory_analysis_no_doublets.Rmd`. A blank
-`best_match_by_markers`/`marker_overlap_FDR` means that with-doublets
-cluster had no no-doublets cluster with a significant (FDR < 0.01) marker
-overlap at all, which is itself worth noting rather than a disagreement to
-resolve.
+match and the marker-overlap best match.
 
 # Session info
 
