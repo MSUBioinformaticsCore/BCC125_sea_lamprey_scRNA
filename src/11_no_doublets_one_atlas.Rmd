@@ -13,6 +13,8 @@ params:
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
     no_dbl_date: "20260813"
+    genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
+    marker_file: canonical_markers_S1_only_2026-08-14.csv
 ---
 
 ```{r setup, include=FALSE}
@@ -232,6 +234,18 @@ top_markers_for = function(marker_list, lab, n = n_top) {
     order(df$FDR)
   } else seq_len(nrow(df))
   rownames(df)[ord][seq_len(min(n, nrow(df)))]
+}
+
+# Per-gene effect size: the mean across every pairwise comparison.
+# summary.logFC is not used, because under pval.type = "some" it comes from
+# whichever pairwise comparison supplied the summary p-value, which varies per
+# gene and per run, so two runs of it are not comparing the same contrast.
+marker_effect = function(df) {
+  lf = grep("^logFC\\.", colnames(df), value = TRUE)
+  if (length(lf) == 0) return(rep(NA_real_, nrow(df)))
+  v = rowMeans(as.matrix(as.data.frame(df[, lf, drop = FALSE])), na.rm = TRUE)
+  names(v) = rownames(df)
+  v
 }
 
 # lfc is set because with thousands of cells a log-fold change of 0.02 clears
@@ -676,6 +690,290 @@ correspondence is expected between any two groups of cells. The replicate
 comparison measures that loss with nothing but animal-to-animal variation
 driving it, and the stage comparison should be judged by how far it falls below
 that, not by its absolute value.
+
+# 5. Splitting the bidirectional failure
+
+A cluster that fails in **both** directions, holds a strong replicate margin,
+and has enough cells on either side to characterize is a different case from the
+other failures. The one-directional failures have 62 to 250 cells on their
+sparser side, so splitting them would produce a population too small to
+describe. This section splits only clusters meeting all three conditions, by
+rule rather than by inspection.
+
+```{r}
+split_min_cells  = 300   # per side, enough to compute a marker profile
+split_min_margin = 20    # replicate margin, so the cluster is well separated
+
+split_candidates = outcome_tbl %>%
+  filter(outcome == "fails across stages",
+         direction == "both fail, and disagree",
+         margin_rep >= split_min_margin,
+         larva >= split_min_cells, transformer >= split_min_cells) %>%
+  pull(cluster)
+
+datatable(outcome_tbl %>%
+            filter(outcome == "fails across stages") %>%
+            dplyr::select(cluster, larva, transformer, margin_rep, direction) %>%
+            mutate(splits = cluster %in% split_candidates),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (length(split_candidates) == 0) "No failing cluster meets all three conditions, so nothing is split here." else paste0("Cluster(s) ", paste(split_candidates, collapse = ", "), " meet all three conditions and are split below. The other failures do not, and are left whole and reported as unresolved.")`
+
+## Relabel and recompute markers on the same background
+
+Each split cluster becomes two labels. **Every other cluster keeps its label**,
+so the marker computation runs over one factor covering all cells and the split
+halves are tested against the same competing set as everything else, and against
+each other. Testing them in isolation would compare them against a different
+background and the marker lists would not be comparable with the rest.
+
+```{r}
+split_label = cell_key$label
+for (cl in split_candidates) {
+  hit = cell_key$label == cl
+  split_label[hit] = paste0(cl, "_", cell_key$stage[hit])
+}
+split_label = factor(split_label)
+
+datatable(as.data.frame(table(label = split_label)) %>%
+            dplyr::rename(n_cells = Freq),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r}
+split_file = paste0(Robject_out_dir, "/split_markers_lfc", lfc_thresh, ".Rds")
+
+if (file.exists(split_file)) {
+  split_markers = readRDS(split_file)
+} else {
+  # library blocked, as everywhere else that a DE test is involved, and lfc set
+  # so the ranking is by effect rather than by cell number
+  split_markers = findMarkers(combined.sce, split_label, test.type = "t",
+                              block = cell_key$library, direction = "up",
+                              lfc = lfc_thresh, pval.type = "some")
+  saveRDS(split_markers, file = split_file)
+}
+
+gene_description = read.csv(paste0(no_dbl_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE)
+
+split_top = purrr::map_dfr(names(split_markers), function(lab) {
+  df = split_markers[[lab]]
+  ord = order(df$FDR, df$p.value)
+  data.frame(cluster = lab,
+             Gene    = rownames(df)[ord],
+             FDR     = df$FDR[ord],
+             meanLogFC = marker_effect(df)[ord],
+             stringsAsFactors = FALSE) %>%
+    filter(FDR < 0.01) %>%
+    slice_head(n = 100)
+}) %>%
+  left_join(gene_description, by = "Gene")
+
+write.csv(split_top, file = paste0(results_dir, "/split_cluster_markers.csv"),
+          row.names = FALSE)
+
+datatable(split_top %>%
+            filter(grepl("_", cluster)) %>%
+            mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+`r paste0("Marker counts at FDR < 0.01 and lfc > ", lfc_thresh, ", over the full ", nlevels(split_label), " level background: ", paste(sapply(sort(names(split_markers)[grepl("_", names(split_markers))]), function(l) paste0(l, ", ", sum(split_top$cluster == l))), collapse = "; "), ".")`
+
+**If either half had few or no markers**, the split would not be warranted: it
+would mean the two halves are not distinguishable once every other cluster is
+competing, whatever the reciprocity test said. Read the counts above before
+reading anything into the gene lists.
+
+## What separates the two halves directly
+
+The table above asks what distinguishes each half from every cluster. This asks
+what distinguishes the halves from each other, which is the question the split
+is actually about.
+
+```{r}
+direct_file = paste0(Robject_out_dir, "/split_direct_lfc", lfc_thresh, ".Rds")
+
+if (file.exists(direct_file)) {
+  direct = readRDS(direct_file)
+} else {
+  direct = lapply(split_candidates, function(cl) {
+    keep = cell_key$label == cl
+    grp  = factor(cell_key$stage[keep])
+    # library cannot be blocked here: within this cluster the transformer side
+    # is effectively one library, so blocking would remove the contrast itself
+    findMarkers(combined.sce[, keep], grp, test.type = "t",
+                direction = "any", lfc = lfc_thresh, pval.type = "all")
+  })
+  names(direct) = split_candidates
+  saveRDS(direct, file = direct_file)
+}
+
+direct_tbl = purrr::map_dfr(names(direct), function(cl)
+  purrr::map_dfr(names(direct[[cl]]), function(side) {
+    df = direct[[cl]][[side]]
+    ord = order(df$FDR, df$p.value)
+    data.frame(cluster = cl, higher_in = side,
+               Gene = rownames(df)[ord], FDR = df$FDR[ord],
+               stringsAsFactors = FALSE) %>%
+      filter(FDR < 0.01) %>% slice_head(n = 100)
+  })) %>%
+  left_join(gene_description, by = "Gene")
+
+write.csv(direct_tbl, file = paste0(results_dir, "/split_larva_vs_transformer.csv"),
+          row.names = FALSE)
+
+datatable(direct_tbl %>% mutate(FDR = signif(FDR, 3)),
+          filter = "top", rownames = FALSE)
+```
+
+## Do the halves resemble any known cell type?
+
+The curated marker list against the split labelling, the same overlap test `01`
+runs. Rows are marker sets, columns are clusters, colour is the significance of
+the overlap with each cluster's top markers.
+
+```{r}
+curated = read.csv(paste0(data_dir, "/", params$marker_file),
+                   stringsAsFactors = FALSE) %>%
+  mutate(loc_id = trimws(loc_id)) %>%
+  filter(loc_id %in% rownames(combined.sce))
+
+known_markers = curated %>%
+  dplyr::select(Gene = loc_id, CellType = CellTypeMarkerSet) %>%
+  distinct()
+
+# the same shape 01 passes: one row per gene per cluster
+marker_test_genes = split_top %>%
+  dplyr::select(Gene, cluster) %>%
+  mutate(cluster = paste0("cluster", cluster))
+```
+
+```{r, fig.width=9}
+plot_marker_overlap_heatmap(
+  known_markers    = known_markers,
+  test_genes       = marker_test_genes,
+  background_n     = nrow(combined.sce),
+  gene_description = gene_description,
+  overlaps_file    = paste0(results_dir, "/split_marker_gene_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/split_marker_overlap_pvalues.csv"),
+  plot_file        = paste0(results_dir, "/split_marker_overlap_heatmap.png"))
+```
+
+`r paste0("The curated list resolves ", nrow(known_markers), " gene-to-set assignments against this count matrix. Several sets hold fewer than three genes, so read a single significant overlap in those rows as one gene rather than as a marker set agreeing.")`
+
+## Gene ontology of the split cluster markers
+
+```{r}
+gaf_file      = file.path(params$genome_dir,
+                          "GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf")
+go_names_file = file.path(params$genome_dir, "GOs_names.txt")
+have_go       = file.exists(gaf_file) && file.exists(go_names_file)
+```
+
+`r if (!have_go) paste0("**Skipped.** The GO files were not found under ", params$genome_dir, ". Set the genome_dir parameter to the directory holding GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf and GOs_names.txt, then reknit.") else ""`
+
+```{r, eval=have_go}
+gaf = read.delim(gaf_file, header = FALSE, comment = "!") %>%
+  filter(!grepl("NOT", V4)) %>%
+  dplyr::select(V3, V5) %>%
+  dplyr::rename(GOID = "V5", Gene = "V3") %>%
+  distinct()
+
+# same size window 01 uses: terms too small are noise, terms too large are
+# uninformative
+keep_go = gaf %>% group_by(GOID) %>% tally() %>%
+  filter(n > 10, n < 200) %>% pull(GOID)
+gaf = gaf %>% filter(GOID %in% keep_go)
+
+go_names = read.delim(go_names_file, header = FALSE)
+colnames(go_names) = c("GOID", "GOName")
+
+go_scores = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = marker_test_genes,
+  background_n     = nrow(combined.sce),
+  overlaps_file    = paste0(results_dir, "/split_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/split_GO_overlap_pvalues.csv"),
+  pval_filter      = 0.01)
+
+datatable(go_scores %>%
+            filter(grepl("_", Clusters)) %>%
+            mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+`r if (!have_go) "" else "The table is filtered to the split halves. The full result across every cluster is in split_GO_overlap_pvalues.csv."`
+
+## Bubble plots
+
+One plot per curated marker set, across every cluster including both halves of
+the split, written to `split_bubble/`. Cluster labels stand in for cell type
+names, since this document carries no annotation.
+
+```{r, fig.show="hide"}
+plot.sce = combined.sce
+plot.sce$cluster  = split_label
+plot.sce$CellType = factor(as.character(split_label),
+                           levels = levels(split_label))
+split_anno = levels(split_label)
+
+# markers for the bubble stars: every significant gene, not the top 100, so a
+# curated marker outside a cluster's top 100 is still starred if it qualifies
+split_markers_all = purrr::map_dfr(names(split_markers), function(lab) {
+  df = split_markers[[lab]]
+  data.frame(Gene = rownames(df), CellType = lab, FDR = df$FDR,
+             summary.logFC = marker_effect(df), stringsAsFactors = FALSE) %>%
+    filter(FDR < 0.01)
+}) %>%
+  left_join(gene_description %>% dplyr::select(Gene, WangGeneID), by = "Gene") %>%
+  mutate(Gene = ifelse(is.na(WangGeneID), Gene, WangGeneID)) %>%
+  dplyr::select(Gene, CellType, FDR, summary.logFC)
+
+nested = curated %>%
+  dplyr::select(CellTypeMarkerSet, Gene = loc_id) %>%
+  group_by(CellTypeMarkerSet) %>% tidyr::nest()
+
+bubble_dir = paste0(results_dir, "/split_bubble")
+if (!dir.exists(bubble_dir)) dir.create(bubble_dir, recursive = TRUE)
+
+for (i in seq_len(nrow(nested))) {
+  set_name = nested$CellTypeMarkerSet[i]
+  try(plot_marker_bubbles(
+    sce              = plot.sce,
+    markers          = split_markers_all,
+    gene_description = gene_description,
+    cell_type_name   = set_name,
+    cell_type_genes  = nested$data[[i]],
+    anno             = split_anno,
+    results_dir      = bubble_dir,
+    file_name        = paste0(gsub("[^A-Za-z0-9]+", "_", set_name),
+                              "_split_clusters")), silent = FALSE)
+}
+```
+
+`r paste0(nrow(nested), " bubble plots written to split_bubble/. Sets below three genes produce a plot with too few rows to read as a set; the per-gene values are still correct.")`
+
+## The composition, which has to be reported with it
+
+```{r}
+datatable(cell_key %>%
+            filter(label %in% split_candidates) %>%
+            dplyr::count(label, stage, library, name = "n_cells"),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+**This is the sentence that has to accompany any description of the split.** The
+two halves differ by stage, by collection date, by technical batch, by animal
+and, where one side is a single transformer library, by sex as well. All of
+those vary together and this design separates none of them. The split records
+that the two halves are not one population by marker evidence. It does not say
+what makes them different, and the gene lists above should be described as
+distinguishing the halves rather than as stage-regulated.
 
 ## What this document does not answer
 
