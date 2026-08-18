@@ -391,7 +391,10 @@ set_sizes = canonical %>%
   dplyr::count(CellTypeMarkerSet, name = "n_markers") %>%
   mutate(below_coherence_floor = n_markers < 3)
 
-datatable(set_sizes, rownames = FALSE, options = list(dom = "t"))
+# paging = FALSE because dom = "t" hides the pagination control without
+# disabling pagination, so a table longer than ten rows silently loses the rest
+datatable(set_sizes, rownames = FALSE,
+          options = list(dom = "t", paging = FALSE))
 
 thin_sets = set_sizes %>% filter(below_coherence_floor)
 ```
@@ -406,7 +409,7 @@ Every curated marker against every cluster, on uncorrected depth-normalised
 values. Dot size is the percentage of cells in the cluster expressing the gene,
 color is the mean log expression.
 
-This is the plot to annotate from. The overlap heatmap further down measures
+The overlap heatmap further down measures
 whether a cell type's markers are *enriched* among a cluster's strongest
 data-derived markers, which is a different question: a gene can be enriched in a
 cluster relative to the others while barely being transcribed there.
@@ -592,11 +595,17 @@ genes_for_plot = chung_davidson_markers %>%
 # and so on); one panel matched nothing and errored, and two matched a single
 # set each and would have rendered a partial figure under a heading promising
 # all of them.
+# There is no pan-germline panel. That set was a construction of the 2026-08-12
+# draft list, built from seven added genes plus PIWIL1 and DDX4 reassigned out
+# of the sets S1 puts them in. It does not exist in S1 and so does not survive
+# the S1-only list. DDX4 is still here under Oocyte and Primordial germ cells,
+# which are its S1 assignments. PIWIL1 is not, because its only S1 home is the
+# Migrating germ cells set, which is not carried; see the note below the plots.
 marker_panels = list(
-  early_germ   = "Primordial germ cells",
-  pan_germline = "Germ cells (pan-germline)",
-  female       = c("Oocyte", "Granulosa cells", "Pre-granulosa cells"),
-  male         = c("Spermatocytes", "Spermatogonial stem cells"))
+  early_germ     = "Primordial germ cells",
+  migrating_germ = "Migrating germ cells",
+  female         = c("Oocyte", "Granulosa cells", "Pre-granulosa cells"),
+  male           = c("Spermatocytes", "Spermatogonial stem cells"))
 
 known_sets = unique(chung_davidson_markers$CellType)
 unknown    = setdiff(unlist(marker_panels, use.names = FALSE), known_sets)
@@ -629,14 +638,10 @@ datatable(panel_counts, rownames = FALSE,
 plot_marker_panel(marker_panels$early_germ)
 ```
 
-Pan-germline markers.
+Migrating germ cell markers.
 
-```{r, fig.width=12, fig.height=6}
-plot_marker_panel(marker_panels$pan_germline,
-                  show_trajectory_graph = FALSE,
-                  label_cell_groups     = FALSE,
-                  label_leaves          = FALSE,
-                  label_branch_points   = FALSE)
+```{r, fig.width=8, fig.height=4}
+plot_marker_panel(marker_panels$migrating_germ)
 ```
 
 Female cell markers.
@@ -658,6 +663,7 @@ plot_marker_panel(marker_panels$male,
                   label_leaves          = FALSE,
                   label_branch_points   = FALSE)
 ```
+
 
 ```{r, eval=FALSE, echo = FALSE}
 # Annotations, parked
