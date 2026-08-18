@@ -174,22 +174,29 @@ saveRDS(stab, file = file.path(results_dir, "stable_k.Rds"))
 
 # ---- summarise -----------------------------------------------------------
 
-viz <- plot_stability_metrics(stab)
-df  <- viz$data
-df$n_iterations <- n_iterations
-df$prop         <- prop
-df$mean_shared  <- vapply(stab, function(x) x$mean_shared, numeric(1))
+# built from the result object rather than from plot_stability_metrics$data,
+# which carries only the five columns it needs for its own plots
+df <- do.call(rbind, lapply(stab, function(x) data.frame(
+  k               = x$k,
+  mean_n_clusters = x$mean_n_clusters,
+  sd_n_clusters   = x$sd_n_clusters,
+  cv_n_clusters   = x$cv_n_clusters,
+  mean_ari        = x$mean_ari,
+  min_ari         = x$min_ari,
+  mean_shared     = x$mean_shared,
+  n_iterations    = x$n_iterations,
+  prop            = x$prop)))
+df <- df[order(df$k), ]
 
 write.csv(df, file = file.path(results_dir, "stability_by_k.csv"), row.names = FALSE)
 
+viz <- plot_stability_metrics(stab)
 ggsave(file.path(results_dir, "stability_n_clusters.png"), viz$p1, width = 6, height = 4)
 ggsave(file.path(results_dir, "stability_ari.png"),        viz$p2, width = 6, height = 4)
 ggsave(file.path(results_dir, "stability_cv.png"),         viz$p3, width = 6, height = 4)
 
 cat("\n=== stability by k ===\n")
-print(df[order(df$k), c("k", "mean_n_clusters", "sd_n_clusters",
-                        "cv_n_clusters", "mean_ari", "min_ari", "mean_shared")],
-      row.names = FALSE)
+print(df, row.names = FALSE)
 
 best <- df$k[which.max(df$mean_ari)]
 cat("\nhighest mean ARI at k =", best, "\n")
