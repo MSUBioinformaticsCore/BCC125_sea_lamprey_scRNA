@@ -226,59 +226,80 @@ fgseaEnrichment = function(stat_table, set_table, scoreType) {
 
 # find_stable_k -----------------------------------------------------------
 
-find_stable_k <- function(sce, k_range = seq(5, 50, by = 5), 
-                          n_iterations = 10, use.dimred = "PCA", seed = 42) {
-  
+#' @param prop fraction of cells drawn in each subsample
+#' @details Stability is measured against perturbation of the data, not against
+#'   repetition of the call. `buildSNNGraph` and `igraph::cluster_louvain` are
+#'   both deterministic on fixed input, so re-running them on the same cells
+#'   returns the same partition every time; an earlier version of this function
+#'   did exactly that and reported ARI = 1 and CV = 0 for every k regardless of
+#'   the data. Each iteration now clusters an independent subsample, and a pair
+#'   of iterations is compared only on the cells they have in common.
+#'
+#'   The same subsamples are reused across every k, so a difference between two
+#'   values of k is a difference in k rather than in which cells were drawn.
+
+find_stable_k <- function(sce, k_range = seq(5, 50, by = 5),
+                          n_iterations = 10, use.dimred = "PCA",
+                          prop = 0.8, seed = 42) {
+
+  stopifnot(prop > 0, prop <= 1, n_iterations >= 2)
   set.seed(seed)
-  
-  # Store results
+
+  n_cells   <- ncol(sce)
+  n_draw    <- max(2, round(prop * n_cells))
+  cell_ids  <- if (is.null(colnames(sce))) as.character(seq_len(n_cells)) else colnames(sce)
+  subsets   <- lapply(seq_len(n_iterations), function(i) sort(sample(n_cells, n_draw)))
+
   results <- list()
-  
+
   for (k in k_range) {
     cat("Testing k =", k, "\n")
-    
-    # Store cluster assignments across iterations
-    cluster_matrix <- matrix(0, nrow = ncol(sce), ncol = n_iterations)
-    n_clusters <- numeric(n_iterations)
-    
-    for (i in 1:n_iterations) {
-      # Build SNN graph
-      snn <- buildSNNGraph(sce, k = k, use.dimred = use.dimred)
-      
-      # Louvain clustering
-      clusters <- cluster_louvain(snn)$membership
-      cluster_matrix[, i] <- clusters
-      n_clusters[i] <- length(unique(clusters))
+
+    assignments <- vector("list", n_iterations)
+    n_clusters  <- numeric(n_iterations)
+
+    for (i in seq_len(n_iterations)) {
+      idx <- subsets[[i]]
+      snn <- buildSNNGraph(sce[, idx], k = k, use.dimred = use.dimred)
+      cl  <- igraph::cluster_louvain(snn)$membership
+      names(cl)      <- cell_ids[idx]
+      assignments[[i]] <- cl
+      n_clusters[i]  <- length(unique(cl))
     }
-    
-    # Calculate stability metrics
-    # 1. Variation in number of clusters
-    cluster_count_sd <- sd(n_clusters)
-    cluster_count_mean <- mean(n_clusters)
-    cluster_count_cv <- cluster_count_sd / cluster_count_mean
-    
-    # 2. Average pairwise ARI (Adjusted Rand Index) between iterations
+
+    # pairwise ARI, computed only on cells present in both subsamples
     ari_values <- numeric()
+    n_shared   <- numeric()
     for (i in 1:(n_iterations - 1)) {
       for (j in (i + 1):n_iterations) {
-        ari <- mclust::adjustedRandIndex(cluster_matrix[, i], 
-                                         cluster_matrix[, j])
-        ari_values <- c(ari_values, ari)
+        common <- intersect(names(assignments[[i]]), names(assignments[[j]]))
+        if (length(common) < 50) next
+        ari_values <- c(ari_values,
+                        mclust::adjustedRandIndex(assignments[[i]][common],
+                                                  assignments[[j]][common]))
+        n_shared <- c(n_shared, length(common))
       }
     }
-    mean_ari <- mean(ari_values)
-    
+
+    if (length(ari_values) == 0) {
+      warning("k = ", k, ": no pair of subsamples shared enough cells to compare.")
+      ari_values <- NA_real_
+    }
+
     results[[as.character(k)]] <- list(
-      k = k,
-      mean_n_clusters = cluster_count_mean,
-      sd_n_clusters = cluster_count_sd,
-      cv_n_clusters = cluster_count_cv,
-      mean_ari = mean_ari,
-      min_ari = min(ari_values),
-      cluster_matrix = cluster_matrix
+      k               = k,
+      mean_n_clusters = mean(n_clusters),
+      sd_n_clusters   = sd(n_clusters),
+      cv_n_clusters   = sd(n_clusters) / mean(n_clusters),
+      mean_ari        = mean(ari_values),
+      min_ari         = min(ari_values),
+      n_iterations    = n_iterations,
+      prop            = prop,
+      mean_shared     = if (length(n_shared)) mean(n_shared) else NA_real_,
+      assignments     = assignments
     )
   }
-  
+
   return(results)
 }
 
@@ -329,6 +350,102 @@ plot_stability_metrics <- function(results) {
   return(list(p1 = p1, p2 = p2, p3 = p3, data = df))
 }
 
+
+# neighbor_mixing ---------------------------------------------------------
+#' @name neighbor_mixing
+#' @description How well two groups of cells interleave in a reduced space.
+#'   For each cell, the fraction of its k nearest neighbours belonging to the
+#'   other group, divided by the fraction expected if the two groups were
+#'   randomly interleaved at the observed proportions.
+#' @param x matrix of coordinates, cells in rows
+#' @param groups vector with exactly two non-NA levels, length nrow(x). Cells
+#'   with NA are dropped.
+#' @param k number of neighbours
+#' @param min_cells smallest acceptable size for the rarer group
+#' @return 1 means the groups interleave as well as random mixing would give,
+#'   0 means complete segregation, NA means not measurable. Dividing by the
+#'   expectation matters because the raw fraction depends on the group sizes,
+#'   so an unbalanced comparison would score low without being segregated.
+
+neighbor_mixing <- function(x, groups, k = 20, min_cells = 20) {
+
+  groups <- as.character(groups)
+  keep   <- !is.na(groups)
+  x      <- x[keep, , drop = FALSE]
+  groups <- groups[keep]
+
+  lv <- unique(groups)
+  if (length(lv) != 2) return(NA_real_)
+
+  nA <- sum(groups == lv[1])
+  nB <- sum(groups == lv[2])
+  n  <- nA + nB
+  if (min(nA, nB) < min_cells || n <= k + 1) return(NA_real_)
+
+  kn <- BiocNeighbors::findKNN(x, k = k, get.distance = FALSE)
+
+  # kn$index is n x k in column-major order, so comparing against the
+  # length-n groups vector recycles down each column and lines element (i, j)
+  # up with cell i, which is what is wanted
+  observed <- mean(matrix(groups[kn$index], nrow = n) != groups)
+  expected <- 2 * nA * nB / (n * (n - 1))
+
+  observed / expected
+}
+
+# library_mixing_by_cluster -----------------------------------------------
+#' @name library_mixing_by_cluster
+#' @description Runs neighbor_mixing within every cluster, for a named set of
+#'   library comparisons. Applying one measurement to every cluster avoids
+#'   singling out a cluster that happened to look wrong in an embedding.
+#' @param sce SingleCellExperiment carrying the reduced dimensions used for
+#'   clustering
+#' @param clusters cluster label per cell
+#' @param library_vec library or batch per cell
+#' @param comparisons named list, each element a list of two character vectors
+#'   naming the libraries on each side
+#' @param use.dimred which reducedDim to measure in. Should be the space the
+#'   clustering was computed in, since the question is whether structure inside
+#'   a cluster is driven by library.
+#' @return one row per cluster, one column per comparison. Read every column
+#'   against the replicate comparison rather than against 1: clusters differ in
+#'   how tightly they pack, and the same-stage replicate pair is the reference
+#'   for what good interleaving looks like in this dataset.
+
+library_mixing_by_cluster <- function(sce, clusters, library_vec, comparisons,
+                                      use.dimred = "corrected", k = 20,
+                                      min_cells = 20) {
+
+  coords      <- SingleCellExperiment::reducedDim(sce, use.dimred)
+  clusters    <- as.character(clusters)
+  library_vec <- as.character(library_vec)
+  stopifnot(length(clusters) == nrow(coords),
+            length(library_vec) == nrow(coords))
+
+  named <- unlist(comparisons, use.names = FALSE)
+  unknown <- setdiff(named, unique(library_vec))
+  if (length(unknown) > 0)
+    stop("comparisons name libraries not present: ",
+         paste(unknown, collapse = ", "),
+         ". Present: ", paste(sort(unique(library_vec)), collapse = ", "))
+
+  cls <- unique(clusters)
+  cls <- cls[order(suppressWarnings(as.numeric(cls)), cls, na.last = TRUE)]
+
+  do.call(rbind, lapply(cls, function(cl) {
+    cells <- which(clusters == cl)
+    row   <- data.frame(cluster = cl, n_cells = length(cells),
+                        stringsAsFactors = FALSE)
+    for (nm in names(comparisons)) {
+      grp <- rep(NA_character_, length(cells))
+      grp[library_vec[cells] %in% comparisons[[nm]][[1]]] <- "A"
+      grp[library_vec[cells] %in% comparisons[[nm]][[2]]] <- "B"
+      row[[nm]] <- neighbor_mixing(coords[cells, , drop = FALSE], grp,
+                                   k = k, min_cells = min_cells)
+    }
+    row
+  }))
+}
 
 # get_avg_expression ------------------------------------------------------
 get_avg_expression <- function(sce, genes, cluster_col, assay = "logcounts") {
