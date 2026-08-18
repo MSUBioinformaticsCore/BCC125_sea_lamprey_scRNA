@@ -55,27 +55,14 @@ The test is whether each cluster **finds itself** across the stage boundary
 using its own data-driven markers. Marker genes are computed from larval cells
 alone and, separately, from transformer cells alone. If the genes that define
 cluster 8 among larvae are the genes that define cluster 8 among transformers,
-and they match cluster 8 better than they match any other cluster, then cluster 8
-is the same population on both sides.
-
-**Nothing here uses the curated marker list.** An earlier version of this
-document tested whether each cluster expressed its assigned canonical markers.
-That route runs every claim through mammalian orthology and the BLAST
-re-annotation of LOC identifiers, which is the weakest link in this project and
-the source of the withdrawn primordial germ cell annotation. The curated markers
-also do not reliably separate cell types in this tissue, so a cluster failing
-that test was as likely to mean the marker was uninformative as that the cluster
-was incoherent. Using each cluster's own markers removes that dependency
-entirely: no gene symbol, no ortholog call, and no cell type name enters the
-computation.
+and they match cluster 8 better than they match any other cluster, that is evidence that
+cluster 8 is the same population on both sides.
 
 **Why this survives the confound.** Larvae were collected in July and
 transformers in November, so stage, collection date and technical batch are one
 variable, and nothing computed from this dataset can say how much of the
 difference between them is developmental. This test does not try. It asks
-whether the populations correspond, not what makes them differ. A cluster that
-matches itself across the boundary is the same population at both stages
-whatever the July-to-November difference consists of.
+whether the populations correspond, not what makes them differ. 
 
 **Everything is read against a reference computed the same way.** Undifferentiated.1
 against Undifferentiated.2 is two animals of the same stage, collected on the
