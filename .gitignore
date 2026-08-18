@@ -48,6 +48,14 @@ po/*~
 # RStudio Connect folder
 rsconnect/
 
-data/
+# data/* rather than data/, because a trailing slash excludes the directory
+# itself and git then never descends into it, so the negations below would be
+# ignored. Excluding the contents leaves them able to re-include.
+data/*
+# The curated marker lists are hand-edited inputs that 01, 06, 10 and 11 read by
+# name, so a version skew between them and the code is a knit failure. Small
+# text files; tracked with the code that depends on them.
+!data/canonical_markers_*.csv
+!data/S1*.csv
 results/
 run/

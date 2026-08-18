@@ -131,7 +131,10 @@ side_counts = cell_key %>%
 write.csv(side_counts, file = paste0(results_dir, "/cells_per_cluster_per_side.csv"),
           row.names = FALSE)
 
-datatable(side_counts, rownames = FALSE, options = list(dom = "t"))
+# paging = FALSE because dom = "t" hides the pagination control without
+# disabling pagination, so a table longer than ten rows silently loses the rest
+datatable(side_counts, rownames = FALSE,
+          options = list(dom = "t", paging = FALSE))
 ```
 
 ```{r}
@@ -384,7 +387,8 @@ cell count when only replicate variation separates the sides.
 ```{r}
 stage_tbl = recip %>% filter(comparison == "stage") %>%
   dplyr::select(cluster, n_per_side, self_stage = self_similarity,
-                margin_stage = margin, reciprocal_stage = reciprocal)
+                margin_stage = margin, reciprocal_stage = reciprocal,
+                best_forward, best_reverse)
 
 rep_tbl = recip %>% filter(comparison == "replicate") %>%
   dplyr::select(cluster, self_rep = self_similarity,
@@ -397,10 +401,20 @@ outcome_tbl = stage_tbl %>%
   mutate(outcome = dplyr::case_when(
     !reciprocal_rep  ~ "untestable at this depth",
     reciprocal_stage ~ "corresponds across stages",
-    TRUE             ~ "fails across stages")) %>%
+    TRUE             ~ "fails across stages"),
+    # which side's marker list broke the match. A cluster whose larval markers
+    # still pick it out but whose transformer markers do not is usually short of
+    # transformer cells; a cluster that fails in both directions is not.
+    direction = dplyr::case_when(
+      reciprocal_stage                                    ~ "both directions agree",
+      best_forward == cluster & best_reverse != cluster   ~ "transformer side fails",
+      best_forward != cluster & best_reverse == cluster   ~ "larval side fails",
+      best_forward == best_reverse                        ~ "both point to the same other cluster",
+      TRUE                                                ~ "both fail, and disagree")) %>%
   dplyr::select(cluster, larva, transformer, n_per_side,
                 self_rep, margin_rep, reciprocal_rep,
-                self_stage, margin_stage, reciprocal_stage, outcome) %>%
+                self_stage, margin_stage, reciprocal_stage,
+                best_forward, best_reverse, direction, outcome) %>%
   arrange(match(outcome, c("fails across stages", "corresponds across stages",
                            "untestable at this depth")),
           as.integer(cluster))
@@ -427,6 +441,41 @@ untestable_tbl = outcome_tbl %>% filter(outcome == "untestable at this depth")
 `r if (n_untestable == 0) "Every cluster is resolvable at its own depth." else paste0("**", n_untestable, " cluster(s) are untestable at this depth: ", paste(untestable_tbl$cluster, collapse = ", "), ".** These fail to find themselves even between the two larval animals, so their stage result reflects how few cells they have on their sparser side rather than anything about stage. They are reported and not counted either way. Look at their larva and transformer counts: a cluster with a few dozen cells on one side cannot support a stable marker list on that side, and reciprocity fails in whichever direction depends on it.")`
 
 `r if (n_fails == 0) "" else paste0("The ", n_fails, " genuine failure(s), cluster(s) ", paste(fails_tbl$cluster, collapse = ", "), ", are the ones to examine individually. A cluster that is well populated on both sides, resolves cleanly between replicate animals, and then does not resolve across the stage boundary is describing something real about that population rather than a shortage of cells. Check its library composition before interpreting it: a cluster whose two sides are one transformer library against the larval libraries is separated by animal, sex, stage and batch at once, and this design cannot say which.")`
+
+**Read the `direction` column before deciding what a failure means.** A
+reciprocity failure is one of three different situations:
+
+* **One side fails.** The larval markers still pick the cluster out but the
+  transformer markers pick out something else, or the reverse. The side that
+  fails is usually the sparser one, and this is the mildest case: the cluster is
+  probably fine and the marker list on the thin side is unstable.
+* **Both fail and disagree**, pointing at two different clusters. Nothing about
+  this cluster is stable across the boundary. This is the strongest failure.
+* **Both point at the same other cluster.** Rare, and the only case where the
+  cluster is plausibly the same population as that other one under a different
+  label.
+
+Every non-corresponding cluster, with where each side points:
+
+```{r}
+fail_detail = outcome_tbl %>%
+  filter(outcome != "corresponds across stages") %>%
+  dplyr::select(cluster, outcome, larva, transformer, n_per_side,
+                best_forward, best_reverse, direction,
+                self_stage, margin_stage, margin_rep) %>%
+  arrange(match(outcome, c("fails across stages", "untestable at this depth")),
+          as.integer(cluster))
+
+write.csv(fail_detail,
+          file = paste0(results_dir, "/SuppTable_non_corresponding_clusters.csv"),
+          row.names = FALSE)
+
+datatable(fail_detail %>% mutate(across(where(is.numeric), ~round(., 1))),
+          rownames = FALSE,
+          options = list(dom = "t", paging = FALSE, ordering = FALSE))
+```
+
+`r if (nrow(fail_detail) == 0) "Every cluster corresponds across the stage boundary, so this table is empty." else paste0("Read ", "**best_forward**", " as the transformer cluster that the larval side of this cluster most resembles, and ", "**best_reverse**", " as the larval cluster that its transformer side most resembles. Where those two disagree there is no single partner, which is why none of these can be merged into anything.")`
 
 ```{r}
 rep_row   = summary_by_comparison %>% filter(comparison == "replicate")
@@ -484,7 +533,117 @@ ggsave(p_margin, file = paste0(results_dir, "/self_match_margin.png"),
        width = 9, height = 5)
 ```
 
-# 3. Verdict
+# 3. Did the correction over-integrate?
+
+Section 2 asks whether the clusters correspond. This asks the opposite question
+about the same clusters: whether `fastMNN` pulled larval and transformer cells
+together so hard that any apparent correspondence is an artifact of the
+correction rather than a property of the cells.
+
+For each cluster, each cell's `k` nearest neighbors in the **corrected** space
+are counted, and the fraction belonging to the other library group is divided by
+the fraction expected under random interleaving. A value of 1 means the two
+groups mix as freely as chance allows; 0 means they occupy the cluster without
+ever being each other's neighbors. Undifferentiated.1 against Undifferentiated.2
+is the reference again, since two animals of the same stage are what full mixing
+looks like in this dataset.
+
+This is the one place in the document that reads the corrected space, because
+over-integration is a property of the correction and cannot be seen anywhere
+else.
+
+```{r}
+mix_k       = c(10, 20, 50)
+mix_primary = 20
+
+mix_comparisons = list(
+  floor_UND1_UND2 = list("Undifferentiated.1", "Undifferentiated.2"),
+  larva_vs_transf = list(c("Undifferentiated.1", "Undifferentiated.2"),
+                         c("Female", "Male")),
+  TF_vs_TM        = list("Female", "Male"))
+
+mixing = bind_rows(lapply(mix_k, function(kk)
+  library_mixing_by_cluster(merged.sce,
+                            clusters    = cell_key$label,
+                            library_vec = cell_key$library,
+                            comparisons = mix_comparisons,
+                            use.dimred  = "corrected",
+                            k           = kk) %>%
+    mutate(k = kk))) %>%
+  mutate(ratio_to_floor = larva_vs_transf / floor_UND1_UND2)
+
+write.csv(mixing, file = paste0(results_dir, "/SuppTable_library_mixing.csv"),
+          row.names = FALSE)
+
+datatable(mixing %>% filter(k == mix_primary) %>%
+            dplyr::select(-k) %>%
+            mutate(across(where(is.numeric), ~round(., 3))) %>%
+            arrange(ratio_to_floor),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r}
+mix_p     = mixing %>% filter(k == mix_primary)
+n_mixed   = sum(mix_p$ratio_to_floor >= 0.9, na.rm = TRUE)
+n_meas    = sum(!is.na(mix_p$ratio_to_floor))
+med_floor = median(mix_p$floor_UND1_UND2, na.rm = TRUE)
+rng       = range(mix_p$ratio_to_floor, na.rm = TRUE)
+
+# is the sex contrast milder than the stage contrast where both are measurable?
+both_meas = mix_p %>% filter(!is.na(TF_vs_TM), !is.na(larva_vs_transf))
+n_sex_higher = sum(both_meas$TF_vs_TM > both_meas$larva_vs_transf)
+```
+
+`r paste0("At k = ", mix_primary, ", the replicate reference has a median of ", round(med_floor, 2), ", so two same-stage animals interleave close to freely. Larval against transformer cells range from ", round(rng[1], 2), " to ", round(rng[2], 2), " of that reference across ", n_meas, " measurable clusters, with ", n_mixed, " reaching 0.9 of the floor.")`
+
+`r if (n_mixed == 0) "**No cluster mixes across the stage boundary at anything like the rate replicate animals do.** Larval and transformer cells share every cluster without sharing neighbourhoods. Over-integration would look like the opposite, so this is direct evidence that the correction did not erase the stage difference; it brought the two groups close enough to fall in the same communities and no closer." else "Some clusters approach the replicate floor, so the correction has brought those groups substantially together. Read their correspondence results in section 2 with that in mind, since a cluster that both mixes freely and corresponds is harder to distinguish from a forced alignment."`
+
+`r if (nrow(both_meas) == 0) "" else paste0("Where both are measurable, the sex contrast is milder than the stage contrast in ", n_sex_higher, " of ", nrow(both_meas), " clusters. Two transformers of different sexes, collected on the same date, interleave better than same-sex animals collected months apart do. That places the dominant axis on the July-to-November contrast rather than on sex or on animal-to-animal variation, without saying what that contrast is made of.")`
+
+```{r, fig.width=9, fig.height=5}
+p_mix = mixing %>%
+  mutate(cluster = factor(cluster, levels = all_clusters)) %>%
+  tidyr::pivot_longer(c(floor_UND1_UND2, larva_vs_transf, TF_vs_TM),
+                      names_to = "comparison", values_to = "mixing") %>%
+  ggplot(aes(x = cluster, y = mixing, colour = comparison,
+             shape = factor(k), group = interaction(comparison, k))) +
+  geom_hline(yintercept = 1, linetype = "dashed", linewidth = .3) +
+  geom_point(position = position_dodge(width = .5), size = 1.8) +
+  scale_colour_manual(values = c(floor_UND1_UND2 = "#009292",
+                                 larva_vs_transf = "#9e2f7f",
+                                 TF_vs_TM        = "#e69f00")) +
+  ylab("observed / expected cross-group neighbours") +
+  labs(shape = "k",
+       caption = "1 is free mixing. The replicate pair is the reference, not 1.")
+
+p_mix
+ggsave(p_mix, file = paste0(results_dir, "/library_mixing_by_cluster.png"),
+       width = 9, height = 5)
+```
+
+## Mixing and correspondence are different questions
+
+They can disagree, and the combination is what the atlas decision rests on.
+
+**Low mixing with correspondence holding is the expected result for one cell
+type sampled at two stages.** The cells sit apart because a great deal of their
+transcriptome has shifted, and the cluster still corresponds because the genes
+that distinguish it *from the other clusters* are the same genes on both sides.
+Those are not in tension. A larval and a transformer fibroblast can differ in
+hundreds of genes while what makes each one a fibroblast rather than an
+endothelial cell is unchanged.
+
+**Low mixing with correspondence failing is the case to worry about**, and those
+clusters are named in section 2 rather than folded into the headline.
+
+So the two sections answer the two halves of the reviewer's concern. Section 2
+uses no corrected values at all, computing markers within each stage on
+uncorrected data, so a cluster that corresponds does so on evidence that does
+not pass through `fastMNN`. This section shows the correction left the stage
+difference intact, so correspondence cannot be dismissed as an artifact of
+having removed it.
+
+# 4. Verdict
 
 The verdict is taken over the **readable** clusters only, the ones that resolve
 between replicate animals at their own stage-test depth. Clusters that are
@@ -496,7 +655,7 @@ stage_holds = n_readable > 0 && n_fails == 0
 stage_mixed = n_readable > 0 && n_fails > 0 && n_fails < n_corresponds
 ```
 
-`r if (n_readable == 0) "**This document cannot decide.** No cluster resolves between replicate animals at the depth its stage test runs at, so there is no readable stage result. That is a statement about cell numbers, not about stage." else if (stage_holds) paste0("**Do not split the atlas.** All ", n_readable, " readable clusters find themselves across the stage boundary by their own markers, in both directions. Those clusters are the same populations in larval and in transformer cells. The claim holds whatever the larva-to-transformer contrast is made of, which is why it survives the confound between stage, collection date and batch. Report one integrated atlas and state the confound as a limitation the design cannot resolve.") else if (stage_mixed) paste0("**Integrate, but name the exceptions.** ", n_corresponds, " of ", n_readable, " readable clusters find themselves across the stage boundary. The ", n_fails, " that do not are cluster(s) ", paste(fails_tbl$cluster, collapse = ", "), ". Report the integrated atlas, name those clusters in the text, and either describe them per stage or merge them with whichever cluster they match instead. Their library composition should be checked and reported alongside them, since a cluster split along a single library is not evidence of two cell types.") else paste0("**Report the stages separately.** ", n_fails, " of ", n_readable, " readable clusters fail to find themselves across the stage boundary, so the integrated clustering groups cells the marker evidence does not support grouping.")`
+`r if (n_readable == 0) "**This document cannot decide.** No cluster resolves between replicate animals at the depth its stage test runs at, so there is no readable stage result. That is a statement about cell numbers, not about stage." else if (stage_holds) paste0("**Do not split the atlas.** All ", n_readable, " readable clusters find themselves across the stage boundary by their own markers, in both directions. Those clusters are the same populations in larval and in transformer cells. The claim holds whatever the larva-to-transformer contrast is made of, which is why it survives the confound between stage, collection date and batch. Report one integrated atlas and state the confound as a limitation the design cannot resolve.") else if (stage_mixed) paste0("**Integrate, but name the exceptions.** ", n_corresponds, " of ", n_readable, " readable clusters find themselves across the stage boundary. The ", n_fails, " that do not are cluster(s) ", paste(fails_tbl$cluster, collapse = ", "), ". Report the integrated atlas and name those clusters in the text as populations whose cross-stage identity this analysis does not resolve. Do not merge them into anything: a reciprocity failure means the larval and transformer sides point at different partners, so there is no single cluster to merge with. Merging is only indicated in the rare case where both directions agree on the same other cluster, which the direction column above reports. Give their library composition alongside them, since a cluster whose two sides are one library against another is separated by animal, sex, stage and batch at once.") else paste0("**Report the stages separately.** ", n_fails, " of ", n_readable, " readable clusters fail to find themselves across the stage boundary, so the integrated clustering groups cells the marker evidence does not support grouping.")`
 
 **Read the stage result against the replicate result, not against 100%.** Marker
 rankings shuffle between random halves of identical data, so some loss of
