@@ -367,29 +367,27 @@ datatable(gene_description)
 
 ## Known cell-type markers
 
-The curated list is `canonical_markers_long_2026-08-14.csv`, in long format: one
-row per gene per cell type, with the NCBI identifier already resolved. It is the
-collaborators' S1 sheet with the identifiers repaired, plus additions only where
-a source was retrieved for the set.
+The marker list is `canonical_markers_S1_only_2026-08-14.csv`: the
+Chung-Davidson lab's `S1(Cell_Type_Marker_Genes_12-12-25.csv)` in long format,
+one row per gene per cell type, with nothing added. The only edits are to
+identifiers, where S1's spelling resolves against nothing in the gene table and
+a corrected spelling resolves. There are three, each named in `repair_note`:
+`CD115` to `CSF1R`, `NEPH1` to `KIRREL1`, and `ZAR1` to `ZAR1L`. Every retained
+`loc_id` is checked against `gene_descritption.csv` when the list is built.
 
-Every marker is one of three things, recorded in `provenance`:
+The source of every marker and every gene-to-cell-type assignment here is the S1
+sheet, so no citation column is carried. Both the gene and its assignment to
+that cell type had to be present in S1 for the row to survive.
 
-* **S1**, taken unchanged from `S1(Cell_Type_Marker_Genes_12-12-25).csv`.
-* **S1, symbol corrected**, where S1's spelling resolves against nothing in the
-  gene table and a corrected spelling resolves. Three cases, each named in
-  `repair_note`.
-* **added, set cited**, an addition to a set for which a citation was retrieved
-  and checked. Sixteen genes across three sets.
-
-Nine genes present in the 2026-08-12 draft were added without a retrieved source
-and have been removed. A confidence tier column was also dropped: it graded 40
-genes as having direct support in a non-mammalian vertebrate while the
-supporting text named one for six of them, so it asserted evidence that had not
-been gathered. The per-gene descriptive notes went with it for the same reason.
-What remains is either from the collaborators or checked against a source.
+An earlier draft of this list, `canonical_markers_long_2026-08-12.csv`, added 25
+genes and graded all 78 on an A/B/C confidence scale. The additions were not
+traceable to a retrieved source at the level of the individual gene-to-cell-type
+claim, and the confidence scale asserted an evidence standard that had not been
+met, so both were dropped rather than carried into the paper. That file is left
+in place unmodified.
 
 ```{r}
-canonical = read.csv(paste0(data_dir, "/canonical_markers_long_2026-08-14.csv"),
+canonical = read.csv(paste0(data_dir, "/canonical_markers_S1_only_2026-08-14.csv"),
                      stringsAsFactors = FALSE) %>%
   mutate(symbol = trimws(symbol), loc_id = trimws(loc_id)) %>%
   filter(symbol != "")
@@ -402,22 +400,6 @@ chung_davidson_markers = canonical %>%
   distinct()
 
 n_missing = sum(!chung_davidson_markers$Gene %in% rownames(combined.sce))
-```
-
-### Sources
-
-Citations attach to the marker **set**, which is the level at which they were
-retrieved, and cover three of the fourteen sets. There is no per-gene citation
-and none is invented here. Each reference was checked against PubMed by author,
-year, journal and volume; the two without a PMID could not be confirmed that way
-and say so.
-
-```{r}
-datatable(canonical %>%
-            filter(sources != "") %>%
-            dplyr::count(CellTypeMarkerSet, sources, name = "n_markers") %>%
-            dplyr::select(CellTypeMarkerSet, n_markers, sources),
-          rownames = FALSE, options = list(dom = "t", ordering = FALSE))
 ```
 
 ### The marker list
