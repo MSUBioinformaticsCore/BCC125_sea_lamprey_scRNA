@@ -12,6 +12,7 @@ params:
     project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
+    no_dbl_date: "20260813"
 ---
 
 ```{r setup, include=FALSE}
@@ -36,38 +37,51 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir     = paste0(params$project_dir, "/results/20260812_no_doublets_one_atlas")
+no_dbl_dir  = paste0(params$project_dir, "/results/", params$no_dbl_date, "_no_doublets")
+
+results_dir     = paste0(params$project_dir, "/results/", params$no_dbl_date,
+                         "_no_doublets_one_atlas")
 Robject_out_dir = paste0(results_dir, "/Robjects")
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 data_dir    = paste0(params$project_dir, "/data")
-no_dbl_dir  = paste0(params$project_dir, "/results/20260803_no_doublets")
 ```
 
 # Purpose
 
-**Do the 20 clusters of the doublet-filtered atlas name the same cell types in larval and in transformer cells, or should the stages be described separately?**
+**Do the clusters of the doublet-filtered atlas name the same populations in
+larval and in transformer cells, or should the stages be described separately?**
 
-Section 3 answers it, using the curated markers. A cluster is one cell type
-across the merge if it expresses the canonical markers for its annotated type in
-larval cells and in transformer cells **separately**.
+The test is whether each cluster **finds itself** across the stage boundary
+using its own data-driven markers. Marker genes are computed from larval cells
+alone and, separately, from transformer cells alone. If the genes that define
+cluster 8 among larvae are the genes that define cluster 8 among transformers,
+and they match cluster 8 better than they match any other cluster, then cluster 8
+is the same population on both sides.
 
-**Why this is the question, given the confound.** Larvae were collected in July
-and transformers in November, so developmental stage, collection date and
-technical batch are one variable. Nothing computed from this dataset can say how
-much of the larva-to-transformer difference is developmental and how much is
-technical, and no amount of analysis will change that.
+**Nothing here uses the curated marker list.** An earlier version of this
+document tested whether each cluster expressed its assigned canonical markers.
+That route runs every claim through mammalian orthology and the BLAST
+re-annotation of LOC identifiers, which is the weakest link in this project and
+the source of the withdrawn primordial germ cell annotation. The curated markers
+also do not reliably separate cell types in this tissue, so a cluster failing
+that test was as likely to mean the marker was uninformative as that the cluster
+was incoherent. Using each cluster's own markers removes that dependency
+entirely: no gene symbol, no ortholog call, and no cell type name enters the
+computation.
 
-The identity test sidesteps the confound rather than trying to resolve it. If a
-cluster expresses fibroblast markers in larval cells and in transformer cells,
-it is fibroblasts on both sides whatever the difference between July and
-November is made of. That claim does not require attributing the contrast, which
-is why it survives the confound.
+**Why this survives the confound.** Larvae were collected in July and
+transformers in November, so stage, collection date and technical batch are one
+variable, and nothing computed from this dataset can say how much of the
+difference between them is developmental. This test does not try. It asks
+whether the populations correspond, not what makes them differ. A cluster that
+matches itself across the boundary is the same population at both stages
+whatever the July-to-November difference consists of.
 
-**Section 2 is methods justification, not evidence about the confound.** It
-establishes two things needed to defend how the atlas was built: that the two
-larval libraries agree closely enough to pool, and that the stage contrast is
-large enough to warrant correcting across it. Neither speaks to how much of that
-contrast is technical, and neither is claimed to.
+**Everything is read against a reference computed the same way.** Undifferentiated.1
+against Undifferentiated.2 is two animals of the same stage, collected on the
+same date, so it measures what correspondence looks like when only replicate
+variation separates the two sides. That is the ceiling. The stage comparison is
+reported relative to it, never against 100%.
 
 # Load
 
@@ -79,9 +93,6 @@ combined.sce = readRDS(paste0(no_dbl_dir, "/combined.sce.Rds"))
 # All quantification below is on the uncorrected values; the correction only
 # ever affected clustering and embedding.
 stopifnot(identical(colnames(combined.sce), colnames(merged.sce)))
-
-gene_description = read.csv(paste0(no_dbl_dir, "/gene_descritption.csv"),
-                            stringsAsFactors = FALSE)
 ```
 
 ```{r}
@@ -106,186 +117,82 @@ cell_key = data.frame(barcode = colnames(combined.sce),
                       stringsAsFactors = FALSE) %>%
   left_join(library_meta, by = "batch")
 
-datatable(library_meta, rownames = FALSE)
+all_clusters = as.character(sort(as.integer(unique(cell_key$label))))
+
+datatable(library_meta, rownames = FALSE, options = list(dom = "t"))
 ```
 
-# Annotations and their marker sets
+`r paste0("This run has ", dplyr::n_distinct(cell_key$label), " clusters over ", format(nrow(cell_key), big.mark = ","), " cells. Cluster numbering is an output of the clustering and does not correspond to any other run's numbering.")`
 
-The doublet-filtered clustering yields 20 clusters and its numbering does not
-match `01_all_cells_clustering_annotation.Rmd`. These labels are taken from
-`01_all_cells_clustering_annotation_no_doublets.Rmd`.
+# 1. Which clusters can be compared at all?
 
-```{r}
-anno = c(
-  "1. Fibroblasts (migrating)",
-  "2. Mesonephric cells",
-  "3. Granulosa cells (migrating)",
-  "4. Granulosa cells",
-  "5. Pre-granulosa cells (migrating)",
-  "6. Endothelial cells",
-  "7. Podocytes (mixed)",
-  "8. Oogonia/Oocytes",
-  "9. Erythrocytes",
-  "10. Leukocytes",
-  "11. Hemopoietic stem cells (1)",
-  "12. Hemopoietic stem cells (2)",
-  "13. Unresolved (globin-high, mixed origin)",
-  "14. Macrophages",
-  "15. Pre-granulosa cells (mitotic)",
-  "16. Immune cells (migrating, mitotic)",
-  "17. Spermatocytes (cytokinetic)",
-  "18. Male germ cells (migrating)",
-  "19. Spermatocytes (apoptotic)",
-  "20. Spermatocytes (GPCR-activated)")
-
-stopifnot(length(anno) == nlevels(colData(merged.sce)$label))
-
-cluster_to_set = tribble(
-  ~label, ~marker_set,
-  "1",  "Fibroblasts",
-  "2",  "Mesonephric cells",
-  "3",  "Granulosa cells",
-  "4",  "Granulosa cells",
-  "5",  "Pre-granulosa cells",
-  "6",  "Endothelial cells",
-  "7",  "Mesenephric podocytes",
-  "8",  "Oocyte",
-  "9",  "Erythrocytes",
-  "10", NA_character_,
-  "11", "Hemopoietic stem cells",
-  "12", "Hemopoietic stem cells",
-  "13", NA_character_,
-  "14", "Macrophages",
-  "15", "Pre-granulosa cells",
-  "16", NA_character_,
-  "17", "Spermatocytes",
-  "18", "Germ cells (pan-germline)",
-  "19", "Spermatocytes",
-  "20", "Spermatocytes") %>%
-  mutate(CellType = anno[as.integer(label)],
-         testable = !is.na(marker_set))
-
-datatable(cluster_to_set, rownames = FALSE)
-
-untestable = cluster_to_set %>% filter(!testable)
-```
-
-`r if (nrow(untestable) == 0) "Every cluster has a corresponding marker set." else paste0(nrow(untestable), " cluster(s) have no marker set and cannot be tested: ", paste(untestable$CellType, collapse = "; "), ". The immune clusters have none because lamprey lymphocytes are identified by variable lymphocyte receptors rather than immunoglobulin-based receptors, and the VLR loci are not present in this genome annotation under a recognizable name. Cluster 13 has none because it carries no cell type assignment to test.")`
-
-## Canonical markers
-
-The repaired long-format list. Three of the four erythrocyte entries and the
-oocyte `ZAR1` entry in the original S1 sheet resolve against nothing, so a check
-run on that sheet silently tests fewer genes than it reports.
+A cluster needs enough cells on both sides of a comparison to have a marker
+profile there. Below the threshold it is not tested, which is a separate outcome
+from failing.
 
 ```{r}
-canonical = read.csv(paste0(data_dir, "/canonical_markers_long_2026-08-12.csv"),
-                     stringsAsFactors = FALSE) %>%
-  mutate(symbol = trimws(symbol), loc_id = trimws(loc_id)) %>%
-  filter(symbol != "")
+min_cells_side = 20
 
-resolve_canonical = function(symbol, loc_id, rn, gd) {
-  if (!is.na(loc_id) && loc_id %in% rn) return(loc_id)
-  if (symbol %in% rn) return(symbol)
-  g = gd$Gene[gd$WangGeneID == symbol]
-  g = g[g %in% rn]
-  if (length(g) > 0) return(g[1])
-  NA_character_
-}
-
-rn_all = rownames(combined.sce)
-
-canonical = canonical %>%
-  rowwise() %>%
-  mutate(gene_id = resolve_canonical(symbol, loc_id, rn_all, gene_description)) %>%
-  ungroup()
-
-canon_resolved   = canonical %>% filter(!is.na(gene_id))
-canon_unresolved = canonical %>% filter(is.na(gene_id))
-
-datatable(canon_resolved %>%
-            dplyr::count(CellTypeMarkerSet, name = "n_markers"),
-          rownames = FALSE)
-```
-
-* Canonical markers listed: `r nrow(canonical)`
-* Resolved in `rownames(combined.sce)`: `r nrow(canon_resolved)`
-* Not found, and therefore excluded: `r if (nrow(canon_unresolved) == 0) "none" else paste(unique(canon_unresolved$symbol), collapse = ", ")`
-
-# 1. Which clusters are present in both stages?
-
-Before any marker is tested, how many cells each cluster has in each stage. A
-cluster below the threshold in a stage cannot be tested there, and that is a
-separate outcome from failing.
-
-```{r}
-min_cells_stage = 10
-
-stage_cells = cell_key %>%
-  dplyr::count(label, stage, name = "n_cells") %>%
-  tidyr::complete(label, stage = c("larva", "transformer"),
-                  fill = list(n_cells = 0)) %>%
-  tidyr::pivot_wider(id_cols = label, names_from = stage,
-                     values_from = n_cells, values_fill = 0) %>%
-  dplyr::rename(n_larva = larva, n_transformer = transformer) %>%
-  mutate(CellType = anno[as.integer(label)],
-         in_both  = n_larva >= min_cells_stage &
-                    n_transformer >= min_cells_stage) %>%
+side_counts = cell_key %>%
+  dplyr::count(label, library, name = "n") %>%
+  tidyr::pivot_wider(id_cols = label, names_from = library,
+                     values_from = n, values_fill = 0) %>%
+  mutate(larva       = Undifferentiated.1 + Undifferentiated.2,
+         transformer = Female + Male) %>%
   arrange(as.integer(label))
 
-write.csv(stage_cells, file = paste0(results_dir, "/cells_per_cluster_per_stage.csv"),
+write.csv(side_counts, file = paste0(results_dir, "/cells_per_cluster_per_side.csv"),
           row.names = FALSE)
 
-datatable(stage_cells, rownames = FALSE)
+datatable(side_counts, rownames = FALSE, options = list(dom = "t"))
 ```
-
-`r paste0(sum(stage_cells$in_both), " of ", nrow(stage_cells), " clusters have at least ", min_cells_stage, " cells in both stages. The remaining ", sum(!stage_cells$in_both), " are stage restricted and cannot speak to whether an integrated atlas is defensible, in either direction.")`
-
-```{r, fig.width=8, fig.height=5}
-p_stage = cell_key %>%
-  dplyr::count(label, stage, name = "n") %>%
-  mutate(label = factor(label, levels = as.character(1:length(anno)))) %>%
-  ggplot(aes(x = n, y = label, fill = stage)) +
-  geom_col(position = "fill") +
-  scale_fill_brewer(palette = "Set2") +
-  xlab("proportion of cells") + ylab("cluster")
-
-p_stage
-ggsave(p_stage, file = paste0(results_dir, "/cluster_composition_by_stage.png"),
-       width = 8, height = 5)
-```
-
-# 2. Library agreement: justification for pooling and for correcting
-
-Marker genes are computed separately within each single library and the
-agreement between libraries is measured, with two metrics used throughout:
-
-* **Top 50 overlap**, the percentage of a cluster's fifty strongest markers
-  shared between two groups. Easy to read, but it depends on an arbitrary
-  cutoff, and marker rankings shuffle even between random halves of identical
-  data, so a raw percentage means nothing without a reference.
-* **Spearman rank correlation across all tested genes.** Uses all the
-  information rather than a cutoff and is far less sensitive to cell number.
-
-Two comparisons, one of which is the reference:
-
-* **Undifferentiated.1 versus Undifferentiated.2.** Same stage, same collection
-  date, no sex difference. Disagreement here is produced by replicate animals
-  and library preparation alone, so it is the **replicate floor**. Everything
-  else is reported relative to it.
-* **Larvae pooled versus transformers pooled.** The stage contrast, which is
-  also the collection date contrast. The two cannot be separated in this
-  design.
-
-Cell numbers are matched across every group and comparison, since otherwise
-disagreement tracks statistical power rather than biology. Each cluster is
-subsampled to its own depth, the smallest count available for it in any single
-library, and the whole procedure repeats over independent draws. Library is
-deliberately **not** blocked here, because library is the variable being
-measured.
 
 ```{r}
-top_markers_for = function(marker_list, lab, n = 50) {
+# Core set: clusters testable in the replicate comparison AND in the stage
+# comparison. Both are computed on this identical background, because marker
+# lists built against different competing cluster sets are not comparable, and
+# the whole point is to read the stage result against the replicate one.
+core_clusters = side_counts %>%
+  filter(Undifferentiated.1 >= min_cells_side,
+         Undifferentiated.2 >= min_cells_side,
+         transformer        >= min_cells_side) %>%
+  pull(label)
+
+# Sex comparison has its own eligible set, since a cluster confined to one sex
+# cannot appear in it. Reported separately for that reason.
+sex_clusters = side_counts %>%
+  filter(Female >= min_cells_side, Male >= min_cells_side) %>%
+  pull(label)
+```
+
+`r paste0(length(core_clusters), " of ", nrow(side_counts), " clusters have at least ", min_cells_side, " cells in Undifferentiated.1, in Undifferentiated.2 and in the transformers, and carry the replicate and stage comparisons. ", length(sex_clusters), " have at least ", min_cells_side, " cells in both transformer libraries and carry the sex comparison.")`
+
+# 2. Does each cluster find itself across the boundary?
+
+Three comparisons. The first is the reference and the second is the question.
+
+* **Undifferentiated.1 against Undifferentiated.2.** Two animals, same stage,
+  same collection date. This is what correspondence looks like when nothing but
+  replicate variation separates the sides.
+* **Larvae against transformers.** The stage contrast, which is also the
+  collection date and batch contrast. Those cannot be separated.
+* **Female against Male.** Two animals, same collection date, differing in sex.
+  Read alongside the others: a cluster that separates the sexes as strongly as
+  it separates the stages is telling you the axis is not stage.
+
+Cell numbers are matched per cluster across every side of every comparison, at
+that cluster's own depth, since marker rankings sharpen with cell number and an
+unmatched comparison would measure sample size. Library is deliberately **not**
+blocked, because library is the variable being measured. The procedure repeats
+over independent draws and the similarity matrices are averaged before any
+verdict is read off them.
+
+```{r}
+n_top      = 50
+lfc_thresh = 1
+n_draws    = 10
+
+top_markers_for = function(marker_list, lab, n = n_top) {
   if (is.null(marker_list) || !lab %in% names(marker_list)) return(character(0))
   df = marker_list[[lab]]
   if (nrow(df) == 0) return(character(0))
@@ -301,798 +208,229 @@ top_markers_for = function(marker_list, lab, n = 50) {
   rownames(df)[ord][seq_len(min(n, nrow(df)))]
 }
 
-# per-gene effect size: the mean across every pairwise comparison. summary.logFC
-# is not used because under pval.type = "some" it comes from whichever pairwise
-# comparison supplied the summary p-value, which varies per gene and per run, so
-# correlating two runs of it compares different contrasts.
-marker_effect = function(df) {
-  lf = grep("^logFC\\.", colnames(df), value = TRUE)
-  if (length(lf) == 0) return(NULL)
-  v = rowMeans(as.matrix(as.data.frame(df[, lf, drop = FALSE])), na.rm = TRUE)
-  names(v) = rownames(df)
-  v
+# lfc is set because with thousands of cells a log-fold change of 0.02 clears
+# FDR 0.01, and an unthresholded ranking measures sample size rather than
+# effect. Both sides of every comparison use the same threshold.
+markers_for_cells = function(cells, clusters_keep) {
+  lab = factor(cell_key$label[cells], levels = clusters_keep)
+  findMarkers(combined.sce[, cells], lab, test.type = "t",
+              direction = "up", lfc = lfc_thresh, pval.type = "some")
 }
 
-top_overlap_pct = function(m1, m2, lab, n = 50) {
-  t1 = top_markers_for(m1, lab, n); t2 = top_markers_for(m2, lab, n)
-  denom = min(length(t1), length(t2))
-  if (denom == 0) return(NA_real_)
-  100 * length(intersect(t1, t2)) / denom
-}
+# cluster i of side A against cluster j of side B, for every pair. The diagonal
+# is a cluster against itself across the boundary; the off diagonal is what it
+# has to beat.
+similarity_matrix = function(mA, mB, clusters) {
+  tA = lapply(clusters, function(cl) top_markers_for(mA, cl))
+  tB = lapply(clusters, function(cl) top_markers_for(mB, cl))
+  names(tA) = clusters; names(tB) = clusters
 
-stat_rank_cor = function(m1, m2, lab) {
-  if (is.null(m1) || is.null(m2)) return(NA_real_)
-  if (!lab %in% names(m1) || !lab %in% names(m2)) return(NA_real_)
-  e1 = marker_effect(m1[[lab]]); e2 = marker_effect(m2[[lab]])
-  if (is.null(e1) || is.null(e2)) return(NA_real_)
-  g = intersect(names(e1), names(e2))
-  if (length(g) < 10) return(NA_real_)
-  suppressWarnings(cor(e1[g], e2[g], method = "spearman"))
+  sim = matrix(NA_real_, length(clusters), length(clusters),
+               dimnames = list(clusters, clusters))
+  for (i in clusters) for (j in clusters) {
+    d = min(length(tA[[i]]), length(tB[[j]]))
+    sim[i, j] = if (d == 0) NA_real_ else
+      100 * length(intersect(tA[[i]], tB[[j]])) / d
+  }
+  sim
 }
 ```
 
 ```{r}
-library_discordance = function(sce, labels, library_vec, min_cells = 20,
-                               n_draws = 10, n_top = 50, seed = 1) {
-  labels      = as.character(labels)
-  library_vec = as.character(library_vec)
+# one comparison: subsample both sides to matched depth, compute markers on each
+# side over the same cluster set, average the similarity matrices over draws
+run_comparison = function(sideA_libs, sideB_libs, clusters_keep, seed = 1) {
 
-  group_defs = list(
-    "Undifferentiated.1"  = "Undifferentiated.1",
-    "Undifferentiated.2"  = "Undifferentiated.2",
-    "larvae_pooled"       = c("Undifferentiated.1", "Undifferentiated.2"),
-    "transformers_pooled" = c("Female", "Male"))
+  inA = which(cell_key$library %in% sideA_libs)
+  inB = which(cell_key$library %in% sideB_libs)
 
-  comparisons = list(
-    UND1_vs_UND2           = c("Undifferentiated.1", "Undifferentiated.2"),
-    larvae_vs_transformers = c("larvae_pooled", "transformers_pooled"))
-
-  clusters_all = sort(unique(labels))
-
-  # counts per cluster in each group a comparison needs. Transformers are
-  # counted pooled rather than per sex, so a cluster concentrated in one
-  # transformer library is not excluded for being scarce in the other.
-  cnt = sapply(names(group_defs), function(g)
-    sapply(clusters_all, function(cl)
-      sum(labels == cl & library_vec %in% group_defs[[g]])))
-  if (is.null(dim(cnt)))
-    cnt = matrix(cnt, nrow = length(clusters_all),
-                 dimnames = list(clusters_all, names(group_defs)))
-  rownames(cnt) = clusters_all
-
-  # larvae_pooled is at least as large as either larval library, so it never
-  # binds and is left out of the minimum
-  need = c("Undifferentiated.1", "Undifferentiated.2", "transformers_pooled")
-
-  eligibility = as.data.frame(cnt)
-  eligibility$label = clusters_all
-  eligibility$min_across_groups = apply(cnt[, need, drop = FALSE], 1, min)
-  eligibility$eligible = eligibility$min_across_groups >= min_cells
-  rownames(eligibility) = NULL
-
-  eligible = clusters_all[eligibility$eligible]
-  if (length(eligible) < 2) {
-    warning("Fewer than two clusters have enough cells in every library.")
-    return(list(results = NULL, eligibility = eligibility,
-                n_by_cluster = integer(0), eligible = eligible))
-  }
-
-  # each cluster matched at its own depth: the smallest count available for it
-  # in any single library. What the comparison needs is equal power between the
-  # groups being compared, and that holds cluster by cluster. A single global n
-  # would force every cluster down to the sparsest one for no gain, since
-  # clusters are never compared against each other here.
-  n_by_cluster = apply(cnt[eligible, need, drop = FALSE], 1, min)
-  names(n_by_cluster) = eligible
+  n_by_cluster = sapply(clusters_keep, function(cl)
+    min(sum(cell_key$label[inA] == cl), sum(cell_key$label[inB] == cl)))
+  names(n_by_cluster) = clusters_keep
 
   set.seed(seed)
-  res = list()
-
+  acc = NULL
   for (d in seq_len(n_draws)) {
-    markers_by_group = list()
-    for (gname in names(group_defs)) {
-      libs = group_defs[[gname]]
-      idx  = integer(0); ok = TRUE
-      for (cl in eligible) {
-        pool = which(labels == cl & library_vec %in% libs)
-        if (length(pool) < n_by_cluster[[cl]]) { ok = FALSE; break }
-        idx = c(idx, pool[sample(length(pool), n_by_cluster[[cl]])])
-      }
-      if (!ok) next
-      markers_by_group[[gname]] = findMarkers(
-        sce[, idx], droplevels(factor(labels[idx])),
-        test.type = "t", direction = "up", pval.type = "some")
+    draw_side = function(idx) {
+      unlist(lapply(clusters_keep, function(cl) {
+        pool = idx[cell_key$label[idx] == cl]
+        # sampled by position, never by value: sample(x, n) with x of length 1
+        # draws from seq_len(x) instead of from x, which would silently return
+        # cell indices that have nothing to do with this cluster
+        pool[sample(length(pool), n_by_cluster[[cl]])]
+      }))
     }
-
-    for (cmp in names(comparisons)) {
-      g1 = comparisons[[cmp]][1]; g2 = comparisons[[cmp]][2]
-      if (is.null(markers_by_group[[g1]]) ||
-          is.null(markers_by_group[[g2]])) next
-      res[[length(res) + 1]] = data.frame(
-        comparison  = cmp, draw = d, label = eligible,
-        n_per_group = as.integer(n_by_cluster[eligible]),
-        overlap_pct = vapply(eligible, function(cl)
-          top_overlap_pct(markers_by_group[[g1]], markers_by_group[[g2]],
-                          cl, n_top), numeric(1)),
-        rank_cor    = vapply(eligible, function(cl)
-          stat_rank_cor(markers_by_group[[g1]], markers_by_group[[g2]], cl),
-          numeric(1)),
-        stringsAsFactors = FALSE)
-    }
+    mA = markers_for_cells(draw_side(inA), clusters_keep)
+    mB = markers_for_cells(draw_side(inB), clusters_keep)
+    sim = similarity_matrix(mA, mB, clusters_keep)
+    acc = if (is.null(acc)) sim else acc + sim
   }
-
-  out = do.call(rbind, res)
-  if (!is.null(out)) rownames(out) = NULL
-  list(results = out, eligibility = eligibility,
-       n_by_cluster = n_by_cluster, eligible = eligible)
+  list(sim = acc / n_draws, n_by_cluster = n_by_cluster)
 }
 ```
 
 ```{r}
-discordance_file = paste0(Robject_out_dir, "/library_discordance.Rds")
+comparison_file = paste0(Robject_out_dir, "/stage_correspondence_",
+                         n_top, "_lfc", lfc_thresh, "_", n_draws, "draws.Rds")
 
-if (file.exists(discordance_file)) {
-  discordance = readRDS(discordance_file)
+if (file.exists(comparison_file)) {
+  comparisons = readRDS(comparison_file)
 } else {
-  discordance = library_discordance(combined.sce,
-                                    colData(merged.sce)$label,
-                                    cell_key$library)
-  saveRDS(discordance, file = discordance_file)
+  comparisons = list(
+    replicate = run_comparison("Undifferentiated.1", "Undifferentiated.2",
+                               core_clusters),
+    stage     = run_comparison(c("Undifferentiated.1", "Undifferentiated.2"),
+                               c("Female", "Male"), core_clusters),
+    sex       = run_comparison("Female", "Male", sex_clusters))
+  saveRDS(comparisons, file = comparison_file)
 }
 ```
 
-## Cells used, and clusters excluded
+## Reciprocal self-match
+
+For each cluster, the strongest match on the other side is found in both
+directions. A cluster **corresponds** when it is its own best match both ways,
+which is stricter than being the best match in one direction, since a diffuse
+cluster can be many clusters' best partner without any of them being its own.
+
+The **margin** is how far the self-match sits above the strongest competitor. A
+cluster that matches itself by one percentage point has not established
+anything, and the margin is the number to read rather than the raw similarity.
 
 ```{r}
-write.csv(discordance$eligibility,
-          file = paste0(results_dir, "/SuppTable_discordance_eligibility.csv"),
+reciprocal_from_sim = function(sim) {
+  cls = rownames(sim)
+  do.call(rbind, lapply(cls, function(i) {
+    row = sim[i, ]; col = sim[, i]
+    off = row[names(row) != i]
+    fwd = names(which.max(row)); rev = names(which.max(col))
+    # a cluster with no measurable competitor has no margin to report, and
+    # max() of an all-NA vector would hand back -Inf rather than saying so
+    best_off = if (all(is.na(off))) NA_real_ else max(off, na.rm = TRUE)
+    data.frame(
+      cluster         = i,
+      self_similarity = sim[i, i],
+      best_forward    = if (length(fwd)) fwd else NA_character_,
+      best_reverse    = if (length(rev)) rev else NA_character_,
+      reciprocal      = identical(fwd, i) && identical(rev, i),
+      margin          = sim[i, i] - best_off,
+      stringsAsFactors = FALSE)
+  }))
+}
+
+recip = bind_rows(lapply(names(comparisons), function(nm)
+  reciprocal_from_sim(comparisons[[nm]]$sim) %>%
+    mutate(comparison = nm,
+           n_per_side = comparisons[[nm]]$n_by_cluster[cluster]))) %>%
+  dplyr::select(comparison, cluster, n_per_side, self_similarity,
+                best_forward, best_reverse, reciprocal, margin)
+
+write.csv(recip, file = paste0(results_dir, "/SuppTable_reciprocal_matches.csv"),
           row.names = FALSE)
 
-datatable(discordance$eligibility, filter = "top", rownames = FALSE)
-
-disc_excluded = discordance$eligibility %>% filter(!eligible)
-n_low_power   = if (length(discordance$n_by_cluster) == 0) 0 else
-  sum(discordance$n_by_cluster < 50)
+datatable(recip %>% mutate(across(where(is.numeric), ~round(., 1))),
+          filter = "top", rownames = FALSE)
 ```
 
-`r if (length(discordance$n_by_cluster) == 0) "**Fewer than two clusters have enough cells in all four libraries, so this analysis cannot run.** That is a result rather than an error, and it would mean the clusters are too library-restricted for a within-library marker comparison to be possible at all." else paste0(length(discordance$eligible), " cluster(s) are eligible, matched at ", min(discordance$n_by_cluster), " to ", max(discordance$n_by_cluster), " cells per cluster per group (median ", round(median(discordance$n_by_cluster)), ").")`
-
-`r if (nrow(disc_excluded) == 0) "No cluster was excluded." else paste0(nrow(disc_excluded), " cluster(s) were excluded for having too few cells in at least one library. A cluster confined to one sex, such as the oocyte and spermatocyte clusters, cannot appear here at all, since the Female versus Male comparison requires cells of that cluster in both transformer libraries. Their absence is structural and says nothing about the stage difference.")`
-
-`r if (n_low_power == 0) "" else paste0(n_low_power, " cluster(s) are matched at fewer than 50 cells per group. Marker rankings are noisy at that depth, so their values carry little information in either direction and should not be read as evidence of agreement or disagreement.")`
-
-## Discordance per cluster
-
-Both metrics measure agreement, so **lower values mean greater discordance**.
-
 ```{r}
-disc_results = discordance$results
-if (is.null(disc_results)) {
-  disc_results = data.frame(
-    comparison = character(0), draw = integer(0), label = character(0),
-    n_per_group = integer(0), overlap_pct = numeric(0),
-    rank_cor = numeric(0), stringsAsFactors = FALSE)
-}
-
-disc_per_cluster = disc_results %>%
-  group_by(label, comparison) %>%
-  summarize(n_per_group    = dplyr::first(n_per_group),
-            n_draws        = dplyr::n(),
-            overlap_median = median(overlap_pct, na.rm = TRUE),
-            overlap_min    = min(overlap_pct, na.rm = TRUE),
-            overlap_max    = max(overlap_pct, na.rm = TRUE),
-            rankcor_median = median(rank_cor, na.rm = TRUE),
-            rankcor_min    = min(rank_cor, na.rm = TRUE),
-            rankcor_max    = max(rank_cor, na.rm = TRUE),
+summary_by_comparison = recip %>%
+  group_by(comparison) %>%
+  summarize(n_clusters      = dplyr::n(),
+            n_reciprocal    = sum(reciprocal),
+            pct_reciprocal  = 100 * mean(reciprocal),
+            median_self     = median(self_similarity, na.rm = TRUE),
+            median_margin   = median(margin, na.rm = TRUE),
             .groups = "drop")
 
-write.csv(disc_per_cluster,
-          file = paste0(results_dir, "/SuppTable_library_discordance.csv"),
-          row.names = FALSE)
-
-datatable(disc_per_cluster %>% mutate(across(where(is.numeric), ~round(., 3))),
-          filter = "top", rownames = FALSE)
-```
-
-```{r, fig.width=10, fig.height=7}
-cmp_cols = c(UND1_vs_UND2 = "#009292", larvae_vs_transformers = "#9e2f7f")
-
-disc_long = disc_per_cluster %>%
-  tidyr::pivot_longer(
-    c(overlap_median, overlap_min, overlap_max,
-      rankcor_median, rankcor_min, rankcor_max),
-    names_to = c("metric", "stat"), names_sep = "_", values_to = "value") %>%
-  tidyr::pivot_wider(names_from = stat, values_from = value) %>%
-  mutate(metric = dplyr::recode(metric,
-                                overlap = "Top 50 marker overlap (%)",
-                                rankcor = "Spearman rank correlation"),
-         label  = factor(label, levels = as.character(sort(as.integer(
-           unique(disc_per_cluster$label))))))
-
-p_disc = ggplot(disc_long, aes(x = label, y = median, color = comparison)) +
-  geom_linerange(aes(ymin = min, ymax = max),
-                 position = position_dodge(width = .6), linewidth = .6) +
-  geom_point(position = position_dodge(width = .6), size = 2) +
-  scale_color_manual(values = cmp_cols) +
-  facet_wrap(~ metric, ncol = 1, scales = "free_y") +
-  xlab("cluster") + ylab(NULL) +
-  labs(caption = paste0("Points are medians across draws, bars the range. ",
-                        "UND1 vs UND2 is the replicate floor. ",
-                        "Lower means more discordant."))
-
-p_disc
-ggsave(p_disc, file = paste0(results_dir, "/library_discordance_by_cluster.png"),
-       width = 10, height = 7)
-```
-
-## Is the stage contrast worse than the replicate floor?
-
-Each cluster is compared against **its own** floor rather than against a pooled
-average. Clusters differ enormously in how reproducible their markers are: a
-cluster with sharply distinctive markers scores high in every comparison and a
-diffuse one scores low in every comparison. Pooling lets that between-cluster
-spread swamp the difference being measured, in the same way an unpaired test
-lets subject-to-subject variation swamp a treatment effect.
-
-```{r}
-paired = disc_per_cluster %>%
-  dplyr::select(label, comparison, n_per_group,
-                overlap_median, rankcor_median) %>%
-  tidyr::pivot_longer(c(overlap_median, rankcor_median),
-                      names_to = "metric", values_to = "value") %>%
-  tidyr::pivot_wider(id_cols = c(label, n_per_group, metric),
-                     names_from = comparison, values_from = value)
-
-paired_test = if (!"UND1_vs_UND2" %in% colnames(paired) || nrow(paired) == 0) {
-  data.frame(metric = character(0), comparison = character(0),
-             n_clusters = integer(0), median_floor = numeric(0),
-             median_comparison = numeric(0), median_ratio = numeric(0),
-             n_below_floor = integer(0), wilcox_p = numeric(0),
-             exceeds_floor = logical(0), stringsAsFactors = FALSE)
-} else {
-  paired %>%
-    filter(!is.na(UND1_vs_UND2)) %>%
-    tidyr::pivot_longer(any_of("larvae_vs_transformers"),
-                        names_to = "comparison", values_to = "value") %>%
-    filter(!is.na(value)) %>%
-    group_by(metric, comparison) %>%
-    summarize(
-      n_clusters        = dplyr::n(),
-      median_floor      = median(UND1_vs_UND2),
-      median_comparison = median(value),
-      median_ratio      = median(value / UND1_vs_UND2, na.rm = TRUE),
-      n_below_floor     = sum(value < UND1_vs_UND2),
-      # a signed rank test needs a handful of pairs to say anything; below
-      # that it reports NA rather than a meaningless p-value
-      wilcox_p          = if (dplyr::n() >= 5)
-        suppressWarnings(wilcox.test(value, UND1_vs_UND2,
-                                     paired = TRUE)$p.value) else NA_real_,
-      .groups = "drop") %>%
-    mutate(exceeds_floor = median_ratio < 1 & n_below_floor > n_clusters / 2)
-}
-
-write.csv(paired_test,
-          file = paste0(results_dir, "/SuppTable_discordance_paired_test.csv"),
-          row.names = FALSE)
-
-datatable(paired_test %>% mutate(across(where(is.numeric), ~signif(., 3))),
-          rownames = FALSE)
-```
-
-`exceeds_floor` is TRUE when a comparison agrees **less** well than the
-replicate floor: the median per-cluster ratio is below 1 and more than half the
-clusters individually fall below their own floor.
-
-```{r}
-lt_row = paired_test %>%
-  filter(comparison == "larvae_vs_transformers", metric == "overlap_median")
-stage_contrast_large = nrow(lt_row) == 1 && isTRUE(lt_row$exceeds_floor)
-```
-
-`r if (nrow(lt_row) == 0) "The stage contrast could not be tested, so its size is not established here." else paste0("**Stage contrast.** Median top 50 overlap is ", round(lt_row$median_comparison, 1), "% against a replicate floor of ", round(lt_row$median_floor, 1), "%, a ratio of ", round(lt_row$median_ratio, 2), ", with ", lt_row$n_below_floor, " of ", lt_row$n_clusters, " clusters below their own floor", if (!is.na(lt_row$wilcox_p)) paste0(" (Wilcoxon signed rank p = ", signif(lt_row$wilcox_p, 2), ")") else "", ". ", if (isTRUE(lt_row$exceeds_floor)) "**The stage contrast is substantially larger than replicate libraries of the same stage produce.** An uncorrected integration would therefore cluster largely by stage rather than by cell type. What that contrast consists of is not established by this test: developmental remodeling and a July-to-November technical batch are confounded and cannot be told apart here." else "**The stage contrast is not more discordant than the replicate floor**, so there is little to correct for.")`
-
-**What these two numbers are for.** The replicate floor shows that
-Undifferentiated.1 and Undifferentiated.2 agree closely, which is what justifies
-pooling them as one larval group. The stage contrast sitting well below that
-floor is what justifies applying a correction across the stage boundary at all,
-since without it an integration would cluster largely by stage rather than by
-cell type.
-
-**Neither says anything about the confound.** Stage, collection date and library
-are one variable, so how much of the stage contrast is developmental and how
-much is technical cannot be determined here, by this or by any other analysis of
-this dataset. No claim about that is made from these numbers. Section 3 does not
-need one.
-
-
-# 3. Canonical marker check
-
-Two different things are asked of each cluster's assigned markers, and both are
-asked in the combined clustering and within each stage separately.
-
-**Detected** means the gene is on: expressed in at least `detect_pct`% of that
-cluster's cells. It is a weak test on its own, because a ubiquitous gene is
-detected everywhere and says nothing about identity.
-
-**Enriched** means the gene is higher in that cluster than in the others, which
-is what makes it a marker at all. This is the assumption the document was
-resting on without checking: `cluster_to_set` assigns a marker set to a cluster
-on the strength of the existing annotation, and if that annotation is wrong the
-detection test asks whether a non-marker happens to be on, which it often will
-be.
-
-Enrichment is also checked **per stage**, not only in the combined data. A
-cluster whose assigned markers are enriched in it among larval cells and again
-among transformer cells is far better supported than one that merely detects
-them on both sides.
-
-## Are the assigned markers enriched at all?
-
-Three `findMarkers` runs: all cells, larval cells only, transformer cells only.
-Library is blocked in each, so no result depends on the correction.
-
-All three use **the same cluster set**, the clusters with enough cells in both
-stages from section 1. Marker lists computed against different competing
-backgrounds are not comparable, so the per-stage runs would otherwise be
-measuring different things from each other and from the combined run.
-
-```{r}
-fdr_enrich  = 0.01
-canon_ids   = unique(canon_resolved$gene_id)
-enrich_file = paste0(Robject_out_dir, "/marker_enrichment.Rds")
-
-if (file.exists(enrich_file)) {
-  enrich = readRDS(enrich_file)
-} else {
-  common_labels = stage_cells$label[stage_cells$in_both]
-  in_common     = cell_key$label %in% common_labels
-
-  run_fm = function(keep) {
-    lab = droplevels(factor(cell_key$label[keep], levels = common_labels))
-    blk = cell_key$library[keep]
-    # a single library in the subset leaves nothing to block on
-    if (dplyr::n_distinct(blk) < 2) blk = NULL
-    findMarkers(combined.sce[, keep], lab, test.type = "t", block = blk,
-                direction = "up", pval.type = "some")
-  }
-
-  enrich = list(
-    combined    = run_fm(in_common),
-    larva       = run_fm(in_common & cell_key$stage == "larva"),
-    transformer = run_fm(in_common & cell_key$stage == "transformer"))
-  saveRDS(enrich, file = enrich_file)
-}
+datatable(summary_by_comparison %>% mutate(across(where(is.numeric), ~round(., 1))),
+          rownames = FALSE, options = list(dom = "t", ordering = FALSE))
 ```
 
 ```{r}
-extract_enrich = function(fm, run_name) {
-  purrr::map_dfr(names(fm), function(lab) {
-    df   = fm[[lab]]
-    keep = rownames(df) %in% canon_ids
-    if (!any(keep)) return(NULL)
-    eff = marker_effect(df)
-    data.frame(run       = run_name,
-               label     = lab,
-               gene_id   = rownames(df)[keep],
-               FDR       = df$FDR[keep],
-               meanLogFC = if (is.null(eff)) NA_real_ else eff[keep],
-               stringsAsFactors = FALSE)
-  })
-}
+rep_row   = summary_by_comparison %>% filter(comparison == "replicate")
+stage_row = summary_by_comparison %>% filter(comparison == "stage")
+sex_row   = summary_by_comparison %>% filter(comparison == "sex")
 
-enrich_long = bind_rows(lapply(names(enrich),
-                               function(n) extract_enrich(enrich[[n]], n)))
-
-# each canonical gene paired with the cluster its marker set is assigned to
-assigned = canon_resolved %>%
-  dplyr::select(gene_id, symbol, marker_set = CellTypeMarkerSet) %>%
-  inner_join(cluster_to_set %>% filter(testable) %>%
-               dplyr::select(label, marker_set, CellType),
-             by = "marker_set")
-
-enrich_assigned = assigned %>%
-  left_join(enrich_long, by = c("gene_id", "label"),
-            relationship = "many-to-many") %>%
-  mutate(enriched = !is.na(FDR) & FDR < fdr_enrich)
-
-write.csv(enrich_assigned,
-          file = paste0(results_dir, "/SuppTable_marker_enrichment.csv"),
-          row.names = FALSE)
-
-enrich_summary = enrich_assigned %>%
-  filter(!is.na(run)) %>%
-  group_by(CellType, label, marker_set, run) %>%
-  summarize(n_markers    = dplyr::n_distinct(gene_id),
-            n_enriched   = dplyr::n_distinct(gene_id[enriched]),
-            pct_enriched = 100 * dplyr::n_distinct(gene_id[enriched]) /
-                                 dplyr::n_distinct(gene_id),
-            .groups = "drop") %>%
-  tidyr::pivot_wider(id_cols = c(CellType, label, marker_set),
-                     names_from = run, values_from = pct_enriched,
-                     names_prefix = "pct_enriched_")
-
-datatable(enrich_summary %>% mutate(across(where(is.numeric), ~round(., 1))),
-          filter = "top", rownames = FALSE)
+fails = recip %>% filter(comparison == "stage", !reciprocal)
 ```
 
-```{r, fig.width=10, fig.height=6}
-p_enrich = ggplot(enrich_assigned %>% filter(!is.na(run)),
-                  aes(x = run, y = symbol, fill = enriched)) +
-  geom_tile(color = "white") +
-  facet_wrap(~ paste0(label, ". ", marker_set), scales = "free_y") +
-  scale_fill_manual(values = c(`TRUE` = "#7fbf7b", `FALSE` = "#d6604d"),
-                    name = paste0("FDR < ", fdr_enrich)) +
-  theme(axis.text.y = element_text(size = 6),
-        axis.text.x = element_text(angle = 30, hjust = 1),
-        strip.text  = element_text(size = 7)) +
-  xlab(NULL) + ylab(NULL)
+`r if (nrow(rep_row) == 0 || nrow(stage_row) == 0) "One of the two comparisons could not be run, so no reference is available." else paste0("**Reference.** Between the two larval libraries, ", rep_row$n_reciprocal, " of ", rep_row$n_clusters, " clusters are reciprocal self-matches, median similarity ", round(rep_row$median_self, 1), "% and median margin ", round(rep_row$median_margin, 1), " points. That is what correspondence looks like when only replicate animals separate the sides, and it is the ceiling for this dataset rather than 100%. **Stage.** Across the stage boundary, ", stage_row$n_reciprocal, " of ", stage_row$n_clusters, " clusters are reciprocal self-matches, median similarity ", round(stage_row$median_self, 1), "% and median margin ", round(stage_row$median_margin, 1), " points.")`
 
-p_enrich
-ggsave(p_enrich, file = paste0(results_dir, "/marker_enrichment.png"),
-       width = 10, height = 6)
-```
+`r if (nrow(sex_row) == 0) "" else paste0("**Sex.** Between the two transformer libraries, ", sex_row$n_reciprocal, " of ", sex_row$n_clusters, " clusters are reciprocal self-matches. This comparison runs on its own cluster set, since a cluster confined to one sex cannot appear in it, so the count is not directly comparable with the other two. The median margin, ", round(sex_row$median_margin, 1), " points, is comparable.")`
 
-## Is any marker set enriched somewhere else instead?
+## The similarity matrices
 
-A marker set that is not enriched in its assigned cluster may still be enriched
-in a different one, which would mean the label is on the wrong cluster rather
-than the marker being uninformative. This uses the combined run.
+The diagonal is each cluster against itself across the boundary. Off-diagonal
+brightness means a cluster's markers resemble a different cluster on the other
+side, which is what a failure of correspondence looks like.
 
-```{r}
-best_cluster = enrich_long %>%
-  filter(run == "combined") %>%
-  group_by(gene_id) %>%
-  slice_min(FDR, n = 1, with_ties = FALSE) %>%
-  ungroup() %>%
-  dplyr::select(gene_id, best_label = label, best_FDR = FDR)
+```{r, fig.width=13, fig.height=5}
+sim_long = bind_rows(lapply(names(comparisons), function(nm) {
+  s = comparisons[[nm]]$sim
+  as.data.frame(as.table(s)) %>%
+    setNames(c("side_A", "side_B", "similarity")) %>%
+    mutate(comparison = nm)
+})) %>%
+  mutate(side_A = factor(side_A, levels = all_clusters),
+         side_B = factor(side_B, levels = all_clusters))
 
-misassigned = assigned %>%
-  left_join(best_cluster, by = "gene_id") %>%
-  mutate(best_CellType = anno[as.integer(best_label)],
-         on_assigned   = !is.na(best_label) & best_label == label) %>%
-  filter(!is.na(best_label), !on_assigned, best_FDR < fdr_enrich) %>%
-  dplyr::select(symbol, marker_set, assigned_to = CellType,
-                most_enriched_in = best_CellType, best_FDR) %>%
-  arrange(marker_set, best_FDR)
-
-write.csv(misassigned,
-          file = paste0(results_dir, "/SuppTable_markers_enriched_elsewhere.csv"),
-          row.names = FALSE)
-
-datatable(misassigned %>% mutate(best_FDR = signif(best_FDR, 3)),
-          filter = "top", rownames = FALSE)
-```
-
-`r if (nrow(misassigned) == 0) "Every canonical marker that is significantly enriched anywhere is most enriched in the cluster its set is assigned to." else paste0(nrow(misassigned), " canonical marker(s) are most strongly enriched in a cluster other than the one their set is assigned to. That is a pointer to a mislabeled cluster rather than to an uninformative marker, and it is worth reading alongside the per-cluster table above: a set whose members are scattered across other clusters is not describing the cluster it is attached to.")`
-
-## Detection, by stage
-
-Each cluster is scored only against the markers of its own assigned type, in
-each stage separately, on uncorrected depth-normalized values.
-
-```{r}
-canon_mat = as.matrix(logcounts(combined.sce)[canon_ids, , drop = FALSE])
-
-canon_long = t(canon_mat) %>%
-  as.data.frame() %>%
-  tibble::rownames_to_column("barcode") %>%
-  tidyr::pivot_longer(-barcode, names_to = "gene_id", values_to = "logexpr") %>%
-  left_join(cell_key, by = "barcode")
-
-canon_scored = canon_long %>%
-  inner_join(canon_resolved %>%
-               dplyr::select(gene_id, symbol, marker_set = CellTypeMarkerSet),
-             by = "gene_id", relationship = "many-to-many") %>%
-  inner_join(cluster_to_set %>% filter(testable) %>%
-               dplyr::select(label, marker_set, CellType),
-             by = c("label", "marker_set"))
-
-canon_summary = canon_scored %>%
-  group_by(CellType, label, marker_set, symbol, stage) %>%
-  summarize(n_cells        = dplyr::n(),
-            mean_logexpr   = mean(logexpr),
-            pct_expressing = 100 * mean(logexpr > 0),
-            .groups = "drop")
-
-write.csv(canon_summary,
-          file = paste0(results_dir, "/SuppTable_canonical_markers_by_stage.csv"),
-          row.names = FALSE)
-
-datatable(canon_summary %>% mutate(across(where(is.numeric), ~round(., 2))),
-          filter = "top", rownames = FALSE)
-```
-
-```{r, fig.width=11, fig.height=9}
-p_canon = ggplot(canon_summary,
-                 aes(x = stage, y = symbol,
-                     size = pct_expressing, color = mean_logexpr)) +
-  geom_point() +
-  scale_color_viridis_c() +
-  scale_size_continuous(range = c(0.5, 5)) +
-  facet_wrap(~ paste0(label, ". ", marker_set), scales = "free_y") +
-  theme(axis.text.y = element_text(size = 6),
-        axis.text.x = element_text(angle = 45, hjust = 1)) +
-  xlab(NULL) + ylab(NULL) +
-  labs(size = "% expressing", color = "mean logexpr")
-
-p_canon
-ggsave(p_canon, file = paste0(results_dir, "/canonical_markers_by_stage.png"),
-       width = 11, height = 9)
-```
-
-## Verdict
-
-A marker counts as expressed in a stage if it is detected in at least
-`detect_pct`% of that cluster's cells from that stage, and identity holds in a
-stage if at least `marker_frac`% of the assigned markers are expressed. A
-cluster with fewer than `r min_cells_stage` cells in a stage is recorded as not
-sampled there, which is its own outcome and is never folded into the passes or
-the failures.
-
-```{r}
-detect_pct  = 10
-marker_frac = 50
-
-# every testable cluster crossed with both stages, so a cluster absent from a
-# stage appears as a zero rather than as a missing row. Without the cross it
-# would drop out of pivot_wider as NA, be excluded from the pass count by
-# na.rm and from the failure list by filter(), and so vanish from the summary
-# while still counting in its denominator.
-cluster_stage_cells =
-  cell_key %>%
-  inner_join(cluster_to_set %>% filter(testable) %>%
-               dplyr::select(label, marker_set, CellType), by = "label") %>%
-  dplyr::count(CellType, label, marker_set, stage, name = "n_cells") %>%
-  tidyr::complete(tidyr::nesting(CellType, label, marker_set),
-                  stage = c("larva", "transformer"),
-                  fill = list(n_cells = 0))
-
-score_stage = function(detect, frac) {
-  by_stage = canon_summary %>%
-    mutate(expressed = pct_expressing >= detect) %>%
-    group_by(CellType, label, marker_set, stage) %>%
-    summarize(n_markers   = dplyr::n(),
-              n_expressed = sum(expressed),
-              pct_markers_expressed = 100 * mean(expressed),
-              .groups = "drop")
-
-  cluster_stage_cells %>%
-    left_join(by_stage, by = c("CellType", "label", "marker_set", "stage")) %>%
-    mutate(status = dplyr::case_when(
-      n_cells < min_cells_stage    ~ "not sampled",
-      is.na(pct_markers_expressed) ~ "not sampled",
-      pct_markers_expressed >= frac ~ "holds",
-      TRUE                          ~ "fails")) %>%
-    tidyr::pivot_wider(id_cols = c(CellType, label, marker_set),
-                       names_from  = stage,
-                       values_from = c(n_cells, n_markers, n_expressed,
-                                       pct_markers_expressed, status)) %>%
-    mutate(verdict = dplyr::case_when(
-      status_larva == "holds" & status_transformer == "holds"
-        ~ "holds in both stages",
-      status_larva == "fails" | status_transformer == "fails"
-        ~ "fails in at least one stage",
-      status_larva == "not sampled" & status_transformer == "not sampled"
-        ~ "not sampled in either stage",
-      TRUE
-        ~ "present in one stage only"))
-}
-
-canon_verdict = score_stage(detect_pct, marker_frac) %>%
-  # carry the enrichment result alongside, so a cluster can be seen to pass on
-  # detection while its markers are not markers of it at all
-  left_join(enrich_summary %>%
-              dplyr::select(label, pct_enriched_combined,
-                            pct_enriched_larva, pct_enriched_transformer),
-            by = "label") %>%
-  mutate(markers_enriched = !is.na(pct_enriched_combined) &
-                            pct_enriched_combined >= marker_frac,
-         interpretable = markers_enriched) %>%
-  arrange(verdict, as.integer(label))
-
-write.csv(canon_verdict,
-          file = paste0(results_dir, "/SuppTable_canonical_identity_verdict.csv"),
-          row.names = FALSE)
-
-datatable(canon_verdict %>% mutate(across(where(is.numeric), ~round(., 1))),
-          filter = "top", rownames = FALSE)
-```
-
-```{r}
-n_tested     = nrow(canon_verdict)
-n_holds      = sum(canon_verdict$verdict == "holds in both stages")
-n_fails      = sum(canon_verdict$verdict == "fails in at least one stage")
-n_one_stage  = sum(canon_verdict$verdict == "present in one stage only")
-n_unsampled  = sum(canon_verdict$verdict == "not sampled in either stage")
-n_comparable = n_holds + n_fails
-
-fails_clusters     = canon_verdict %>% filter(verdict == "fails in at least one stage")
-one_stage_clusters = canon_verdict %>% filter(verdict == "present in one stage only")
-
-# no cluster may fall outside the four outcomes
-stopifnot(n_holds + n_fails + n_one_stage + n_unsampled == n_tested)
-
-# a detection result is only meaningful where the markers are markers of that
-# cluster in the first place
-n_uninterpretable = sum(!canon_verdict$interpretable, na.rm = TRUE)
-holds_and_enriched = sum(canon_verdict$verdict == "holds in both stages" &
-                           canon_verdict$interpretable, na.rm = TRUE)
-```
-
-Of the `r n_tested` clusters with a marker set, `r n_comparable` have at least
-`r min_cells_stage` cells in both stages and can be compared across the merge
-at all. Of those, **`r n_holds` express at least half their assigned canonical
-markers in both stages** and `r n_fails` do not.
-
-**`r holds_and_enriched` clusters both hold on detection and have their assigned
-markers actually enriched in them.** That is the number to quote. A cluster that
-detects its markers without them being enriched there has not passed anything:
-the genes are on, but they are not markers of that cluster, so the annotation is
-untested rather than confirmed.
-
-`r if (n_one_stage == 0) "Every testable cluster is present in both stages." else paste0(n_one_stage, " cluster(s) are present in one stage only: ", paste(one_stage_clusters$CellType, collapse = "; "), ". A cluster that exists in one stage cannot agree or disagree with itself across the merge, so these are neither evidence for nor against an integrated atlas and are reported rather than counted.")`
-
-`r if (n_comparable == 0) "**No cluster has enough cells in both stages to be compared, so this test cannot decide the question.**" else if (n_fails == 0) "**Cell type identity is preserved across the stages for every cluster that could be compared.** A single integrated atlas of the doublet-filtered data is defensible: those clusters name the same cell types at both stages. The claim extends only to the clusters present in both stages; the stage-restricted ones are carried on their within-stage markers alone." else paste0("**", n_fails, " cluster(s) do not express half their assigned markers in both stages: ", paste(fails_clusters$CellType, collapse = "; "), ".** For these the annotation does not hold across the merge, and grouping the stages into one cluster asserts an identity the canonical markers do not support. If this affects most of the comparable clusters, describing the stages separately is the more honest presentation.")`
-
-# 4. Does the verdict survive the thresholds?
-
-Both cutoffs are conventions. A conclusion that flips between reasonable
-settings is not a conclusion, so the grid below repeats the whole test across a
-range of both and reports how many clusters hold in each cell.
-
-```{r}
-grid = expand.grid(detect = c(5, 10, 20),
-                   frac   = c(33, 50, 67))
-
-sensitivity = purrr::map_dfr(seq_len(nrow(grid)), function(i) {
-  v = score_stage(grid$detect[i], grid$frac[i])
-  data.frame(detect_pct  = grid$detect[i],
-             marker_frac = grid$frac[i],
-             holds       = sum(v$verdict == "holds in both stages"),
-             fails       = sum(v$verdict == "fails in at least one stage"),
-             one_stage   = sum(v$verdict == "present in one stage only"),
-             comparable  = sum(v$verdict %in% c("holds in both stages",
-                                                "fails in at least one stage")))
-}) %>%
-  mutate(pct_holding = ifelse(comparable == 0, NA_real_,
-                              100 * holds / comparable))
-
-write.csv(sensitivity, file = paste0(results_dir, "/threshold_sensitivity.csv"),
-          row.names = FALSE)
-
-datatable(sensitivity %>% mutate(pct_holding = round(pct_holding, 1)),
-          rownames = FALSE)
-```
-
-```{r, fig.width=6, fig.height=4}
-p_sens = ggplot(sensitivity,
-                aes(x = factor(detect_pct), y = factor(marker_frac),
-                    fill = pct_holding)) +
+p_sim = ggplot(sim_long, aes(x = side_B, y = side_A, fill = similarity)) +
   geom_tile() +
-  geom_text(aes(label = paste0(holds, "/", comparable)), size = 3) +
-  scale_fill_viridis_c(limits = c(0, 100)) +
-  xlab("detection threshold, % of cells") +
-  ylab("markers required, % of set") +
-  labs(fill = "% of comparable\nclusters holding")
+  scale_fill_viridis_c(name = "top 50\noverlap %") +
+  facet_wrap(~ comparison, nrow = 1, scales = "free") +
+  xlab("cluster, second side") + ylab("cluster, first side") +
+  theme(axis.text = element_text(size = 7))
 
-p_sens
-ggsave(p_sens, file = paste0(results_dir, "/threshold_sensitivity.png"),
-       width = 6, height = 4)
+p_sim
+ggsave(p_sim, file = paste0(results_dir, "/cross_boundary_similarity.png"),
+       width = 13, height = 5)
 ```
 
-`r paste0("Across the nine settings, the share of comparable clusters holding in both stages ranges from ", round(min(sensitivity$pct_holding, na.rm = TRUE), 1), "% to ", round(max(sensitivity$pct_holding, na.rm = TRUE), 1), "%. ", if (all(sensitivity$fails == 0, na.rm = TRUE)) "No cluster fails at any setting, so the conclusion does not depend on either cutoff." else if (all(sensitivity$holds == 0, na.rm = TRUE)) "No cluster holds at any setting, so the conclusion does not depend on either cutoff." else "The result moves with the cutoffs, so the headline verdict above should be reported together with this grid rather than on its own.")`
+```{r, fig.width=9, fig.height=5}
+p_margin = recip %>%
+  mutate(cluster = factor(cluster, levels = all_clusters)) %>%
+  ggplot(aes(x = cluster, y = margin, fill = reciprocal)) +
+  geom_col(position = position_dodge()) +
+  facet_wrap(~ comparison, ncol = 1) +
+  scale_fill_manual(values = c(`TRUE` = "#7fbf7b", `FALSE` = "#d6604d"),
+                    name = "reciprocal\nself-match") +
+  geom_hline(yintercept = 0, linewidth = .3) +
+  ylab("margin over strongest competitor, points") + xlab("cluster")
 
-# 5. Per library, not just per stage
+p_margin
+ggsave(p_margin, file = paste0(results_dir, "/self_match_margin.png"),
+       width = 9, height = 5)
+```
 
-A cluster can hold in the transformer stage on the strength of one library.
-Since TF and TM are different animals and different sexes, the same test run per
-library is stricter, and a cluster that holds in every library it is sampled in
-is on firmer ground than one that holds only in aggregate.
+# 3. Verdict
 
 ```{r}
-canon_lib = canon_scored %>%
-  group_by(CellType, label, marker_set, symbol, library) %>%
-  summarize(pct_expressing = 100 * mean(logexpr > 0),
-            n_cells        = dplyr::n(),
-            .groups = "drop") %>%
-  mutate(expressed = pct_expressing >= detect_pct) %>%
-  group_by(CellType, label, marker_set, library) %>%
-  summarize(n_cells     = dplyr::first(n_cells),
-            n_markers   = dplyr::n(),
-            pct_markers = 100 * mean(expressed),
-            .groups = "drop") %>%
-  mutate(status = dplyr::case_when(
-    n_cells < min_cells_stage ~ "not sampled",
-    pct_markers >= marker_frac ~ "holds",
-    TRUE ~ "fails"))
-
-lib_verdict = canon_lib %>%
-  group_by(CellType, label) %>%
-  summarize(libraries_sampled = sum(status != "not sampled"),
-            libraries_holding = sum(status == "holds"),
-            .groups = "drop") %>%
-  mutate(holds_everywhere = libraries_sampled > 0 &
-                            libraries_holding == libraries_sampled) %>%
-  arrange(as.integer(label))
-
-write.csv(lib_verdict, file = paste0(results_dir, "/canonical_identity_by_library.csv"),
-          row.names = FALSE)
-
-datatable(lib_verdict, rownames = FALSE)
+stage_holds = nrow(stage_row) == 1 && nrow(rep_row) == 1 &&
+              stage_row$n_reciprocal == stage_row$n_clusters
+stage_mixed = nrow(stage_row) == 1 && stage_row$n_reciprocal > 0 &&
+              stage_row$n_reciprocal < stage_row$n_clusters
 ```
 
-```{r, fig.width=8, fig.height=6}
-p_lib = ggplot(canon_lib,
-               aes(x = library, y = paste0(label, ". ", marker_set),
-                   fill = status)) +
-  geom_tile(color = "white") +
-  geom_text(aes(label = round(pct_markers)), size = 2.5) +
-  scale_fill_manual(values = c(holds = "#7fbf7b", fails = "#d6604d",
-                               `not sampled` = "grey90")) +
-  theme(axis.text = element_text(size = 7),
-        axis.text.x = element_text(angle = 30, hjust = 1)) +
-  xlab(NULL) + ylab(NULL) +
-  labs(fill = NULL)
+`r if (nrow(stage_row) == 0) "**This document cannot decide.** The stage comparison did not run." else if (stage_holds) paste0("**Do not split the atlas.** Every one of the ", stage_row$n_clusters, " comparable clusters finds itself across the stage boundary by its own markers, in both directions. Those clusters are the same populations in larval and in transformer cells. The claim holds whatever the larva-to-transformer contrast is made of, which is why it survives the confound between stage, collection date and batch. Report one integrated atlas and state the confound as a limitation the design cannot resolve.") else if (stage_mixed) paste0("**Integrate, but name the exceptions.** ", stage_row$n_reciprocal, " of ", stage_row$n_clusters, " comparable clusters find themselves across the stage boundary. The ", nrow(fails), " that do not are: ", paste(fails$cluster, collapse = ", "), ". Report the integrated atlas, name those clusters in the text, and either describe them per stage or merge them with whichever cluster they match instead.") else "**Report the stages separately.** No comparable cluster finds itself across the stage boundary by its own markers, so the integrated clustering groups cells the marker evidence does not support grouping."`
 
-p_lib
-ggsave(p_lib, file = paste0(results_dir, "/canonical_identity_by_library.png"),
-       width = 8, height = 6)
-```
-
-`r paste0(sum(lib_verdict$holds_everywhere), " of ", nrow(lib_verdict), " testable clusters express their assigned markers in every library in which they are sampled. Numbers in the tiles are the percentage of the assigned marker set expressed in that library.")`
-
-# 6. Summary
-
-```{r}
-summary_tbl = data.frame(
-  question = c(
-    "Methods. stage contrast exceeds the July replicate floor",
-    "Methods. clusters eligible for the discordance test",
-    "clusters with a curated marker set",
-    "assigned markers enriched in their own cluster",
-    "comparable across stages",
-    "identity holds in both stages",
-    "identity fails in at least one stage",
-    "present in one stage only",
-    "holds in every library sampled"),
-  answer = c(
-    if (nrow(lt_row) == 0) "not testable" else
-      if (stage_contrast_large) "yes, stage contrast exceeds the floor" else "no",
-    as.character(length(discordance$eligible)),
-    as.character(n_tested),
-    as.character(sum(canon_verdict$interpretable, na.rm = TRUE)),
-    as.character(n_comparable),
-    as.character(n_holds), as.character(n_fails), as.character(n_one_stage),
-    as.character(sum(lib_verdict$holds_everywhere))))
-
-datatable(summary_tbl, rownames = FALSE)
-```
-
-## The recommendation
-
-The atlas decision rests on the identity test alone. The stage contrast is
-reported separately, because it bears on whether to correct, not on whether to
-split.
-
-```{r}
-identity_holds = n_comparable > 0 && n_fails == 0
-identity_mixed = n_comparable > 0 && n_fails > 0 && n_fails < n_holds
-identity_fails = n_comparable > 0 && n_fails >= n_holds
-```
-
-`r if (n_comparable == 0) "**This document cannot decide.** No cluster has enough cells in both stages for the identity test to run, so neither presentation is supported over the other by this evidence." else if (identity_holds) "**Do not split the atlas.** Every cluster that can be compared expresses its canonical markers in larval and in transformer cells alike, so the clusters name the same cell types on both sides. That holds whatever the larva-to-transformer contrast is made of, which is why it survives the confound between stage, collection date and batch. Report one integrated atlas, and state the confound as a limitation rather than as something the analysis resolved." else if (identity_fails) "**Report the stages separately.** The curated markers do not hold across the stage boundary for most comparable clusters, so the integrated clustering asserts identities the markers do not support." else "**Integrate, but name the exceptions.** Most comparable clusters keep their identity across the stage boundary and a minority do not. Report the integrated atlas, name those clusters in the text, and either split them by stage or relabel them."`
-
-`r if (nrow(lt_row) == 0) "" else if (stage_contrast_large) "**Separately, on whether to correct.** The stage contrast is far larger than replicate libraries of the same stage produce, so an uncorrected integration would cluster largely by stage rather than by cell type. That justifies the correction as a methods choice. It says nothing about how much of the contrast is developmental and how much is technical, which this design cannot determine." else "**Separately, on whether to correct.** The stage contrast is no larger than replicate libraries of the same stage produce, so the correction is doing little work and an uncorrected integration would look much the same. Worth confirming the correction is not removing real signal, since there is little here for it to remove."`
+**Read the stage result against the replicate result, not against 100%.** Marker
+rankings shuffle between random halves of identical data, so some loss of
+correspondence is expected between any two groups of cells. The replicate
+comparison measures that loss with nothing but animal-to-animal variation
+driving it, and the stage comparison should be judged by how far it falls below
+that, not by its absolute value.
 
 ## What this document does not answer
 
-* Whether the **transformer libraries** should be merged with each other. That
-  is answered in `10_four_atlases.Rmd`.
-* Whether the stages should be **plotted** together. That is a question about
-  embedding, not identity.
-* Whether the discordance is technical or biological. It cannot be answered
-  with this design, because stage, collection date and library are one
-  variable. The identity test sidesteps the confound rather than resolving it.
+* **What the stage difference is made of.** Stage, collection date and technical
+  batch are one variable in this design and no analysis of this dataset can
+  separate them. This test does not attempt to; it asks whether the populations
+  correspond, not why they differ.
+* **Whether the cell type names are right.** Correspondence says cluster 8 is
+  the same population at both stages. It says nothing about what cluster 8 is.
+  That question needs the annotation, which is settled elsewhere.
+* **Independent evidence for the stage-associated expression patterns.** That
+  requires an external dataset or staining, not this dataset.
 
 # Session info
 
