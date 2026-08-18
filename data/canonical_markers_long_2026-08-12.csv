@@ -1,0 +1,79 @@
+CellTypeMarkerSet,symbol,loc_id,confidence,basis
+Endothelial cells,CAV1,CAV1,B,"Caveolin 1, endothelial. Unchanged from S1."
+Endothelial cells,NOSTRIN,LOC116938778,B,Nitric oxide synthase trafficker. Unchanged from S1.
+Endothelial cells,PALMD,PALMD,B,Palmdelphin. Unchanged from S1.
+Endothelial cells,SOX18,LOC116941541,A,Endothelial transcription factor. Unchanged from S1.
+Endothelial cells,SOX7,SOX7,A,Endothelial transcription factor. Unchanged from S1.
+Endothelial cells,VEGFR1,LOC116955055,A,FLT1. Unchanged from S1.
+Endothelial cells,VWF,VWF,A,von Willebrand factor. Unchanged from S1.
+Erythrocytes,globin-1,LOC116951579,A,"REPAIRED. S1 wrote GLOBIN1, which does not resolve."
+Erythrocytes,globin-2,LOC116951663,A,"REPAIRED. S1 wrote GLOBIN2, which does not resolve."
+Erythrocytes,globin-3,LOC116951566,A,"Unchanged from S1, resolved via its LOC."
+Erythrocytes,globin-5,LOC116951552,A,"REPAIRED. S1 wrote GLOBIN5, which does not resolve."
+Fibroblasts,COL1A1,LOC116938328,A,Collagen I. Unchanged from S1.
+Fibroblasts,LUM,LOC116942456,B,Lumican. Unchanged from S1.
+Fibroblasts,PDGFRA,LOC116939357,A,Unchanged from S1.
+Fibroblasts,POSTN,POSTN,B,Periostin. Unchanged from S1.
+Granulosa cells,FAM13A,LOC116940195,C,Unchanged from S1.
+Granulosa cells,FN1,LOC116943884,C,"Fibronectin, not granulosa specific. Unchanged from S1."
+Granulosa cells,FOXL2,LOC116946948,A,Core granulosa transcription factor. Unchanged from S1.
+Granulosa cells,FST,FST,B,Follistatin. Unchanged from S1.
+Granulosa cells,GLDC,GLDC,C,Unchanged from S1.
+Hemopoietic stem cells,KIT,LOC116943571,A,Unchanged from S1.
+Hemopoietic stem cells,PTPRC,LOC116944884,B,"CD45. Jawed vertebrate convention, see notes."
+Hemopoietic stem cells,RUNX1,LOC116952997,A,"ADDED. Core HSC transcription factor, zebrafish HSPC."
+Hemopoietic stem cells,MYB,MYB,A,"ADDED. Core HSC transcription factor, zebrafish HSPC."
+Hemopoietic stem cells,GATA2,GATA2,A,"ADDED. Core HSC transcription factor, zebrafish HSPC."
+Hemopoietic stem cells,TAL1,LOC116948939,A,ADDED. Also marks hemogenic endothelium.
+Hemopoietic stem cells,LMO2,LMO2,A,ADDED. Also marks hemogenic endothelium.
+Macrophages,CSF1R,LOC116955069,A,Unchanged from S1. S1 listed it twice as CD115/CSF1R.
+Macrophages,IRF8,LOC116955985,A,"ADDED. Macrophage versus neutrophil fate, zebrafish."
+Macrophages,MRC1,LOC116954690,B,ADDED. Mannose receptor.
+Macrophages,MARCO,LOC116942279,B,ADDED. Scavenger receptor.
+Macrophages,LGALS3,LOC116948342,B,"ADDED. Broadly myeloid, not macrophage exclusive."
+Macrophages,LYZ,LOC116952716,B,"ADDED. Broadly myeloid, not macrophage exclusive."
+Mesonephric cells,AQP3,LOC116941057,B,Unchanged from S1.
+Mesonephric cells,CUBN,CUBN,A,"Cubilin, proximal tubule. Unchanged from S1."
+Mesonephric cells,LRP2,LRP2,A,"Megalin, proximal tubule. Unchanged from S1."
+Mesonephric cells,MIOX,MIOX,B,Unchanged from S1.
+Mesonephric cells,PAX2,PAX2,A,Core nephric transcription factor. Unchanged from S1.
+Mesonephric cells,KCNJ1,KCNJ1,B,Unchanged from S1.
+Mesonephric cells,VIM,LOC116940419,C,"Vimentin, broadly mesenchymal. Unchanged from S1."
+Mesenephric podocytes,NPHS1,LOC116957426,A,"Nephrin, slit diaphragm. Unchanged from S1."
+Mesenephric podocytes,KIRREL1,LOC116957234,A,"Slit diaphragm. S1 called it NEPH1, same LOC."
+Mesenephric podocytes,Wt1,LOC116939910,A,"ADDED. Master podocyte TF. Case sensitive, not WT1."
+Mesenephric podocytes,MAFB,LOC116954108,A,"ADDED. Podocyte differentiation, WT1 target, zebrafish."
+Mesenephric podocytes,PTPRO,LOC116939849,B,"ADDED. GLEPP1, podocyte restricted."
+Mesenephric podocytes,LMX1B,LMX1B,B,ADDED. Podocyte transcription factor.
+Oocyte,DDX4,DDX4,A,Vasa. Unchanged from S1.
+Oocyte,LHX8,LOC116944806,B,Unchanged from S1.
+Oocyte,ZAR1L,ZAR1L,A,"REPAIRED. S1 wrote ZAR1, which does not resolve."
+Oocyte,ZP2,LOC116946906,A,Zona pellucida. Unchanged from S1.
+Oocyte,ZP3,LOC116937004,A,Zona pellucida. Unchanged from S1.
+Oocyte,ZP4,LOC116937006,A,Zona pellucida. Unchanged from S1.
+Oocyte,FIGLA,LOC116944404,B,ADDED. Oocyte specific transcription factor.
+Pre-granulosa cells,FOXL2,LOC116946948,A,Unchanged from S1.
+Pre-granulosa cells,LGR5,LGR5,B,Unchanged from S1.
+Pre-granulosa cells,NR5A1,LOC116944875,B,SF1. Unchanged from S1.
+Primordial germ cells,ALPL,ALPL,B,Unchanged from S1.
+Primordial germ cells,DDX4,DDX4,A,Vasa. Unchanged from S1.
+Primordial germ cells,PRDM14,PRDM14,B,Unchanged from S1.
+Primordial germ cells,PRDM1,LOC116952900,B,BLIMP1. Unchanged from S1.
+Germ cells (pan-germline),PIWIL1,PIWIL1,A,"Replaces the Migrating germ cells set, see notes."
+Germ cells (pan-germline),PIWIL2,LOC116940246,A,ADDED. piRNA pathway.
+Germ cells (pan-germline),DDX4,DDX4,A,"ADDED. Vasa, canonical pan-germline marker in fish."
+Germ cells (pan-germline),TDRD1,LOC116941448,A,"ADDED. Tudor domain, germ granule."
+Germ cells (pan-germline),TDRD7,TDRD7,B,ADDED. Germ granule.
+Germ cells (pan-germline),MAEL,MAEL,B,ADDED. Transposon silencing in germline.
+Germ cells (pan-germline),ASZ1,ASZ1,B,"ADDED. GASZ, piRNA pathway."
+Germ cells (pan-germline),RBM46,LOC116937137,B,ADDED. Named in the lamprey germline-specific gene set.
+Germ cells (pan-germline),NANOS1,NANOS1,B,ADDED. Weak. NANOS2 and NANOS3 absent from the annotation.
+Spermatocytes,BOLL,BOLL,A,Unchanged from S1.
+Spermatocytes,DMC1,DMC1,A,Meiotic recombinase. Unchanged from S1.
+Spermatocytes,SYCP3,SYCP3,A,Synaptonemal complex. Unchanged from S1.
+Spermatocytes,TEX11,TEX11,B,Unchanged from S1.
+Spermatocytes,TEX15,TEX15,B,Unchanged from S1.
+Spermatogonial stem cells,PAX7,PAX7,C,Unchanged from S1.
+Spermatogonial stem cells,GFRA1,LOC116947382,C,ADDED. Mammalian SSC self-renewal.
+Spermatogonial stem cells,RET,RET,C,ADDED. GDNF co-receptor.
+Spermatogonial stem cells,ZBTB16,LOC116948139,C,"ADDED. PLZF, mammalian SSC maintenance."
