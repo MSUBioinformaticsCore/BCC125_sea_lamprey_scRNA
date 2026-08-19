@@ -613,7 +613,7 @@ ggsave(p_stage_pre, file = paste0(results_dir, "/cluster_composition_by_stage.pn
 one_lib_pre = flag_one_library(comp_pre)
 ```
 
-`r if (nrow(one_lib_pre) == 0) "No cluster draws 90% or more of its cells from a single library." else paste0("**", nrow(one_lib_pre), " cluster(s) draw 90% or more of their cells from one library: ", paste(one_lib_pre$label, collapse = ", "), "`
+`r if (nrow(one_lib_pre) == 0) "No cluster draws 90% or more of its cells from a single library." else paste0("**", nrow(one_lib_pre), " cluster(s) draw 90% or more of their cells from one library: ", paste(one_lib_pre$label, collapse = ", "), ".** For those, any contrast against another cluster is also a contrast between animals, and where that library is a transformer it is a contrast between sexes as well. This has to be reported alongside their marker lists, since the design separates none of it.")`
 
 # Do the clusters contain the same populations at both stages?
 
@@ -884,8 +884,11 @@ measured. Ten independent draws, similarity matrices averaged before any verdict
 is read off them.
 
 ```{r}
-cell depth_tag = paste0("commonN", sum(core_n))
-comparison_file = paste0(Robject_out_dir, "/stage_correspondence_", cell depth_tag,
+# The depth scheme is part of the cache key, not just the tuning parameters, so
+# results computed under a different scheme are not silently reused.
+depth_tag = paste0("commonN", sum(core_n))
+
+comparison_file = paste0(Robject_out_dir, "/stage_correspondence_", depth_tag,
                          "_", n_top, "_lfc", lfc_thresh, "_", n_draws, "draws.Rds")
 
 if (file.exists(comparison_file)) {
@@ -1280,7 +1283,7 @@ datatable(markers_top100 %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 # Comparison with the curated markers
 
-Rows are marker sets, columns are clusters, colour is the significance of the
+Rows are marker sets, columns are clusters, color is the significance of the
 overlap with each cluster's top 100 markers.
 
 ```{r}
@@ -1359,7 +1362,7 @@ datatable(go_scores %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 # Marker expression across all clusters
 
-Every curated marker against every cluster, on uncorrected cell depth-normalised
+Every curated marker against every cluster, on uncorrected cell depth-normalized
 values. Dot size is the percentage of cells in the cluster expressing the gene,
 color is the mean log expression.
 
