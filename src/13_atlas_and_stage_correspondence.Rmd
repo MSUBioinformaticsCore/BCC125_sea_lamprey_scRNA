@@ -394,6 +394,103 @@ ggsave(p_batch, file = paste0(results_dir, "/tsne_by_library.png"),
        width = 9, height = 8)
 ```
 
+# Per-cluster QC
+
+Genes detected and total counts per cell, broken down by cluster. 
+
+```{r}
+# recomputed from the counts rather than carried from the per-sample objects,
+# so the numbers describe the shared gene universe that combined.sce holds and
+# that every downstream test uses
+qc_cell = scuttle::perCellQCMetrics(combined.sce)
+
+cluster_qc = data.frame(
+  cluster  = colData(merged.sce)$label,
+  detected = qc_cell$detected,
+  sum      = qc_cell$sum,
+  stringsAsFactors = FALSE)
+
+# mitochondrial percentage cannot be recomputed here, since combined.sce does
+# not record which genes are mitochondrial. It is taken from the per-sample
+# objects, but only if their concatenation lines up with combined.sce exactly.
+mito_src = try(do.call(rbind, lapply(all.sce, function(x) {
+  cd = as.data.frame(colData(x))
+  if (!"subsets_Mito_percent" %in% colnames(cd)) return(NULL)
+  data.frame(barcode = colnames(x), mito = cd$subsets_Mito_percent,
+             stringsAsFactors = FALSE)
+})), silent = TRUE)
+
+have_mito = !inherits(mito_src, "try-error") && !is.null(mito_src) &&
+            identical(mito_src$barcode, colnames(combined.sce))
+if (have_mito) cluster_qc$mito_percent = mito_src$mito
+```
+
+`r if (have_mito) "" else "**Mitochondrial percentage is not shown.** The per-sample objects either do not carry it or their cell order does not match the combined object, so it is omitted rather than aligned on an assumption."`
+
+```{r}
+qc_summary = cluster_qc %>%
+  group_by(cluster) %>%
+  summarize(n_cells        = dplyr::n(),
+            median_genes   = round(median(detected)),
+            median_counts  = round(median(sum)),
+            median_mito    = if (have_mito) round(median(mito_percent), 2) else NA_real_,
+            .groups = "drop") %>%
+  arrange(desc(median_genes))
+
+if (!have_mito) qc_summary$median_mito = NULL
+
+write.csv(qc_summary, file = paste0(results_dir, "/cluster_qc.csv"),
+          row.names = FALSE)
+
+datatable(qc_summary, rownames = FALSE,
+          options = list(dom = "t", paging = FALSE))
+```
+
+```{r, fig.width=9, fig.height=4}
+p_genes = ggplot(cluster_qc, aes(x = cluster, y = detected)) +
+  geom_violin(fill = "grey85", colour = NA, scale = "width") +
+  geom_boxplot(width = .15, outlier.size = .2) +
+  ylab("genes detected per cell") + xlab("cluster")
+
+p_genes
+ggsave(p_genes, file = paste0(results_dir, "/cluster_qc_genes.png"),
+       width = 9, height = 4)
+```
+
+```{r, fig.width=9, fig.height=4}
+p_counts = ggplot(cluster_qc, aes(x = cluster, y = sum)) +
+  geom_violin(fill = "grey85", colour = NA, scale = "width") +
+  geom_boxplot(width = .15, outlier.size = .2) +
+  scale_y_log10() +
+  ylab("counts per cell, log10") + xlab("cluster")
+
+p_counts
+ggsave(p_counts, file = paste0(results_dir, "/cluster_qc_counts.png"),
+       width = 9, height = 4)
+```
+
+```{r, fig.width=9, fig.height=4, eval=have_mito}
+p_mito = ggplot(cluster_qc, aes(x = cluster, y = mito_percent)) +
+  geom_violin(fill = "grey85", colour = NA, scale = "width") +
+  geom_boxplot(width = .15, outlier.size = .2) +
+  ylab("% mitochondrial reads") + xlab("cluster")
+
+p_mito
+ggsave(p_mito, file = paste0(results_dir, "/cluster_qc_mito.png"),
+       width = 9, height = 4)
+```
+
+```{r}
+# how far the extremes sit from the middle, in the units the plots are in.
+# with_ties = FALSE because two clusters on the same median would otherwise
+# return two rows each and the sentence below would render both values
+med_of_med = median(qc_summary$median_genes)
+top_qc     = qc_summary %>% slice_max(median_genes, n = 1, with_ties = FALSE)
+bot_qc     = qc_summary %>% slice_min(median_genes, n = 1, with_ties = FALSE)
+```
+
+`r paste0("Median genes per cell ranges from ", bot_qc$median_genes, " in cluster ", bot_qc$cluster, " to ", top_qc$median_genes, " in cluster ", top_qc$cluster, ", against a median across clusters of ", med_of_med, ". Some spread is expected, since cell types genuinely differ in how much RNA they carry, so this is a flag to follow up rather than a fault in itself. The way to tell the two apart is whether the cluster's markers hold up against genes matched for expression level; a cluster that scores high on unrelated genes too is being separated by depth.")`
+
 # Stage and library metadata
 
 ```{r}
