@@ -1134,10 +1134,16 @@ marker_ids = intersect(unique(known_markers$Gene),
                        rownames(combined.sce))
 
 bubble_mat = as.matrix(logcounts(combined.sce)[marker_ids, , drop = FALSE])
-bubble_lab = as.character(colData(merged.sce)$final_label)
 
-marker_bubble = purrr::map_dfr(sort(unique(as.integer(bubble_lab))), function(k) {
-  sub = bubble_mat[, bubble_lab == as.character(k), drop = FALSE]
+# labels come from cell_key, which is where final_label lives; merged.sce was
+# never given that column. And they are iterated as characters over the factor
+# levels rather than coerced to integer, because a split label such as
+# "12_larva" becomes NA under as.integer and would be dropped silently.
+bubble_lab = cell_key$final_label
+stopifnot(length(bubble_lab) == ncol(bubble_mat))
+
+marker_bubble = purrr::map_dfr(levels(final_label), function(k) {
+  sub = bubble_mat[, bubble_lab == k, drop = FALSE]
   data.frame(cluster        = k,
              Gene           = marker_ids,
              n_cells        = ncol(sub),
@@ -1148,32 +1154,68 @@ marker_bubble = purrr::map_dfr(sort(unique(as.integer(bubble_lab))), function(k)
   left_join(known_markers, by = "Gene",
             relationship = "many-to-many") %>%
   mutate(CellType = factor(CellType),
-         cluster  = factor(cluster, levels = sort(unique(cluster))))
+         cluster  = factor(cluster, levels = levels(final_label)))
+
+stopifnot(setequal(levels(droplevels(marker_bubble$cluster)), levels(final_label)))
 
 write.csv(marker_bubble,
           file = paste0(results_dir, "/canonical_marker_expression_per_cluster.csv"),
           row.names = FALSE)
 ```
 
-```{r, fig.width=11, fig.height=13}
-p_bubble = ggplot(marker_bubble,
-                  aes(x = cluster, y = WangGeneID,
-                      size = pct_expressing, colour = mean_logexpr)) +
-  geom_point() +
-  scale_colour_viridis_c() +
-  scale_size_continuous(range = c(0.4, 5)) +
-  facet_grid(CellType ~ ., scales = "free_y", space = "free_y") +
-  theme(strip.text.y = element_text(angle = 0, size = 6),
-        axis.text.y  = element_text(size = 6),
-        axis.text.x  = element_text(size = 8),
-        panel.grid.major = element_line(linewidth = .2)) +
-  xlab("cluster") + ylab(NULL) +
-  labs(size = "% expressing", colour = "mean logexpr")
+One figure per curated set, with a bar above each showing which cluster is
+which and a star on genes that are also data-derived markers of that cluster.
+Files are written to `marker_bubble/` as well as shown here.
 
-p_bubble
-ggsave(p_bubble, file = paste0(results_dir, "/canonical_marker_bubble_all_clusters.png"),
-       width = 11, height = 13)
+The table behind them is written to
+`canonical_marker_expression_per_cluster.csv`, one row per gene per cluster with
+the percentage expressing and the mean log expression, for anything that needs
+the numbers rather than the picture.
+
+```{r, fig.width=9, fig.height=4.5}
+plot.sce = combined.sce
+plot.sce$cluster  = factor(cell_key$final_label, levels = levels(final_label))
+plot.sce$CellType = plot.sce$cluster
+
+# the stars: significant and of a usable effect size, matching the working list
+bubble_markers = markers_all %>%
+  mutate(Gene = ifelse(is.na(WangGeneID), Gene, WangGeneID)) %>%
+  dplyr::select(Gene, CellType = cluster, FDR, summary.logFC = meanLogFC)
+
+nested = curated %>%
+  dplyr::select(CellTypeMarkerSet, Gene = loc_id) %>%
+  group_by(CellTypeMarkerSet) %>%
+  tidyr::nest() %>%
+  arrange(CellTypeMarkerSet)
+
+bubble_dir = paste0(results_dir, "/marker_bubble")
+if (!dir.exists(bubble_dir)) dir.create(bubble_dir, recursive = TRUE)
+
+for (i in seq_len(nrow(nested))) {
+  set_name = nested$CellTypeMarkerSet[i]
+  p = try(plot_marker_bubbles(
+    sce              = plot.sce,
+    markers          = bubble_markers,
+    gene_description = gene_description,
+    cell_type_name   = set_name,
+    cell_type_genes  = nested$data[[i]],
+    anno             = levels(final_label),
+    results_dir      = bubble_dir,
+    file_name        = gsub("[^A-Za-z0-9]+", "_", set_name)), silent = TRUE)
+
+  # printed explicitly. plot_marker_bubbles returns the patchwork rather than
+  # drawing it, and a return value inside a loop is never auto-printed, so
+  # without this the figures are written to disk and nothing appears here.
+  if (inherits(p, "try-error")) {
+    cat("\n\n**", set_name, "**: could not be drawn (",
+        trimws(conditionMessage(attr(p, "condition"))), ")\n\n", sep = "")
+  } else {
+    print(p)
+  }
+}
 ```
+
+`r paste0(nrow(nested), " sets drawn. Sets below three genes give a panel of one or two rows; the values are correct but such a set cannot show coherence, and ", sum(set_sizes$below_coherence_floor), " of them are that small.")`
 
 # Summary
 
