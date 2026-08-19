@@ -1120,44 +1120,60 @@ datatable(go_scores %>% mutate(across(where(is.numeric), ~signif(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
-# Bubble plots
+# Marker expression across all clusters
 
-One plot per curated marker set across every cluster, written to
-`marker_bubble/`. Cluster labels stand in for cell type names, since this
-document carries no annotation.
+Every curated marker against every cluster, on uncorrected depth-normalised
+values. Dot size is the percentage of cells in the cluster expressing the gene,
+color is the mean log expression.
 
-```{r, fig.show="hide"}
-plot.sce = combined.sce
-plot.sce$cluster  = final_label
-plot.sce$CellType = final_label
-final_anno = levels(final_label)
+The overlap heatmap measures whether a cell type's markers are *enriched* among a cluster's strongest data-derived markers, which is a different question: a gene can be enriched in a
+cluster relative to the others while barely being transcribed there.
 
-bubble_markers = markers_all %>%
-  mutate(Gene = ifelse(is.na(WangGeneID), Gene, WangGeneID)) %>%
-  dplyr::select(Gene, CellType = cluster, FDR, summary.logFC = meanLogFC)
+```{r}
+marker_ids = intersect(unique(known_markers$Gene),
+                       rownames(combined.sce))
 
-nested = curated %>%
-  dplyr::select(CellTypeMarkerSet, Gene = loc_id) %>%
-  group_by(CellTypeMarkerSet) %>% tidyr::nest()
+bubble_mat = as.matrix(logcounts(combined.sce)[marker_ids, , drop = FALSE])
+bubble_lab = as.character(colData(merged.sce)$final_label)
 
-bubble_dir = paste0(results_dir, "/marker_bubble")
-if (!dir.exists(bubble_dir)) dir.create(bubble_dir, recursive = TRUE)
+marker_bubble = purrr::map_dfr(sort(unique(as.integer(bubble_lab))), function(k) {
+  sub = bubble_mat[, bubble_lab == as.character(k), drop = FALSE]
+  data.frame(cluster        = k,
+             Gene           = marker_ids,
+             n_cells        = ncol(sub),
+             pct_expressing = 100 * rowMeans(sub > 0),
+             mean_logexpr   = rowMeans(sub),
+             stringsAsFactors = FALSE)
+}) %>%
+  left_join(known_markers, by = "Gene",
+            relationship = "many-to-many") %>%
+  mutate(CellType = factor(CellType),
+         cluster  = factor(cluster, levels = sort(unique(cluster))))
 
-for (i in seq_len(nrow(nested))) {
-  set_name = nested$CellTypeMarkerSet[i]
-  try(plot_marker_bubbles(
-    sce              = plot.sce,
-    markers          = bubble_markers,
-    gene_description = gene_description,
-    cell_type_name   = set_name,
-    cell_type_genes  = nested$data[[i]],
-    anno             = final_anno,
-    results_dir      = bubble_dir,
-    file_name        = gsub("[^A-Za-z0-9]+", "_", set_name)), silent = FALSE)
-}
+write.csv(marker_bubble,
+          file = paste0(results_dir, "/canonical_marker_expression_per_cluster.csv"),
+          row.names = FALSE)
 ```
 
-`r paste0(nrow(nested), " bubble plots written to marker_bubble/.")`
+```{r, fig.width=11, fig.height=13}
+p_bubble = ggplot(marker_bubble,
+                  aes(x = cluster, y = WangGeneID,
+                      size = pct_expressing, colour = mean_logexpr)) +
+  geom_point() +
+  scale_colour_viridis_c() +
+  scale_size_continuous(range = c(0.4, 5)) +
+  facet_grid(CellType ~ ., scales = "free_y", space = "free_y") +
+  theme(strip.text.y = element_text(angle = 0, size = 6),
+        axis.text.y  = element_text(size = 6),
+        axis.text.x  = element_text(size = 8),
+        panel.grid.major = element_line(linewidth = .2)) +
+  xlab("cluster") + ylab(NULL) +
+  labs(size = "% expressing", colour = "mean logexpr")
+
+p_bubble
+ggsave(p_bubble, file = paste0(results_dir, "/canonical_marker_bubble_all_clusters.png"),
+       width = 11, height = 13)
+```
 
 # Summary
 
