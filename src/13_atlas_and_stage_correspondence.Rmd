@@ -963,6 +963,34 @@ datatable(outcome_tbl %>%
 
 **The split halves differ by stage, collection date, technical batch, animal and, where one side is a single transformer library, by sex as well.** All of those vary together and this design separates none of them. The split records that the two halves are not one population by marker evidence. It does not say what makes them different.
 
+```{r}
+# Each split cluster becomes two labels; every other cluster keeps its own, so
+# the marker computation later runs over one factor covering all cells and the
+# split halves compete against the same background as everything else.
+final_label = cell_key$label
+for (cl in split_candidates) {
+  hit = cell_key$label == cl
+  final_label[hit] = paste0(cl, "_", cell_key$stage[hit])
+}
+
+# unsplit clusters first in their original order, then the split halves, so the
+# ordering is stable rather than alphabetical
+final_label = factor(final_label,
+                     levels = c(setdiff(all_clusters, split_candidates),
+                                sort(unique(final_label[grepl("_", final_label)]))))
+
+cell_key$final_label = as.character(final_label)
+
+stopifnot(!any(is.na(final_label)),
+          length(final_label) == nrow(cell_key))
+
+datatable(as.data.frame(table(label = final_label)) %>%
+            dplyr::rename(n_cells = Freq),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (length(split_candidates) == 0) "No cluster met the conditions, so the final labelling is the original clustering unchanged." else paste0("Cluster(s) ", paste(split_candidates, collapse = ", "), " were split, giving ", nlevels(final_label), " labels from ", length(all_clusters), " clusters.")`
+
 ## Composition of the final labelling
 
 ```{r}
