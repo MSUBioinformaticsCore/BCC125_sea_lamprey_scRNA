@@ -489,7 +489,7 @@ top_qc     = qc_summary %>% slice_max(median_genes, n = 1, with_ties = FALSE)
 bot_qc     = qc_summary %>% slice_min(median_genes, n = 1, with_ties = FALSE)
 ```
 
-`r paste0("Median genes per cell ranges from ", bot_qc$median_genes, " in cluster ", bot_qc$cluster, " to ", top_qc$median_genes, " in cluster ", top_qc$cluster, ", against a median across clusters of ", med_of_med, ". Some spread is expected, since cell types genuinely differ in how much RNA they carry, so this is a flag to follow up rather than a fault in itself. The way to tell the two apart is whether the cluster's markers hold up against genes matched for expression level; a cluster that scores high on unrelated genes too is being separated by depth.")`
+`r paste0("Median genes per cell ranges from ", bot_qc$median_genes, " in cluster ", bot_qc$cluster, " to ", top_qc$median_genes, " in cluster ", top_qc$cluster, ", against a median across clusters of ", med_of_med, ". Some spread is expected, since cell types genuinely differ in how much RNA they carry, so this is a flag to follow up rather than a fault in itself. The way to tell the two apart is whether the cluster's markers hold up against genes matched for expression level; a cluster that scores high on unrelated genes too is being separated by cell depth.")`
 
 # Stage and library metadata
 
@@ -595,12 +595,6 @@ write.csv(add_percents(comp_pre),
 datatable(comp_pre, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-```{r}
-datatable(add_percents(comp_pre) %>%
-            dplyr::select(label, Total, starts_with("pct_")),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
 ```{r, fig.width=6, fig.height=5}
 p_comp_pre = comp_bar(comp_pre, "By library")
 p_comp_pre
@@ -619,9 +613,9 @@ ggsave(p_stage_pre, file = paste0(results_dir, "/cluster_composition_by_stage.pn
 one_lib_pre = flag_one_library(comp_pre)
 ```
 
-`r if (nrow(one_lib_pre) == 0) "No cluster draws 90% or more of its cells from a single library." else paste0("**", nrow(one_lib_pre), " cluster(s) draw 90% or more of their cells from one library: ", paste(one_lib_pre$label, collapse = ", "), ".** For those, any contrast against another cluster is also a contrast between animals, and where that library is a transformer it is a contrast between sexes as well. This has to be reported alongside their marker lists, since the design separates none of it.")`
+`r if (nrow(one_lib_pre) == 0) "No cluster draws 90% or more of its cells from a single library." else paste0("**", nrow(one_lib_pre), " cluster(s) draw 90% or more of their cells from one library: ", paste(one_lib_pre$label, collapse = ", "), "`
 
-# Do the clusters name the same populations at both stages?
+# Do the clusters contain the same populations at both stages?
 
 Each cluster's markers are computed from larval cells alone and, separately,
 from transformer cells alone, on uncorrected values. If the genes that define
@@ -667,11 +661,7 @@ core_clusters = side_counts %>%
          transformer        >= min_cells_side) %>%
   pull(label)
 
-sex_clusters = side_counts %>%
-  filter(Female >= min_cells_side, Male >= min_cells_side) %>%
-  pull(label)
-
-# One depth per cluster, shared by the replicate and stage comparisons, so the
+# One cell depth per cluster, shared by the replicate and stage comparisons, so the
 # floor is measured on the same number of cells as the test it calibrates.
 # Subsampling each comparison to its own minimum would put them on different
 # cell counts and the margins would not be comparable.
@@ -679,30 +669,135 @@ core_n = side_counts %>%
   filter(label %in% core_clusters) %>%
   transmute(label, n = pmin(Undifferentiated.1, Undifferentiated.2, transformer))
 core_n = setNames(core_n$n, core_n$label)
-
-sex_n = side_counts %>%
-  filter(label %in% sex_clusters) %>%
-  transmute(label, n = pmin(Female, Male))
-sex_n = setNames(sex_n$n, sex_n$label)
 ```
 
-`r paste0(length(core_clusters), " of ", nrow(side_counts), " clusters have at least ", min_cells_side, " cells in Undifferentiated.1, in Undifferentiated.2 and in the transformers, and carry the replicate and stage comparisons. ", length(sex_clusters), " carry the sex comparison, which runs on its own cluster set and is not read against the floor.")`
+`r paste0(length(core_clusters), " of ", nrow(side_counts), " clusters have at least ", min_cells_side, " cells in Undifferentiated.1, in Undifferentiated.2 and in the transformers, so both comparisons run on that set.")`
 
 ## Correspondence
 
+### Procedure
+
+Two comparisons are run, each splitting the cells into two sides:
+
+* **replicate**, Undifferentiated.1 against Undifferentiated.2
+* **stage**, the two larval libraries pooled against the two transformer
+  libraries pooled
+
+Both run on the same cluster set at the same per-cluster cell depth, so their results
+are directly comparable and the replicate one serves as the reference for the
+other.
+
+For each comparison:
+
+1. **Set a cell depth for every cluster.** This is
+   `min(n in UND1, n in UND2, n in transformers)` for that cluster. The larval
+   pool is UND1 plus UND2 so it can never be the smallest and is left out of the
+   minimum.
+
+2. **Repeat the following 10 times.**
+
+    a. From side A, draw that many cells of every eligible cluster, without
+       replacement. Do the same from side B. Both sides therefore contribute an
+       identical number of cells for every cluster, so neither side has more
+       statistical power than the other.
+
+    b. Run `findMarkers` separately on each side's drawn cells, with the eligible
+       clusters as the grouping and **the same cluster set as the competing
+       background on both sides**. Settings are `test.type = "t"`,
+       `direction = "up"`, `pval.type = "some"`, and `lfc` set, so the ranking
+       reflects effect size rather than cell number. 
+
+    c. For each cluster on each side, **keep only genes below the FDR cutoff**,
+       order them by FDR then by p-value, and take the top `n_top` of those. The
+       order is imposed explicitly rather than taken from whatever order
+       `findMarkers` returns. The filter matters because `findMarkers` ranks
+       every gene rather than returning only the significant ones, so an
+       unfiltered top `n_top` would pad a weakly marked cluster's list with
+       whatever ranked next. A list is therefore as long as the cluster has
+       evidence for, up to `n_top`, and can be empty.
+
+    d. Build a square matrix over the eligible clusters. Entry `[i, j]` is the
+       percentage overlap between side A's list for cluster `i` and side B's list
+       for cluster `j`, using the **shorter of the two lists as the denominator**:
+       `100 * length(intersect(A_i, B_j)) / min(length(A_i), length(B_j))`. The
+       denominator is not always `n_top`, because a cluster with few significant
+       genes returns a shorter list.
+
+3. **Average the 10 matrices elementwise.** Everything below is read off the
+   averaged matrix, not off any single draw.
+
+4. **For each cluster `i`, read four numbers off that matrix.**
+
+    * `self_similarity` is the diagonal, `M[i, i]`: how far cluster `i`'s list on
+      one side agrees with its own list on the other.
+    * `best_forward` is the column of the largest value in row `i`: the cluster on
+      side B that side A's cluster `i` most resembles.
+    * `best_reverse` is the row of the largest value in column `i`: the cluster on
+      side A that side B's cluster `i` most resembles.
+    * `margin` is `M[i, i]` minus the largest off-diagonal value in row `i`: how
+      far the self-match beats its strongest competitor. Negative means some other
+      cluster matched better than the cluster matched itself.
+
+5. **A cluster corresponds when it is its own best match in both directions**,
+   that is `best_forward == i` and `best_reverse == i`. This is stricter than a
+   positive margin, since a diffuse cluster can be several clusters' best partner
+   without any of them choosing it back.
+
+6. **Classify each cluster** using the replicate result as the control:
+   a cluster whose replicate comparison is not reciprocal is **untestable at this
+   cell depth**, since it cannot find itself even between two animals of the same
+   stage; otherwise it **corresponds** or **fails** according to its stage result.
+
+### What equal cell depth does and does not equalize
+
+Step 2a gives both sides the same number of cells, so neither side is favored by
+sample size. It does not make the two sides equally informative, and three things
+still differ when one side is scarce.
+
+A side drawn from a pool barely larger than the draw returns nearly the same
+cells every time, so averaging over the 10 draws reduces its noise very little,
+while a side drawn from thousands averages over ten genuinely different subsets.
+
+Fewer cells also yield fewer significant genes, and since the lists are filtered
+to significant genes, that side's list is shorter and the denominator in step 2d
+shrinks with it. On a list of ten, one gene overlapping by chance moves the score
+by ten points, so a self-match can lose to a competitor on noise alone. The
+`sig_larva` and `sig_transformer` columns report the lengths directly, so a
+result resting on a short list is visible rather than inferred.
+
+And the cells themselves are differently representative. Where a cluster holds
+almost all of one side's cells, the draw takes the entire population including
+whatever sits at its boundary, while the other side contributes a random sample
+of a well-populated core. The cluster boundary was drawn by a clustering computed
+on all cells, so it was set largely by whichever side is larger.
+
+These are reasons a scarce side can fail without the two populations differing,
+which is why the untestable category exists and why failures are reported
+alongside their cell counts.
+
 ```{r}
 n_top      = 50
+fdr_cut    = 0.01
 lfc_thresh = params$lfc_thresh
 n_draws    = 10
 
-top_markers_for = function(marker_list, lab, n = n_top) {
+# Significant genes only, then the top n of those.
+#
+# findMarkers ranks every gene rather than returning only the significant ones,
+# so taking the top n without filtering would hand a cluster with eight real
+# markers a list of n padded with whatever ranked next. Only the significant
+# part can be expected to recur on the other side, so the padding measures the
+# stability of a weak tail. Filtering first means a list is as long as the
+# cluster has evidence for, and never longer.
+top_markers_for = function(marker_list, lab, n = n_top, fdr = fdr_cut) {
   if (is.null(marker_list) || !lab %in% names(marker_list)) return(character(0))
   df = marker_list[[lab]]
   if (nrow(df) == 0) return(character(0))
   # sorted explicitly rather than trusting the order findMarkers returns
   ord = if (all(c("FDR", "p.value") %in% colnames(df))) order(df$FDR, df$p.value)
         else if ("FDR" %in% colnames(df)) order(df$FDR) else seq_len(nrow(df))
-  rownames(df)[ord][seq_len(min(n, nrow(df)))]
+  keep = ord[which(df$FDR[ord] < fdr)]
+  rownames(df)[keep][seq_len(min(n, length(keep)))]
 }
 
 # Per-gene effect size: the mean across every pairwise comparison.
@@ -735,7 +830,13 @@ similarity_matrix = function(mA, mB, clusters) {
     sim[i, j] = if (d == 0) NA_real_ else
       100 * length(intersect(tA[[i]], tB[[j]])) / d
   }
-  sim
+  # lists are now significant genes only, so their length is the number of
+  # markers the cluster actually has at this cell depth, capped at n_top. It is both
+  # the diagnostic and the denominator above, and a cluster with none gives an
+  # empty list, which scores NA rather than zero.
+  list(sim   = sim,
+       sig_A = lengths(tA),
+       sig_B = lengths(tB))
 }
 
 run_comparison = function(sideA_libs, sideB_libs, clusters_keep, n_by_cluster,
@@ -749,11 +850,11 @@ run_comparison = function(sideA_libs, sideB_libs, clusters_keep, n_by_cluster,
   avail = sapply(clusters_keep, function(cl)
     min(sum(cell_key$label[inA] == cl), sum(cell_key$label[inB] == cl)))
   if (any(avail < n_by_cluster))
-    stop("requested depth exceeds available cells for cluster(s): ",
+    stop("requested cell depth exceeds available cells for cluster(s): ",
          paste(clusters_keep[avail < n_by_cluster], collapse = ", "))
 
   set.seed(seed)
-  acc = NULL
+  acc = NULL; acc_sigA = NULL; acc_sigB = NULL
   for (d in seq_len(n_draws)) {
     draw_side = function(idx) {
       unlist(lapply(clusters_keep, function(cl) {
@@ -763,12 +864,17 @@ run_comparison = function(sideA_libs, sideB_libs, clusters_keep, n_by_cluster,
         pool[sample(length(pool), n_by_cluster[[cl]])]
       }))
     }
-    sim = similarity_matrix(markers_for_cells(draw_side(inA), clusters_keep),
+    out = similarity_matrix(markers_for_cells(draw_side(inA), clusters_keep),
                             markers_for_cells(draw_side(inB), clusters_keep),
                             clusters_keep)
-    acc = if (is.null(acc)) sim else acc + sim
+    acc      = if (is.null(acc))      out$sim   else acc      + out$sim
+    acc_sigA = if (is.null(acc_sigA)) out$sig_A else acc_sigA + out$sig_A
+    acc_sigB = if (is.null(acc_sigB)) out$sig_B else acc_sigB + out$sig_B
   }
-  list(sim = acc / n_draws, n_by_cluster = n_by_cluster)
+  list(sim   = acc      / n_draws,
+       sig_A = acc_sigA / n_draws,
+       sig_B = acc_sigB / n_draws,
+       n_by_cluster = n_by_cluster)
 }
 ```
 
@@ -778,8 +884,8 @@ measured. Ten independent draws, similarity matrices averaged before any verdict
 is read off them.
 
 ```{r}
-depth_tag = paste0("commonN", sum(core_n))
-comparison_file = paste0(Robject_out_dir, "/stage_correspondence_", depth_tag,
+cell depth_tag = paste0("commonN", sum(core_n))
+comparison_file = paste0(Robject_out_dir, "/stage_correspondence_", cell depth_tag,
                          "_", n_top, "_lfc", lfc_thresh, "_", n_draws, "draws.Rds")
 
 if (file.exists(comparison_file)) {
@@ -789,8 +895,7 @@ if (file.exists(comparison_file)) {
     replicate = run_comparison("Undifferentiated.1", "Undifferentiated.2",
                                core_clusters, core_n),
     stage     = run_comparison(c("Undifferentiated.1", "Undifferentiated.2"),
-                               c("Female", "Male"), core_clusters, core_n),
-    sex       = run_comparison("Female", "Male", sex_clusters, sex_n))
+                               c("Female", "Male"), core_clusters, core_n))
   saveRDS(comparisons, file = comparison_file)
 }
 ```
@@ -819,9 +924,14 @@ reciprocal_from_sim = function(sim) {
 recip = bind_rows(lapply(names(comparisons), function(nm)
   reciprocal_from_sim(comparisons[[nm]]$sim) %>%
     mutate(comparison = nm,
-           n_per_side = comparisons[[nm]]$n_by_cluster[cluster]))) %>%
-  dplyr::select(comparison, cluster, n_per_side, self_similarity,
-                best_forward, best_reverse, reciprocal, margin)
+           n_per_side = comparisons[[nm]]$n_by_cluster[cluster],
+           # mean over draws of how many of each side's top n_top genes were
+           # actually significant. The lists are always n_top long; this is how
+           # much of each is real rather than ranking noise.
+           sig_A      = round(comparisons[[nm]]$sig_A[cluster], 1),
+           sig_B      = round(comparisons[[nm]]$sig_B[cluster], 1)))) %>%
+  dplyr::select(comparison, cluster, n_per_side, sig_A, sig_B,
+                self_similarity, best_forward, best_reverse, reciprocal, margin)
 
 write.csv(recip, file = paste0(results_dir, "/SuppTable_reciprocal_matches.csv"),
           row.names = FALSE)
@@ -833,13 +943,15 @@ datatable(recip %>% mutate(across(where(is.numeric), ~round(., 1))),
 ## Check that clusters correspond between two larval animals
 
 A cluster that does not correspond to itself **between two larval animals**, at
-the depth its stage test runs at, has not shown it is resolvable at that depth by
+the cell depth its stage test runs at, has not shown it is resolvable at that cell depth by
 any comparison. Its stage result carries no information, and calling it a failure
 would be reading noise as disagreement.
 
 ```{r}
 stage_tbl = recip %>% filter(comparison == "stage") %>%
-  dplyr::select(cluster, n_per_side, self_stage = self_similarity,
+  dplyr::select(cluster, n_per_side,
+                sig_larva = sig_A, sig_transformer = sig_B,
+                self_stage = self_similarity,
                 margin_stage = margin, reciprocal_stage = reciprocal,
                 best_forward, best_reverse)
 
@@ -852,7 +964,7 @@ outcome_tbl = stage_tbl %>%
   left_join(side_counts %>% dplyr::select(cluster = label, larva, transformer),
             by = "cluster") %>%
   mutate(outcome = dplyr::case_when(
-           !reciprocal_rep  ~ "untestable at this depth",
+           !reciprocal_rep  ~ "untestable at this cell depth",
            reciprocal_stage ~ "corresponds across stages",
            TRUE             ~ "fails across stages"),
          # which side's marker list broke the match
@@ -863,11 +975,12 @@ outcome_tbl = stage_tbl %>%
            best_forward == best_reverse                      ~ "both point to the same other cluster",
            TRUE                                              ~ "both fail, and disagree")) %>%
   dplyr::select(cluster, larva, transformer, n_per_side,
+                sig_larva, sig_transformer,
                 self_rep, margin_rep, reciprocal_rep,
                 self_stage, margin_stage, reciprocal_stage,
                 best_forward, best_reverse, direction, outcome) %>%
   arrange(match(outcome, c("fails across stages", "corresponds across stages",
-                           "untestable at this depth")),
+                           "untestable at this cell depth")),
           as.integer(cluster))
 
 write.csv(outcome_tbl, file = paste0(results_dir, "/SuppTable_stage_outcomes.csv"),
@@ -878,9 +991,33 @@ datatable(outcome_tbl %>% mutate(across(where(is.numeric), ~round(., 1))),
 ```
 
 ```{r}
+short_cut  = 0.6 * n_top
+short_side = outcome_tbl %>%
+  filter(outcome == "fails across stages",
+         pmin(sig_larva, sig_transformer) < short_cut) %>%
+  dplyr::select(cluster, larva, transformer, n_per_side,
+                sig_larva, sig_transformer, margin_stage)
+```
+
+**`sig_larva` and `sig_transformer` are how long each side's marker list actually
+was**, averaged over the draws, capped at `r n_top`.
+
+The lists hold significant genes only, so a cluster's list is as long as its
+evidence and no longer. That length is also the denominator in step 2d, which
+means a cluster with few markers is scored on a small number: on a list of ten,
+a single chance overlap is worth ten points. Read a high similarity on a short
+list with that in mind, and read a failure on a short list as underpowered
+rather than as disagreement.
+
+A cluster with no significant genes on one side scores `NA` rather than zero,
+which lands it in the untestable category rather than counting as a failure.
+
+`r if (nrow(short_side) == 0) paste0("Every failing cluster has at least ", round(short_cut), " significant genes on both sides, so none of the failures is explained by a mostly-noise list.") else paste0("**", nrow(short_side), " of the failing clusters have fewer than ", round(short_cut), " significant genes on one side: ", paste(short_side$cluster, collapse = ", "), ".** Read their results as underpowered rather than as disagreement, and compare the count against the cell count in the same row: few significant genes on the side with few cells is the expected pattern.")`
+
+```{r}
 n_corresponds = sum(outcome_tbl$outcome == "corresponds across stages")
 n_fails       = sum(outcome_tbl$outcome == "fails across stages")
-n_untestable  = sum(outcome_tbl$outcome == "untestable at this depth")
+n_untestable  = sum(outcome_tbl$outcome == "untestable at this cell depth")
 n_readable    = n_corresponds + n_fails
 
 rep_recip = sum(recip$reciprocal[recip$comparison == "replicate"])
@@ -889,9 +1026,9 @@ rep_n     = sum(recip$comparison == "replicate")
 fails_tbl = outcome_tbl %>% filter(outcome == "fails across stages")
 ```
 
-`r paste0("**", rep_recip, " of ", rep_n, " clusters correspond between the two larval animals**, at the same depths the stage test runs at. Across the stage boundary, ", n_corresponds, " of ", n_readable, " readable clusters correspond and ", n_fails, " do not.")`
+`r paste0("**", rep_recip, " of ", rep_n, " clusters correspond between the two larval animals**, at the same cell depths the stage test runs at. Across the stage boundary, ", n_corresponds, " of ", n_readable, " readable clusters correspond and ", n_fails, " do not.")`
 
-`r if (n_untestable == 0) "Every cluster is resolvable at its own depth, so no stage result is discarded for lack of cells." else paste0(n_untestable, " cluster(s) are untestable at this depth: ", paste(outcome_tbl$cluster[outcome_tbl$outcome == "untestable at this depth"], collapse = ", "), ". These fail to find themselves even between the two larval animals, so their stage result reflects cell numbers rather than stage. They are reported and not counted either way.")`
+`r if (n_untestable == 0) "Every cluster is resolvable at its own cell depth, so no stage result is discarded for lack of cells." else paste0(n_untestable, " cluster(s) are untestable at this cell depth: ", paste(outcome_tbl$cluster[outcome_tbl$outcome == "untestable at this cell depth"], collapse = ", "), ". These fail to find themselves even between the two larval animals, so their stage result reflects cell numbers rather than stage. They are reported and not counted either way.")`
 
 **Read the `direction` column before deciding what a failure means.** A cluster
 whose larval markers still pick it out while its transformer markers pick out
@@ -1001,12 +1138,6 @@ write.csv(add_percents(comp_post),
           row.names = FALSE)
 
 datatable(comp_post, rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
-```{r}
-datatable(add_percents(comp_post) %>%
-            dplyr::select(label, Total, starts_with("pct_")),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
 ```{r, fig.width=6, fig.height=5}
@@ -1228,7 +1359,7 @@ datatable(go_scores %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 # Marker expression across all clusters
 
-Every curated marker against every cluster, on uncorrected depth-normalised
+Every curated marker against every cluster, on uncorrected cell depth-normalised
 values. Dot size is the percentage of cells in the cluster expressing the gene,
 color is the mean log expression.
 
@@ -1269,59 +1400,29 @@ write.csv(marker_bubble,
           row.names = FALSE)
 ```
 
-One figure per curated set, with a bar above each showing which cluster is
-which and a star on genes that are also data-derived markers of that cluster.
-Files are written to `marker_bubble/` as well as shown here.
+```{r, fig.width=11, fig.height=13}
+p_bubble = ggplot(marker_bubble,
+                  aes(x = cluster, y = WangGeneID,
+                      size = pct_expressing, colour = mean_logexpr)) +
+  geom_point() +
+  scale_colour_viridis_c() +
+  scale_size_continuous(range = c(0.4, 5)) +
+  facet_grid(CellType ~ ., scales = "free_y", space = "free_y") +
+  theme(strip.text.y = element_text(angle = 0, size = 6),
+        axis.text.y  = element_text(size = 6),
+        axis.text.x  = element_text(size = 8),
+        panel.grid.major = element_line(linewidth = .2)) +
+  xlab("cluster") + ylab(NULL) +
+  labs(size = "% expressing", colour = "mean logexpr")
 
-The table behind them is written to
-`canonical_marker_expression_per_cluster.csv`, one row per gene per cluster with
-the percentage expressing and the mean log expression, for anything that needs
-the numbers rather than the picture.
-
-```{r, fig.width=9, fig.height=4.5}
-plot.sce = combined.sce
-plot.sce$cluster  = factor(cell_key$final_label, levels = levels(final_label))
-plot.sce$CellType = plot.sce$cluster
-
-# the stars: significant and of a usable effect size, matching the working list
-bubble_markers = markers_all %>%
-  mutate(Gene = ifelse(is.na(WangGeneID), Gene, WangGeneID)) %>%
-  dplyr::select(Gene, CellType = cluster, FDR, summary.logFC = meanLogFC)
-
-nested = curated %>%
-  dplyr::select(CellTypeMarkerSet, Gene = loc_id) %>%
-  group_by(CellTypeMarkerSet) %>%
-  tidyr::nest() %>%
-  arrange(CellTypeMarkerSet)
-
-bubble_dir = paste0(results_dir, "/marker_bubble")
-if (!dir.exists(bubble_dir)) dir.create(bubble_dir, recursive = TRUE)
-
-for (i in seq_len(nrow(nested))) {
-  set_name = nested$CellTypeMarkerSet[i]
-  p = try(plot_marker_bubbles(
-    sce              = plot.sce,
-    markers          = bubble_markers,
-    gene_description = gene_description,
-    cell_type_name   = set_name,
-    cell_type_genes  = nested$data[[i]],
-    anno             = levels(final_label),
-    results_dir      = bubble_dir,
-    file_name        = gsub("[^A-Za-z0-9]+", "_", set_name)), silent = TRUE)
-
-  # printed explicitly. plot_marker_bubbles returns the patchwork rather than
-  # drawing it, and a return value inside a loop is never auto-printed, so
-  # without this the figures are written to disk and nothing appears here.
-  if (inherits(p, "try-error")) {
-    cat("\n\n**", set_name, "**: could not be drawn (",
-        trimws(conditionMessage(attr(p, "condition"))), ")\n\n", sep = "")
-  } else {
-    print(p)
-  }
-}
+p_bubble
+ggsave(p_bubble, file = paste0(results_dir, "/canonical_marker_bubble_all_clusters.png"),
+       width = 11, height = 13)
 ```
 
-`r paste0(nrow(nested), " sets drawn. Sets below three genes give a panel of one or two rows; the values are correct but such a set cannot show coherence, and ", sum(set_sizes$below_coherence_floor), " of them are that small.")`
+The underlying values are written to
+`canonical_marker_expression_per_cluster.csv`, one row per gene per cluster with
+the percentage expressing and the mean log expression.
 
 # Summary
 
@@ -1333,7 +1434,7 @@ summary_tbl = data.frame(
                "correspond between two larval animals",
                "correspond across the stage boundary",
                "fail across the stage boundary",
-               "untestable at their own depth",
+               "untestable at their own cell depth",
                "clusters split",
                "clusters in the final labelling"),
   answer = c(format(ncol(merged.sce), big.mark = ","),
