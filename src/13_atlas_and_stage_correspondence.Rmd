@@ -864,25 +864,6 @@ datatable(outcome_tbl %>%
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (length(split_candidates) == 0) "No failing cluster meets all three conditions, so the labelling is unchanged and the rest of the document runs on the original clusters." else paste0("Cluster(s) ", paste(split_candidates, collapse = ", "), " meet all three conditions and are split.")`
-
-```{r}
-final_label = cell_key$label
-for (cl in split_candidates) {
-  hit = cell_key$label == cl
-  final_label[hit] = paste0(cl, "_", cell_key$stage[hit])
-}
-final_label = factor(final_label,
-                     levels = c(setdiff(all_clusters, split_candidates),
-                                sort(unique(final_label[grepl("_", final_label)]))))
-
-cell_key$final_label = as.character(final_label)
-
-datatable(as.data.frame(table(label = final_label)) %>%
-            dplyr::rename(n_cells = Freq),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
 **The split halves differ by stage, collection date, technical batch, animal and, where one side is a single transformer library, by sex as well.** All of those vary together and this design separates none of them. The split records that the two halves are not one population by marker evidence. It does not say what makes them different.
 
 ## Composition of the final labelling
