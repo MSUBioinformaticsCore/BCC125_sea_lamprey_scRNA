@@ -1292,9 +1292,22 @@ curated = read.csv(paste0(data_dir, "/", params$marker_file),
   mutate(loc_id = trimws(loc_id)) %>%
   filter(loc_id %in% rownames(combined.sce))
 
+# Exactly two columns. phyperOverlapSets renames the first two positionally and
+# ignores anything else, so an extra column would not error; it would change
+# what distinct() collapses. A gene carrying two labels would then appear twice,
+# inflating the set size that goes into the hypergeometric.
 known_markers = curated %>%
   dplyr::select(Gene = loc_id, CellType = CellTypeMarkerSet) %>%
   distinct()
+
+# the display label for each gene, kept separate for the reason above. The S1
+# symbol is used rather than the gene table's, so figures carry the name the
+# collaborators' sheet uses.
+marker_symbols = curated %>%
+  dplyr::select(Gene = loc_id, WangGeneID = symbol) %>%
+  distinct()
+
+stopifnot(!any(duplicated(marker_symbols$Gene)))
 
 marker_test_genes = markers_top100 %>%
   dplyr::select(Gene, cluster) %>%
@@ -1393,8 +1406,11 @@ marker_bubble = purrr::map_dfr(levels(final_label), function(k) {
 }) %>%
   left_join(known_markers, by = "Gene",
             relationship = "many-to-many") %>%
+  left_join(marker_symbols, by = "Gene") %>%
   mutate(CellType = factor(CellType),
          cluster  = factor(cluster, levels = levels(final_label)))
+
+stopifnot(!any(is.na(marker_bubble$WangGeneID)))
 
 stopifnot(setequal(levels(droplevels(marker_bubble$cluster)), levels(final_label)))
 
