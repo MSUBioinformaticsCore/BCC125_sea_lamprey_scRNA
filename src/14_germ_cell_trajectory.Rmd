@@ -14,6 +14,7 @@ params:
     lab: Weiming Li
     results_date: "20260813"
     germ_clusters: "5,12_transformer,15,16,17,18"
+    split_by_subcluster: "5"
     root_node: "PGC.migrating"
     min_library_cells: 50
     genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
@@ -53,6 +54,12 @@ Pseudotime over the germ cell clusters, following the structure of
 annotation from `13_atlas_and_stage_correspondence.Rmd` rather than on the
 sex-cell subclustering in `02`.
 
+**Run order.** `13` writes the labelling this document selects cells from. With
+`split_by_subcluster` set, `08_female_germ_cell_continuum.Rmd` must also have
+run, because the named clusters enter the trajectory as their subclusters and
+those come from `08`. Setting `split_by_subcluster` to an empty string removes
+that dependency and gives every cluster a single node.
+
 # What this document can and cannot establish
 
 **The ordering it produces cannot be shown to be developmental from this dataset.**
@@ -83,6 +90,9 @@ atlas_dir   = paste0(params$project_dir, "/results/", params$results_date,
                      "_atlas")
 results_dir = paste0(params$project_dir, "/results/", params$results_date,
                      "_germ_trajectory")
+# 08 writes the cluster 5 subclusters here; read when split_by_subcluster is set
+female_dir  = paste0(params$project_dir, "/results/", params$results_date,
+                     "_female_continuum")
 Robject_out_dir = paste0(results_dir, "/Robjects")
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 data_dir    = paste0(params$project_dir, "/data")
@@ -140,8 +150,63 @@ germ_key = cell_labels %>%
   filter(final_label %in% germ_clusters) %>%
   left_join(node_names, by = "final_label")
 
+# the node a cell would have if its cluster were not subdivided, kept so that
+# node ordering can follow node_names even after splitting
+germ_key$parent_node = germ_key$node
+```
+
+```{r}
+# Clusters named in split_by_subcluster contribute one node per subcluster
+# instead of one node overall, using the subclustering written by
+# 08_female_germ_cell_continuum.Rmd. A single cluster is a single MST vertex, so
+# without this the whole cluster collapses to one point and no ordering can be
+# recovered inside it.
+split_clusters = trimws(strsplit(as.character(params$split_by_subcluster), ",")[[1]])
+split_clusters = split_clusters[nzchar(split_clusters)]
+
+absent_split = setdiff(split_clusters, germ_clusters)
+if (length(absent_split) > 0)
+  stop("split_by_subcluster names cluster(s) not in germ_clusters: ",
+       paste(absent_split, collapse = ", "))
+
+if (length(split_clusters) > 0) {
+  sub_file = paste0(female_dir, "/female_subcluster_labels.csv")
+  if (!file.exists(sub_file))
+    stop("split_by_subcluster is set to '", params$split_by_subcluster,
+         "' but ", sub_file, " does not exist. Run ",
+         "08_female_germ_cell_continuum.Rmd first, or set ",
+         "split_by_subcluster to an empty string to use whole clusters.")
+
+  sub_lab = read.csv(sub_file, stringsAsFactors = FALSE)
+
+  for (cl in split_clusters) {
+    idx = which(germ_key$final_label == cl)
+    m   = sub_lab$subcluster[match(germ_key$barcode[idx], sub_lab$barcode)]
+    if (anyNA(m))
+      stop("cluster ", cl, ": ", sum(is.na(m)), " of ", length(idx),
+           " cells have no subcluster in ", sub_file,
+           ". The subclustering and the labelling are out of step; rerun ",
+           "08_female_germ_cell_continuum.Rmd against this labelling.")
+    germ_key$node[idx] = paste0(germ_key$node[idx], ".", m)
+  }
+}
+
+# levels follow node_names order, with subclusters grouped under their parent.
+# Built from parent_node rather than by prefix matching, since one node name can
+# be a prefix of another (Spermatocytes.I and Spermatocytes.II).
+node_levels = germ_key %>%
+  dplyr::distinct(parent_node, node) %>%
+  # sort subclusters numerically, so .10 follows .9 rather than .1
+  dplyr::mutate(sub_n = suppressWarnings(
+                  as.integer(sub("^.*\\.([0-9]+)$", "\\1", node))),
+                sub_n = ifelse(is.na(sub_n), 0L, sub_n)) %>%
+  dplyr::arrange(match(parent_node, node_names$node), sub_n, node) %>%
+  dplyr::pull(node)
+
 germ_cells = germ_key$barcode
 ```
+
+`r if (length(split_clusters) > 0) paste0("**Cluster(s) ", paste(split_clusters, collapse = ", "), " enter the trajectory as subclusters rather than as one node**, giving ", length(node_levels), " nodes in total. Two consequences follow. First, path length measured in nodes is not comparable between arms, because only some arms are subdivided; compare pseudotime, not node counts. Second, whatever the subclusters correspond to becomes trajectory structure: if they separate larval from transformer cells, as the leading diffusion component in cluster 5 does, then the MST will contain a larva-to-transformer edge inside that arm and the confound is now part of the trajectory rather than external to it. The subcluster composition table in 08 is what says which case this is.") else ""`
 
 ```{r}
 germ_tab = germ_key %>%
@@ -149,7 +214,7 @@ germ_tab = germ_key %>%
   tidyr::pivot_wider(id_cols = c(final_label, node, cell_type),
                      names_from = library, values_from = n, values_fill = 0) %>%
   mutate(Total = rowSums(across(any_of(library_meta$library)))) %>%
-  arrange(match(final_label, germ_clusters))
+  arrange(match(node, node_levels))
 
 write.csv(germ_tab, file = paste0(results_dir, "/germ_cluster_composition.csv"),
           row.names = FALSE)
@@ -213,8 +278,7 @@ if (file.exists(germ_file)) {
 # node labels attached by barcode, never by position
 node_lookup = setNames(germ_key$node, germ_key$barcode)
 colData(merged.germ.sce)$node = factor(node_lookup[colnames(merged.germ.sce)],
-                                       levels = node_names$node[
-                                         node_names$final_label %in% germ_clusters])
+                                       levels = node_levels)
 stopifnot(!any(is.na(colData(merged.germ.sce)$node)))
 
 colData(merged.germ.sce)$library =
@@ -354,8 +418,18 @@ if (!params$root_node %in% levels(colData(merged.germ.sce)$node))
 
 ```{r}
 pseudo_file = paste0(Robject_out_dir, "/germ.pseudo.Rds")
+sig_file    = paste0(Robject_out_dir, "/germ_node_signature.txt")
 
-if (file.exists(pseudo_file)) {
+# The ordering is built over the nodes, so it goes stale whenever the node
+# definition changes: turning split_by_subcluster on or off, or rerunning 08
+# with a different k. The cached object carries no record of which nodes made
+# it, so the signature is checked here rather than trusting the file's presence.
+node_sig = paste0(ncol(merged.germ.sce), "|", params$root_node, "|",
+                  paste(node_levels, collapse = ","))
+sig_ok   = file.exists(sig_file) &&
+           identical(readLines(sig_file, warn = FALSE)[1], node_sig)
+
+if (file.exists(pseudo_file) && sig_ok) {
   pseudo = readRDS(pseudo_file)
 } else {
   set.seed(1)
@@ -365,6 +439,7 @@ if (file.exists(pseudo_file)) {
                            outgroup   = FALSE,
                            start      = params$root_node)
   saveRDS(pseudo, file = pseudo_file)
+  writeLines(node_sig, sig_file)
 }
 
 common.pseudo = averagePseudotime(pseudo$ordering)
