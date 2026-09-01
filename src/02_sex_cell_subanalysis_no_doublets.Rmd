@@ -12,6 +12,7 @@ params:
     project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
+    no_dbl_date: "20260813"
 ---
 
 ```{r setup, include=FALSE}
@@ -66,9 +67,16 @@ doublet-filtered annotation in `01_all_cells_clustering_annotation_no_doublets.R
 before trusting any results below.
 
 ```{r}
-results_dir = paste0(params$project_dir, "/results/20260803_no_doublets")
+# Which doublet-filtered run this reads and writes. 20260813 uses the PIPseq
+# specified doublet rate; 20260803 used scDblFinder's 10x-calibrated default.
+# The two produce different cells, so a mismatch between this and the run that
+# produced merged.sce would compare objects built from different filters.
+results_dir = paste0(params$project_dir, "/results/",
+                     params$no_dbl_date, "_no_doublets")
 data_dir    = paste0(params$project_dir, "/data")
 ```
+
+`r paste0("Reading and writing ", basename(results_dir), ".")`
 
 ```{r, echo=FALSE}
 # load pre-computed objects for rendering; produced by the eval=FALSE chunks
