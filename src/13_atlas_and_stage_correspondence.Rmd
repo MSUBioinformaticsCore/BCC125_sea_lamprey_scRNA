@@ -300,10 +300,6 @@ datatable(stability %>% mutate(across(where(is.numeric), ~signif(., 4))),
           rownames = FALSE, options = list(dom = "t", ordering = FALSE))
 ```
 
-`r paste0("Read from ", stable_k_file, ", written by src/run_stable_k.R.")`
-
-`r if (!params$k %in% stability$k) paste0("**Note that k = ", params$k, " is not one of the values swept** (", paste(stability$k, collapse = ", "), "), so the dotted line below marks a k whose stability was not measured.") else ""`
-
 ```{r, fig.width=9, fig.height=3.5}
 p_stab = (ggplot(stability, aes(k, mean_ari)) +
             geom_line(colour = "darkgreen") + geom_point(size = 2) +
@@ -1608,24 +1604,6 @@ summary_tbl = data.frame(
 datatable(summary_tbl, rownames = FALSE, colnames = c("", "", ""),
           options = list(dom = "t", ordering = FALSE, paging = FALSE))
 ```
-
-**The control and stage-test rows are meant to be read against each other.** The
-control is the same test run between the two larval animals, collected on the
-same day, where nothing but animal-to-animal variation separates the two sides.
-The stage test is the same test run across the July-to-November boundary. The
-gap between the two is the result. The stage row alone is not, because it has no
-meaning without knowing what this test scores when nothing is wrong.
-
-**The denominators narrow down the table and each is a subset of the one above.**
-Of `r n_clusters` clusters, `r n_core` had enough cells on every side to be
-compared at all. Of those, `r n_readable` were readable, meaning their replicate
-comparison succeeded. The stage result is out of that `r n_readable`.
-
-Clusters drop out for two different reasons and neither is a failure. Too few
-cells on a side means the comparison never ran. Untestable at their own cell
-depth means it ran and the cluster could not find itself even between the two
-larval animals, so a stage result would report cell numbers rather than stage.
-Both are reported and counted neither way.
 
 ## What this document does not answer
 
