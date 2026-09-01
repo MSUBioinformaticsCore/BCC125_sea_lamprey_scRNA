@@ -12,8 +12,12 @@ params:
     project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
-    female_all_cluster: 8
+    results_date: "20260813"
+    female_cluster: "5"
     min_library_cells: 50
+    sub_k_range: "5,10,15,20,25,30,40,50"
+    sub_k: 0
+    sub_n_iterations: 10
 ---
 
 ```{r setup, include=FALSE}
@@ -26,12 +30,39 @@ cat("#### Lab:", params$lab, " \n")
 cat("#### Project:", params$project_name, " \n")
 ```
 
-Roughly 1,700 female germ cells survive doublet filtering, and
-`buildSNNGraph(k = 8)` followed by Louvain does not split them. No attempt is
-made here to force clusters by lowering `k` or raising resolution, since tuning
-until clusters appear would be selecting a parameter to obtain a desired result.
+This document analyses one cluster from the all-cells labelling, set by the
+`female_cluster` parameter. It arrives as a single cluster, and it contains
+cells from both stages: the larval cells come from the two libraries this
+project calls Undifferentiated. **The cluster's annotation applies to the
+cluster, not separately to each cell in it**, so nothing below should be read as
+having established that the larval cells are female. That is one of the things a
+trajectory through this cluster would be trying to show, and naming them female
+in advance assumes it.
 
-The document runs two analyses.
+Two different questions are asked of this cluster, and they have to be kept
+apart, because they have opposite requirements.
+
+**Is there a continuum?** This needs no clusters at all. The diffusion component
+analyses below treat the cells as one set, and nothing in them subclusters or
+tunes a resolution.
+
+**Can a trajectory be fitted?** This does need clusters, because a minimum
+spanning tree is a graph over nodes and one node has no edges. That is a
+mechanical requirement of the method and not evidence that discrete
+subpopulations exist. The subclustering section below exists to supply those
+nodes and nothing else. To keep it from becoming a search for a parameter that
+produces a desired answer, `k` is chosen by the same subsampling stability sweep
+used in `13_atlas_and_stage_correspondence.Rmd` rather than by lowering it until
+clusters appear, and what the subclusters correspond to is reported before
+anything is built on top of them.
+
+That last check is the one that matters, because the leading diffusion component
+in these cells separates larvae from transformers. If the subclusters recover
+that same split, then a trajectory over them orders cells along the stage and
+collection boundary, and no amount of trajectory machinery makes that ordering
+developmental.
+
+The document then runs two analyses.
 
 **Combined.** All female germ cells together. The leading diffusion component
 turns out to separate larval from transformer cells rather than describing a
@@ -50,9 +81,11 @@ the leading component and detection rate is unambiguously technical.
 nothing on its own. The technical and marker checks decide, not the existence of
 an ordering.
 
-Everything uses uncorrected, normalized log-expression. Running this on
+Every test uses uncorrected, normalized log-expression. Running these on
 `fastMNN` output would remove the library signal by construction and make the
-central checks meaningless.
+central checks meaningless. The single exception is the subclustering section,
+which uses corrected space because it is defining nodes rather than testing
+anything; it feeds no result back into the tests.
 
 ```{r}
 library(tidyverse)
@@ -63,25 +96,40 @@ library(batchelor)
 library(patchwork)
 library(readxl)
 library(destiny)
+library(BiocSingular)
 library(DT)
 source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir     = paste0(params$project_dir, "/results/20260804_female_continuum")
+object_dir      = paste0(params$project_dir, "/results/", params$results_date,
+                        "_no_doublets")
+atlas_dir       = paste0(params$project_dir, "/results/", params$results_date,
+                        "_atlas")
+results_dir     = paste0(params$project_dir, "/results/", params$results_date,
+                        "_female_continuum")
 Robject_out_dir = paste0(results_dir, "/Robjects")
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 data_dir        = paste0(params$project_dir, "/data")
 ```
 
 ```{r, echo=FALSE}
-Robject_dir    = paste0(params$project_dir, "/results/20260803_no_doublets")
-all.sex.sce    = readRDS(paste0(Robject_dir, "/no.support.sex.sce.Rds"))
-merged.sex.sce = readRDS(paste0(Robject_dir, "/no.support.merged.sex.sce.Rds"))
+# Cells come from the labelling written by 13_atlas_and_stage_correspondence.Rmd
+# rather than from 02's sex subanalysis. 02 selects its cells by cluster numbers
+# taken from the with-doublets annotation, which do not apply to this
+# clustering, and nothing here needs its subclustering: this document only ever
+# used it to look up which all-cells cluster a cell came from, which 13 now
+# states directly.
+label_file = paste0(atlas_dir, "/cell_cluster_labels.csv")
+if (!file.exists(label_file))
+  stop("missing ", label_file,
+       ". Run 13_atlas_and_stage_correspondence.Rmd first.")
 
-# all cells, uncorrected, for the ambient RNA control in section 1
-merged.all.sce   = readRDS(paste0(Robject_dir, "/merged.sce.Rds"))
-combined.all.sce = readRDS(paste0(Robject_dir, "/combined.sce.Rds"))
+cell_labels = read.csv(label_file, stringsAsFactors = FALSE)
+
+all.sce          = readRDS(paste0(object_dir, "/all.sce.Rds"))
+merged.all.sce   = readRDS(paste0(object_dir, "/merged.sce.Rds"))
+combined.all.sce = readRDS(paste0(object_dir, "/combined.sce.Rds"))
 ```
 
 ```{r}
@@ -98,27 +146,35 @@ lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
 # Identify the female germ cells
 
 ```{r}
-germ_meta = as.data.frame(colData(merged.sex.sce))
-germ_meta$barcode = rownames(germ_meta)
+if (!as.character(params$female_cluster) %in% cell_labels$final_label)
+  stop("cluster ", params$female_cluster, " is not in ", label_file,
+       ". Labels present: ",
+       paste(sort(unique(cell_labels$final_label)), collapse = ", "),
+       ". Cluster numbering changes on every rerun of the clustering, so set ",
+       "the female_cluster parameter from the current labelling.")
 
-if (!"all.scatter.clust" %in% colnames(germ_meta)) {
-  stop(paste0("all.scatter.clust is not present, so female germ cells cannot ",
-              "be identified by originating cluster. Check that ",
-              "02_sex_cell_subanalysis_no_doublets.Rmd was run to completion."))
-}
+female_cells = cell_labels$barcode[cell_labels$final_label ==
+                                     as.character(params$female_cluster)]
 
-germ_meta$origin_cluster = as.character(germ_meta$all.scatter.clust)
-female_cells = germ_meta$barcode[germ_meta$origin_cluster ==
-                                   as.character(params$female_all_cluster)]
+female_type = unique(cell_labels$cell_type[cell_labels$final_label ==
+                                             as.character(params$female_cluster)])
 ```
 
-`r length(female_cells)` cells come from all-cells cluster
-`r params$female_all_cluster`, the doublet-filtered oogonia and oocyte cluster.
+`r paste0(length(female_cells), " cells come from cluster ", params$female_cluster, ", annotated ", female_type, ".")`
+
+**The stage boundary cannot be resolved inside this dataset.** Larvae were
+collected in July and transformers in November, so any ordering recovered here
+is equally consistent with maturation and with a collection batch effect. That
+is a property of the design, not of the method, and no reordering or alternative
+trajectory algorithm changes it. The genes that come out are to be checked
+against independently collected bulk data, which is where the distinction can
+actually be made. Nothing below should be described as developmental time on
+the strength of this document alone.
 
 ## Libraries contributing, and which are dropped
 
 ```{r}
-fem_list_all = lapply(all.sex.sce, function(x) {
+fem_list_all = lapply(all.sce, function(x) {
   keep = intersect(colnames(x), female_cells)
   if (length(keep) == 0) return(NULL)
   x[, keep]
@@ -163,6 +219,235 @@ fem.sce$stage   = library_meta$stage[match(fem.sce$batch, library_meta$batch)]
 `r ncol(fem.sce)` cells retained across `r length(fem_list)` libraries.
 `multiBatchNorm` rescales for sequencing depth only and does not adjust
 expression structure, so library differences remain visible and testable.
+
+# Subclustering, to provide trajectory nodes
+
+Everything else in this document runs on `fem.sce`, the uncorrected object built
+above. This section is the one exception, and it is deliberate.
+
+Subclustering uncorrected cells drawn from several libraries recovers the
+libraries, because that is the largest source of variation between them. Nodes
+defined that way would make any trajectory over them a graph of libraries. So
+the subclusters are built in `fastMNN` corrected space, computed on the cells of
+this cluster alone rather than inherited from the all-cells correction, which is
+the same recipe `14_germ_cell_trajectory.Rmd` uses for the six germ clusters.
+The correction is therefore computed across every library that contributes cells
+to this cluster, the larval ones included, not across a female subset.
+
+This object is used **only** to define subcluster membership. The continuum
+tests further down stay on uncorrected expression, since correction would remove
+by construction the library signal those tests exist to measure.
+
+```{r}
+sub_file = paste0(Robject_out_dir, "/fem.corrected.sce.Rds")
+
+if (file.exists(sub_file)) {
+  fem.corrected.sce = readRDS(sub_file)
+} else {
+  fem_dec  = lapply(fem_list, modelGeneVar)
+  comb_dec = if (length(fem_dec) > 1) do.call(combineVar, fem_dec) else fem_dec[[1]]
+  comb_hvg = getTopHVGs(comb_dec, n = 5000)
+
+  set.seed(1)
+  fem.corrected.sce =
+    if (length(fem_list_norm) > 1) {
+      do.call(fastMNN, c(fem_list_norm,
+                         list(subset.row = comb_hvg, BSPARAM = RandomParam())))
+    } else {
+      # A single surviving library has nothing to correct between. PCA stands in
+      # for the corrected space and is given the same reducedDim name so that
+      # everything downstream is indifferent to which branch ran.
+      x = fem_list_norm[[1]]
+      if (!"logcounts" %in% assayNames(x)) x = logNormCounts(x)
+      set.seed(1)
+      x = runPCA(x, subset_row = comb_hvg, ncomponents = 50, BSPARAM = RandomParam())
+      reducedDim(x, "corrected") = reducedDim(x, "PCA")
+      # fastMNN would have added this; the metadata lookup below needs it either way
+      x$batch = names(fem_list_norm)[1]
+      x
+    }
+
+  set.seed(1)
+  fem.corrected.sce = runUMAP(fem.corrected.sce, dimred = "corrected")
+
+  saveRDS(fem.corrected.sce, file = sub_file)
+}
+
+# metadata attached by barcode, never by position
+fem.corrected.sce$library = library_meta$library[
+  match(as.character(fem.corrected.sce$batch), library_meta$batch)]
+fem.corrected.sce$stage = library_meta$stage[
+  match(as.character(fem.corrected.sce$batch), library_meta$batch)]
+stopifnot(!any(is.na(fem.corrected.sce$library)),
+          !any(is.na(fem.corrected.sce$stage)))
+```
+
+## Choosing k by stability
+
+`k` is not chosen by eye. Each value is scored by resampling 80% of the cells
+ten times, clustering each subsample independently, and taking the mean adjusted
+Rand index between every pair of runs on the cells they share. A `k` that
+produces the same partition from different subsamples is measuring something in
+the data; one whose partition changes with the sample is measuring the sample.
+
+Only values yielding at least two clusters are eligible, since a single node
+cannot carry a trajectory. Among those, the most reproducible wins. Setting the
+`sub_k` parameter to a non-zero value overrides the sweep.
+
+```{r}
+k_range = as.integer(trimws(strsplit(as.character(params$sub_k_range), ",")[[1]]))
+stopifnot(length(k_range) > 0, !any(is.na(k_range)))
+
+stab_file = paste0(Robject_out_dir, "/fem_stable_k.Rds")
+if (file.exists(stab_file)) {
+  sub_stab = readRDS(stab_file)
+} else {
+  sub_stab = find_stable_k(fem.corrected.sce, k_range = k_range,
+                           n_iterations = params$sub_n_iterations,
+                           use.dimred = "corrected")
+  saveRDS(sub_stab, file = stab_file)
+}
+
+stab_tab = dplyr::bind_rows(lapply(sub_stab, function(z)
+  data.frame(k               = z$k,
+             mean_n_clusters = round(z$mean_n_clusters, 2),
+             sd_n_clusters   = round(z$sd_n_clusters, 2),
+             mean_ari        = round(z$mean_ari, 3),
+             min_ari         = round(z$min_ari, 3))))
+
+eligible = stab_tab %>% dplyr::filter(mean_n_clusters >= 2, !is.na(mean_ari))
+
+chosen_k =
+  if (as.integer(params$sub_k) > 0) {
+    as.integer(params$sub_k)
+  } else if (nrow(eligible) > 0) {
+    eligible$k[which.max(eligible$mean_ari)]
+  } else {
+    NA_integer_
+  }
+
+if (is.na(chosen_k))
+  stop("no value of k in the sweep produced two or more clusters. The cells of ",
+       "this cluster do not subdivide reproducibly at any tested resolution, so ",
+       "there are no nodes to build a trajectory over. This is a result, not a ",
+       "failure: report it rather than lowering k until clusters appear.")
+
+write.csv(stab_tab, file = paste0(results_dir, "/female_subcluster_stability.csv"),
+          row.names = FALSE)
+
+datatable(stab_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, fig.width=7, fig.height=3.2}
+ggplot(stab_tab, aes(x = k)) +
+  geom_line(aes(y = mean_ari), linewidth = 1, colour = "#004488") +
+  geom_point(aes(y = mean_ari), size = 2, colour = "#004488") +
+  geom_vline(xintercept = chosen_k, linetype = "dashed", colour = "grey40") +
+  scale_x_continuous(breaks = stab_tab$k) +
+  labs(x = "k", y = "mean pairwise ARI",
+       title = paste0("Subclustering stability, chosen k = ", chosen_k)) +
+  theme_bw()
+
+ggsave(file = paste0(results_dir, "/female_subcluster_stability.png"),
+       width = 7, height = 3.2, dpi = 300)
+```
+
+`r paste0("**k = ", chosen_k, "**", if (as.integer(params$sub_k) > 0) " was set by the sub_k parameter, overriding the sweep." else paste0(" was chosen: it is the most reproducible value among those giving at least two clusters, at a mean pairwise ARI of ", stab_tab$mean_ari[stab_tab$k == chosen_k], "."))`
+
+## The subclusters
+
+```{r}
+set.seed(1)
+sub_snn = buildSNNGraph(fem.corrected.sce, k = chosen_k, use.dimred = "corrected")
+fem.corrected.sce$subcluster =
+  factor(igraph::cluster_louvain(sub_snn)$membership)
+
+n_sub = nlevels(fem.corrected.sce$subcluster)
+
+sub_cd = as.data.frame(colData(fem.corrected.sce)) %>%
+  tibble::rownames_to_column("barcode")
+```
+
+```{r}
+sub_by_lib = sub_cd %>%
+  dplyr::count(subcluster, library, name = "n") %>%
+  tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
+  dplyr::mutate(Total = rowSums(dplyr::across(-subcluster)))
+
+sub_by_stage = sub_cd %>%
+  dplyr::count(subcluster, stage, name = "n") %>%
+  tidyr::pivot_wider(names_from = stage, values_from = n, values_fill = 0)
+
+sub_tab = dplyr::left_join(sub_by_lib, sub_by_stage, by = "subcluster")
+
+# the largest share any single library takes of each subcluster
+lib_names = intersect(library_meta$library, colnames(sub_tab))
+sub_tab$max_one_library_pct =
+  round(100 * apply(sub_tab[, lib_names, drop = FALSE], 1, max) / sub_tab$Total, 1)
+
+write.csv(sub_tab, file = paste0(results_dir, "/female_subcluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(sub_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r}
+# label-invariant agreement between the subclustering and each covariate
+ari_stage = if (length(unique(sub_cd$stage)) > 1)
+  mclust::adjustedRandIndex(sub_cd$subcluster, sub_cd$stage) else NA_real_
+ari_library = if (length(unique(sub_cd$library)) > 1)
+  mclust::adjustedRandIndex(sub_cd$subcluster, sub_cd$library) else NA_real_
+
+sub_is_stage   = !is.na(ari_stage)   && ari_stage   >= 0.5
+sub_is_library = !is.na(ari_library) && ari_library >= 0.5
+
+agree_tab = data.frame(
+  compared_with = c("stage", "library"),
+  ARI           = round(c(ari_stage, ari_library), 3))
+
+datatable(agree_tab, rownames = FALSE, options = list(dom = "t"))
+```
+
+`r paste0("**", n_sub, " subclusters at k = ", chosen_k, ".** The adjusted Rand index compares the subclustering with a covariate as a partition of the same cells, so it is unaffected by how either is numbered: 1 means the two partitions are identical, 0 means they agree no better than chance.")`
+
+`r if (sub_is_stage) paste0("**The subclusters are the stage split** (ARI ", round(ari_stage, 3), " against stage). They separate larval from transformer cells, which in this dataset also means July from November and one collection batch from the other. A trajectory fitted over these nodes will order cells along that boundary, and that ordering has at least three readings this document cannot separate: a maturation gradient within an already committed female lineage; the transition out of the undifferentiated state, since the larval cells here come from animals this project calls undifferentiated and only the transformer side supports the oogonia annotation; and a four-month collection batch effect. Fit it if it is useful, but report it as the stage axis, do not describe the larval nodes as female on the strength of it, and settle the question against the independent bulk data rather than here.") else if (sub_is_library) paste0("**The subclusters track library rather than stage** (ARI ", round(ari_library, 3), " against library, ", round(ari_stage, 3), " against stage). Since the correction was computed across exactly these libraries, subclusters that still separate by library are the residual the correction failed to remove, not a biological subdivision. Nodes defined this way are a poor basis for a trajectory.") else paste0("**The subclusters do not correspond to stage or library** (ARI ", round(ari_stage, 3), " and ", round(ari_library, 3), " respectively). Whatever separates them is not the collection boundary and not a residual library effect, which is the necessary condition for a trajectory over these nodes to be worth fitting. It is not a sufficient one: what the subclusters actually are still has to be established from their markers.")`
+
+```{r, fig.width=13, fig.height=4}
+p_sub = plotReducedDim(fem.corrected.sce, dimred = "UMAP",
+                       colour_by = "subcluster", text_by = "subcluster") +
+  ggtitle("Subcluster")
+p_stg = plotReducedDim(fem.corrected.sce, dimred = "UMAP",
+                       colour_by = "stage") + ggtitle("Stage")
+p_lib = plotReducedDim(fem.corrected.sce, dimred = "UMAP",
+                       colour_by = "library") +
+  # scater maps colour_by to fill for shape-21 points in some versions and to
+  # colour in others; the unused scale is ignored
+  scale_colour_manual(values = lib_cols) +
+  scale_fill_manual(values = lib_cols) +
+  ggtitle("Library")
+
+p_sub + p_stg + p_lib
+
+ggsave(file = paste0(results_dir, "/female_subcluster_umap.png"),
+       width = 13, height = 4, dpi = 300)
+```
+
+```{r}
+# written out so a female-only trajectory document can consume these nodes
+# without repeating the clustering, and so the k that produced them is recorded
+sub_labels = sub_cd %>%
+  dplyr::select(barcode, batch, library, stage, subcluster)
+
+write.csv(sub_labels,
+          file = paste0(results_dir, "/female_subcluster_labels.csv"),
+          row.names = FALSE)
+saveRDS(setNames(as.character(sub_labels$subcluster), sub_labels$barcode),
+        file = paste0(Robject_out_dir, "/female_subcluster.Rds"))
+writeLines(as.character(chosen_k),
+           paste0(Robject_out_dir, "/female_subcluster_k_used.txt"))
+```
+
+`r paste0("Subcluster membership for ", nrow(sub_labels), " cells written to female_subcluster_labels.csv, and the k that produced it to female_subcluster_k_used.txt. Delete Robjects/fem.corrected.sce.Rds and Robjects/fem_stable_k.Rds to force both to be recomputed.")`
 
 # Markers
 
@@ -740,13 +1025,16 @@ stopifnot(identical(colnames(combined.all.sce), colnames(merged.all.sce)))
 
 zp_ids = resolved$gene_id[resolved$family == "ZP (oocyte)"]
 
+# cluster comes from the saved labelling, not from merged.all.sce$label, which
+# is the pre-split clustering and would disagree for any split cluster
 all_meta = data.frame(
   barcode = colnames(combined.all.sce),
-  cluster = as.character(colData(merged.all.sce)$label),
   batch   = as.character(colData(merged.all.sce)$batch),
   stringsAsFactors = FALSE) %>%
+  left_join(cell_labels %>% dplyr::select(barcode, cluster = final_label),
+            by = "barcode") %>%
   left_join(library_meta, by = "batch") %>%
-  mutate(compartment = ifelse(cluster == as.character(params$female_all_cluster),
+  mutate(compartment = ifelse(cluster == as.character(params$female_cluster),
                               "germ (cluster of interest)", "other clusters"))
 
 all_meta$zp_mean = colMeans(as.matrix(

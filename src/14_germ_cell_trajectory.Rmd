@@ -1,0 +1,646 @@
+---
+title: "14_germ_cell_trajectory"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    results_date: "20260813"
+    germ_clusters: "5,12_transformer,15,16,17,18"
+    root_node: "PGC.migrating"
+    min_library_cells: 50
+    genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(patchwork)
+library(RColorBrewer)
+library(readxl)
+library(batchelor)
+library(DT)
+library(TSCAN)
+library(rtracklayer)
+library(BiocSingular)
+library(ggraph)
+library(tidygraph)
+library(scatterpie)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+Pseudotime over the germ cell clusters, following the structure of
+`03_trajectory_analysis_no_doublets.Rmd` but built on the labelling and
+annotation from `13_atlas_and_stage_correspondence.Rmd` rather than on the
+sex-cell subclustering in `02`.
+
+# What this document can and cannot establish
+
+**The ordering it produces cannot be shown to be developmental from this dataset.**
+Larvae were collected in July and transformers in November, so stage, collection
+date, technical batch and animal vary together. A trajectory orders cells along
+the largest axis of variation in the data, and here that axis coincides with the
+library boundary. The ordering is therefore equally consistent with germ cell
+maturation and with the difference between collections.
+
+This is a property of the design, not of the algorithm. Running a different
+trajectory method recovers the same axis, so nothing below should be read as
+evidence that the axis is developmental.
+
+**What it is for.** The genes that change along the ordering are the output that
+matters. Those are to be tested against independently collected bulk RNA-seq,
+where the July-to-November batch does not exist, and that comparison is what can
+distinguish maturation from batch. This document produces the candidate list;
+it does not adjudicate it.
+
+The library composition of every node is reported below and drawn onto the
+trajectory graph, so the extent of the confound is visible on the figure rather
+than only in this paragraph.
+
+```{r}
+object_dir  = paste0(params$project_dir, "/results/", params$results_date,
+                     "_no_doublets")
+atlas_dir   = paste0(params$project_dir, "/results/", params$results_date,
+                     "_atlas")
+results_dir = paste0(params$project_dir, "/results/", params$results_date,
+                     "_germ_trajectory")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+data_dir    = paste0(params$project_dir, "/data")
+```
+
+```{r}
+label_file = paste0(atlas_dir, "/cell_cluster_labels.csv")
+if (!file.exists(label_file))
+  stop("missing ", label_file,
+       ". Run 13_atlas_and_stage_correspondence.Rmd first.")
+
+cell_labels = read.csv(label_file, stringsAsFactors = FALSE)
+all.sce     = readRDS(paste0(object_dir, "/all.sce.Rds"))
+
+library_meta = data.frame(
+  batch   = c("UND1_C00004336", "UND2_C00004362", "TF_C00004337", "TM_C00004374"),
+  library = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male"),
+  stage   = c("larva", "larva", "transformer", "transformer"),
+  stringsAsFactors = FALSE)
+
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+```
+
+# The germ cells
+
+```{r}
+germ_clusters = trimws(strsplit(params$germ_clusters, ",")[[1]])
+
+absent = setdiff(germ_clusters, cell_labels$final_label)
+if (length(absent) > 0)
+  stop("cluster(s) ", paste(absent, collapse = ", "), " are not in ", label_file,
+       ". Labels present: ",
+       paste(sort(unique(cell_labels$final_label)), collapse = ", "),
+       ". Cluster numbering changes on every rerun of the clustering, so set ",
+       "the germ_clusters parameter from the current labelling.")
+
+# short node names, since these become trajectory path names and the annotated
+# cell type names contain spaces and slashes
+node_names = tibble::tribble(
+  ~final_label,     ~node,
+  "5",              "Oogonia.Oocytes",
+  "12_transformer", "PGC.migrating",
+  "15",             "PGC.mitotic",
+  "16",             "Spermatocytes.I",
+  "17",             "Spermatocytes.II",
+  "18",             "MGC.migrating")
+
+unnamed = setdiff(germ_clusters, node_names$final_label)
+if (length(unnamed) > 0)
+  stop("no short node name for cluster(s): ", paste(unnamed, collapse = ", "),
+       ". Add them to node_names.")
+
+germ_key = cell_labels %>%
+  filter(final_label %in% germ_clusters) %>%
+  left_join(node_names, by = "final_label")
+
+germ_cells = germ_key$barcode
+```
+
+```{r}
+germ_tab = germ_key %>%
+  dplyr::count(final_label, node, cell_type, library, name = "n") %>%
+  tidyr::pivot_wider(id_cols = c(final_label, node, cell_type),
+                     names_from = library, values_from = n, values_fill = 0) %>%
+  mutate(Total = rowSums(across(any_of(library_meta$library)))) %>%
+  arrange(match(final_label, germ_clusters))
+
+write.csv(germ_tab, file = paste0(results_dir, "/germ_cluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(germ_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r}
+lib_totals = germ_key %>% dplyr::count(library, name = "n") %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  arrange(desc(n))
+
+top_lib = lib_totals$library[1]
+top_pct = lib_totals$pct[1]
+
+datatable(lib_totals, rownames = FALSE, options = list(dom = "t"))
+```
+
+`r paste0("**", format(length(germ_cells), big.mark = ","), " germ cells across ", length(germ_clusters), " clusters, of which ", top_pct, "% come from a single library, ", top_lib, ".** Read every result below against that number. A trajectory over a set this dominated by one animal will place that animal's cells along most of the ordering whether or not the ordering is developmental.")`
+
+# Build the germ cell object
+
+```{r}
+germ_file = paste0(Robject_out_dir, "/merged.germ.sce.Rds")
+
+if (file.exists(germ_file)) {
+  merged.germ.sce = readRDS(germ_file)
+} else {
+  germ_list_all = lapply(all.sce, function(x) {
+    keep = intersect(colnames(x), germ_cells)
+    if (length(keep) == 0) return(NULL)
+    x[, keep]
+  })
+  germ_list_all = germ_list_all[!vapply(germ_list_all, is.null, logical(1))]
+
+  n_by_lib = vapply(germ_list_all, ncol, integer(1))
+  keep_lib = names(n_by_lib)[n_by_lib >= params$min_library_cells]
+  germ_list = germ_list_all[keep_lib]
+
+  germ_dec  = lapply(germ_list, modelGeneVar)
+  universe  = Reduce(intersect, lapply(germ_list, rownames))
+  germ_list2 = lapply(germ_list, "[", i = universe,)
+  germ_dec2  = lapply(germ_dec,  "[", i = universe,)
+
+  normed    = do.call(multiBatchNorm, germ_list2)
+  comb_dec  = do.call(combineVar, germ_dec2)
+  comb_hvg  = getTopHVGs(comb_dec, n = 5000)
+
+  set.seed(1)
+  merged.germ.sce = do.call(fastMNN, c(normed,
+      list(subset.row = comb_hvg, BSPARAM = RandomParam())))
+
+  set.seed(1)
+  merged.germ.sce = runUMAP(merged.germ.sce, dimred = "corrected")
+  set.seed(1)
+  merged.germ.sce = runTSNE(merged.germ.sce, dimred = "corrected")
+
+  saveRDS(merged.germ.sce, file = germ_file)
+}
+
+# node labels attached by barcode, never by position
+node_lookup = setNames(germ_key$node, germ_key$barcode)
+colData(merged.germ.sce)$node = factor(node_lookup[colnames(merged.germ.sce)],
+                                       levels = node_names$node[
+                                         node_names$final_label %in% germ_clusters])
+stopifnot(!any(is.na(colData(merged.germ.sce)$node)))
+
+colData(merged.germ.sce)$library =
+  library_meta$library[match(as.character(colData(merged.germ.sce)$batch),
+                             library_meta$batch)]
+```
+
+```{r}
+# the uncorrected counts on the same cells, for the pseudotime gene test
+combined_file = paste0(Robject_out_dir, "/combined.germ.sce.Rds")
+
+if (file.exists(combined_file)) {
+  combined.germ.sce = readRDS(combined_file)
+} else {
+  germ_list = lapply(all.sce, function(x) {
+    keep = intersect(colnames(x), colnames(merged.germ.sce))
+    if (length(keep) == 0) return(NULL)
+    x[, keep]
+  })
+  germ_list = germ_list[!vapply(germ_list, is.null, logical(1))]
+  universe  = Reduce(intersect, lapply(germ_list, rownames))
+  germ_list = lapply(germ_list, function(x) {
+    x = x[universe, ]
+    colData(x)     = colData(x)[, "sample", drop = FALSE]
+    reducedDims(x) = list()
+    rowData(x)     = rowData(x)[, character(0)]
+    x
+  })
+  combined.germ.sce = do.call(cbind, germ_list)
+  saveRDS(combined.germ.sce, file = combined_file)
+}
+
+# align to the corrected object rather than assuming a shared order
+combined.germ.sce = combined.germ.sce[, colnames(merged.germ.sce)]
+stopifnot(identical(colnames(combined.germ.sce), colnames(merged.germ.sce)))
+
+colData(combined.germ.sce)$node = colData(merged.germ.sce)$node
+```
+
+`r paste0("The merged germ object holds ", format(ncol(merged.germ.sce), big.mark = ","), " cells over ", nlevels(colData(merged.germ.sce)$node), " nodes.")`
+
+```{r, fig.width=7, fig.height=6}
+p_nodes = plotTSNE(merged.germ.sce, colour_by = "node", point_size = .4) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+p_libs  = plotTSNE(merged.germ.sce, colour_by = "library", point_size = .4) +
+  scale_colour_manual(values = lib_cols) +
+  guides(color = guide_legend(override.aes = list(size = 4)))
+
+p_nodes / p_libs
+ggsave(file = paste0(results_dir, "/germ_tsne_node_and_library.png"),
+       width = 7, height = 10)
+```
+
+The two panels are the whole problem in one figure. If the node panel and the
+library panel show the same partition, the trajectory below is tracing the
+libraries.
+
+# Gene annotation
+
+```{r}
+gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE)
+
+gaf_file      = file.path(params$genome_dir,
+                          "GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf")
+go_names_file = file.path(params$genome_dir, "GOs_names.txt")
+have_go       = file.exists(gaf_file) && file.exists(go_names_file)
+```
+
+```{r, eval=have_go}
+gaf = read.delim(gaf_file, header = FALSE, comment = "!") %>%
+  filter(!grepl("NOT", V4)) %>%
+  dplyr::select(V3, V5) %>%
+  dplyr::rename(GOID = "V5", Gene = "V3") %>%
+  distinct()
+
+keep_go = gaf %>% group_by(GOID) %>% tally() %>%
+  filter(n > 10, n < 200) %>% pull(GOID)
+gaf = gaf %>% filter(GOID %in% keep_go)
+
+go_names = read.delim(go_names_file, header = FALSE)
+colnames(go_names) = c("GOID", "GOName")
+```
+
+# Trajectory
+
+## In t-SNE space
+
+```{r, fig.width=7, fig.height=6}
+set.seed(1)
+by.cluster = aggregateAcrossCells(merged.germ.sce,
+                                  ids = colData(merged.germ.sce)$node,
+                                  use.assay.type = "reconstructed")
+
+centroids = reducedDim(by.cluster, "corrected")
+mst       = createClusterMST(centroids, clusters = NULL)
+line.data = reportEdges(by.cluster, mst = mst, clusters = NULL,
+                        use.dimred = "TSNE")
+
+plotTSNE(merged.germ.sce, colour_by = "node", point_size = .5) +
+  geom_line(data = line.data,
+            mapping = aes(x = TSNE1, y = TSNE2, group = edge)) +
+  guides(color = guide_legend(override.aes = list(size = 5)))
+
+ggsave(file = paste0(results_dir, "/germ_trajectory_tsne.png"),
+       width = 7, height = 6)
+```
+
+## In batch-corrected expression space
+
+The trajectory is computed in corrected space, so this view is the one it was
+actually fitted in.
+
+```{r, fig.width=7, fig.height=6}
+line.data_corrected = reportEdges(by.cluster, mst = mst, clusters = NULL,
+                                  use.dimred = "corrected")
+
+plotReducedDim(merged.germ.sce, colour_by = "node", dimred = "corrected",
+               point_size = .4) +
+  geom_line(data = line.data_corrected,
+            mapping = aes(x = dim1, y = dim2, group = edge)) +
+  guides(color = guide_legend(override.aes = list(size = 5)))
+
+ggsave(file = paste0(results_dir, "/germ_trajectory_corrected.png"),
+       width = 7, height = 6)
+```
+
+## Pseudotime
+
+```{r}
+if (!params$root_node %in% levels(colData(merged.germ.sce)$node))
+  stop("root_node '", params$root_node, "' is not one of the nodes: ",
+       paste(levels(colData(merged.germ.sce)$node), collapse = ", "))
+```
+
+`r paste0("The ordering is rooted at **", params$root_node, "**, chosen as the least mature of the annotated germ populations. The root is an assumption, not a result: the same graph rooted elsewhere gives a different ordering, and nothing in the data fixes it.")`
+
+```{r}
+pseudo_file = paste0(Robject_out_dir, "/germ.pseudo.Rds")
+
+if (file.exists(pseudo_file)) {
+  pseudo = readRDS(pseudo_file)
+} else {
+  set.seed(1)
+  pseudo = quickPseudotime(merged.germ.sce,
+                           clusters   = colData(merged.germ.sce)$node,
+                           use.dimred = "corrected",
+                           outgroup   = FALSE,
+                           start      = params$root_node)
+  saveRDS(pseudo, file = pseudo_file)
+}
+
+common.pseudo = averagePseudotime(pseudo$ordering)
+merged.germ.sce$Pseudotime   = common.pseudo
+combined.germ.sce$Pseudotime = common.pseudo
+```
+
+## Trajectory node graph
+
+Pie charts give the library composition of each node, and the lower panel colors
+nodes by mean pseudotime. **These two panels together are the diagnostic.** If
+the pies change composition along the same direction pseudotime increases, the
+ordering and the library boundary are the same axis.
+
+```{r, fig.width=7, fig.height=7}
+meta_df = as.data.frame(colData(merged.germ.sce))
+
+sample_tally = meta_df %>%
+  mutate(node = as.factor(node), library = as.factor(library)) %>%
+  group_by(node, library, .drop = FALSE) %>%
+  tally()
+
+gr = as_tbl_graph(pseudo$mst)
+
+node_meta = sample_tally %>%
+  tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
+  ungroup()
+for (l in names(lib_cols)) if (!l %in% names(node_meta)) node_meta[[l]] = 0
+node_meta = node_meta %>%
+  mutate(totalCells = rowSums(across(all_of(names(lib_cols))))) %>%
+  dplyr::rename(name = "node") %>%
+  mutate(name = as.character(name))
+
+mean_pseudo = meta_df %>%
+  group_by(node) %>%
+  summarise(mean_pseudo = mean(Pseudotime, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::rename(name = "node") %>%
+  mutate(name = as.character(name))
+
+gr = gr %>%
+  activate(nodes) %>%
+  left_join(node_meta, by = "name") %>%
+  arrange(desc(totalCells)) %>%
+  left_join(mean_pseudo, by = "name")
+
+layout_data = create_layout(gr, layout = "stress")
+
+gr_plot =
+  ggraph(layout_data) +
+  geom_edge_link() +
+  geom_scatterpie(aes(x, y), cols = names(lib_cols), data = layout_data,
+                  colour = NA, pie_scale = 1.5) +
+  scale_fill_manual(name = "Library", values = lib_cols) +
+  guides(fill = guide_legend(keywidth = .8, keyheight = .8)) +
+  geom_node_text(aes(label = name), color = "black", size = 2.6) +
+  theme_void(base_size = 8) +
+  theme(legend.position = "left", legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        plot.tag = element_text(size = 12)) +
+  labs(tag = "A")
+
+gr_pseudo =
+  ggraph(layout_data) +
+  geom_edge_link() +
+  geom_node_point(aes(color = mean_pseudo), size = 9) +
+  scale_color_viridis_c(option = "viridis") +
+  geom_node_text(aes(label = name), vjust = .75, size = 2.6, color = "red") +
+  scale_x_continuous(expand = expansion(mult = 0.15)) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  theme_void(base_size = 8) +
+  theme(legend.position = "left", legend.title = element_text(size = 8),
+        legend.text = element_text(size = 8),
+        plot.tag = element_text(size = 12)) +
+  labs(tag = "B")
+
+(gr_plot + coord_fixed()) / (gr_pseudo + coord_fixed())
+
+ggsave(file = paste0(results_dir, "/germ_pseudo_mst.pdf"), width = 7, height = 7)
+```
+
+```{r}
+# how far pseudotime is explained by library alone
+pseudo_lib_r2 = summary(lm(meta_df$Pseudotime ~ meta_df$library))$r.squared
+pseudo_stage_r2 = {
+  st = library_meta$stage[match(meta_df$library, library_meta$library)]
+  if (dplyr::n_distinct(st) > 1)
+    summary(lm(meta_df$Pseudotime ~ st))$r.squared else NA_real_
+}
+```
+
+`r paste0("**Library of origin explains ", round(100 * pseudo_lib_r2, 1), "% of the variance in pseudotime", if (!is.na(pseudo_stage_r2)) paste0(", and stage alone explains ", round(100 * pseudo_stage_r2, 1), "%") else "", ".** This is the number to quote when describing the ordering. It does not say the ordering is wrong; it says how much of it is indistinguishable from the collection structure.")`
+
+# Pseudotime-associated genes
+
+Genes changing along each path, on **uncorrected** counts. All significant genes
+at FDR < 0.01 are written to `germ_pseudotime_de_genes.csv`.
+
+```{r}
+pseudo_mat  = pathStat(pseudo$ordering)
+test_pseudo = TSCAN::testPseudotime(combined.germ.sce, pseudotime = pseudo_mat)
+
+test_pseudo_filt = list()
+for (i in seq_along(test_pseudo)) {
+  test_pseudo[[i]]$SYMBOL = rownames(combined.germ.sce)
+  test_pseudo[[i]]$Path   = names(test_pseudo)[i]
+  test_pseudo_filt[[i]] = as.data.frame(test_pseudo[[i]]) %>%
+    filter(FDR < .01) %>%
+    arrange(desc(abs(logFC)))
+}
+
+symbol_description = gene_description %>% dplyr::rename(SYMBOL = "Gene")
+
+test_pseudo_filt_df = do.call(rbind, test_pseudo_filt) %>%
+  left_join(symbol_description, by = "SYMBOL") %>%
+  dplyr::select(Path, SYMBOL, WangGeneID, description, logFC, p.value, FDR)
+
+write.csv(test_pseudo_filt_df,
+          file = paste0(results_dir, "/germ_pseudotime_de_genes.csv"),
+          row.names = FALSE)
+
+test_pseudo_dir = test_pseudo_filt_df %>%
+  mutate(Path = ifelse(logFC > 0, paste0(Path, ".Upregulated"),
+                                  paste0(Path, ".Downregulated")))
+
+test_pseudo100 = test_pseudo_dir %>%
+  group_by(Path) %>%
+  slice_min(order_by = FDR, n = 100, with_ties = FALSE) %>%
+  ungroup() %>%
+  mutate(logFC = round(logFC, 2),
+         p.value = formatC(signif(p.value, 2)),
+         FDR = formatC(signif(FDR, 2)))
+
+datatable(test_pseudo100, filter = "top", rownames = FALSE)
+```
+
+`r paste0(format(nrow(test_pseudo_filt_df), big.mark = ","), " gene-path results at FDR < 0.01, over ", dplyr::n_distinct(test_pseudo_filt_df$Path), " path(s). **This list is the output to carry forward.** It is the input to the external bulk comparison, which is the only place the developmental question can be settled.")`
+
+## Trajectory heatmaps
+
+```{r}
+colData(combined.germ.sce)$pseudotime_TSCAN = averagePseudotime(pseudo$ordering)
+
+top_by_path = test_pseudo_dir %>%
+  group_by(Path) %>%
+  arrange(FDR, desc(abs(logFC)), .by_group = TRUE) %>%
+  slice_head(n = 25) %>%
+  summarise(SYMBOL = list(SYMBOL), .groups = "drop") %>%
+  tibble::deframe()
+
+p_list = list(); n_cells_list = list()
+for (p in names(top_by_path)) {
+  gene_ids = top_by_path[[p]]
+  gene_labels = gene_description %>% filter(Gene %in% gene_ids) %>% pull(WangGeneID)
+
+  path_name = sub("\\.(Upregulated|Downregulated)$", "", p)
+  cell_subset = as.data.frame(pseudo_mat) %>%
+    tibble::rownames_to_column("Barcode") %>%
+    filter(!is.na(.data[[path_name]])) %>%
+    pull(Barcode)
+
+  n_cells_list[[p]] = length(cell_subset)
+  p_list[[p]] = plot_pseudotime_heatmap(combined.germ.sce, gene_ids, gene_labels,
+                                        cell_subset,
+                                        pseudotime_column = "pseudotime_TSCAN")
+}
+
+make_heatmap_pair = function(p_list, path_name, n_cells_list = NULL) {
+  up_name = paste0(path_name, ".Upregulated")
+  down_name = paste0(path_name, ".Downregulated")
+  if (!all(c(up_name, down_name) %in% names(p_list))) return(NULL)
+
+  lab = function(nm) if (!is.null(n_cells_list))
+    paste0(nm, " (n=", n_cells_list[[nm]], ")") else nm
+  ttl = function(nm) ggplot() + labs(title = lab(nm)) + theme_void() +
+    theme(plot.title = element_text(size = 8, face = "bold"),
+          plot.margin = margin(t = 10))
+
+  col1 = (ttl(up_name)   / p_list[[up_name]][[1]]   / p_list[[up_name]][[2]]) +
+    plot_layout(heights = c(0.02, 0.025, 1))
+  col2 = (ttl(down_name) / p_list[[down_name]][[1]] / p_list[[down_name]][[2]]) +
+    plot_layout(heights = c(0.02, 0.025, 1))
+
+  (col1 | col2) + plot_layout(guides = "collect") &
+    theme(legend.position = "right")
+}
+
+path_names = unique(sub("\\.(Upregulated|Downregulated)$", "", names(p_list)))
+```
+
+```{r, fig.width=7, fig.height=4, results="asis"}
+for (pn in path_names) {
+  hp = make_heatmap_pair(p_list, pn, n_cells_list)
+  if (is.null(hp)) next
+  cat("\n\n### ", pn, " path\n\n", sep = "")
+  print(hp)
+  ggsave(hp, file = paste0(results_dir, "/", gsub("[^A-Za-z0-9]+", "_", pn),
+                           "_heatmaps.png"), width = 8, height = 5)
+}
+```
+
+# Gene ontology of pseudotime-associated genes
+
+```{r, eval=have_go}
+go_scores = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = test_pseudo_dir %>% dplyr::select(SYMBOL, Path),
+  background_n     = nrow(combined.germ.sce),
+  group2_label     = "Path",
+  ngroup2_label    = "nPathDEGenes",
+  overlaps_file    = paste0(results_dir, "/germ_pseudotime_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/germ_pseudotime_GO_pvalues.csv"),
+  pval_filter      = 0.05)
+
+datatable(go_scores %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+`r if (!have_go) paste0("**GO skipped.** The annotation files were not found under ", params$genome_dir, ".") else ""`
+
+# Export
+
+```{r}
+germ_out = data.frame(
+  barcode    = colnames(merged.germ.sce),
+  node       = as.character(colData(merged.germ.sce)$node),
+  library    = colData(merged.germ.sce)$library,
+  Pseudotime = merged.germ.sce$Pseudotime,
+  stringsAsFactors = FALSE) %>%
+  left_join(germ_key %>% dplyr::select(barcode, final_label, cell_type, stage),
+            by = "barcode")
+
+germ_tsne = reducedDim(merged.germ.sce, "TSNE")
+germ_out$germ.TSNE1 = germ_tsne[, 1]
+germ_out$germ.TSNE2 = germ_tsne[, 2]
+
+write.csv(germ_out, file = paste0(results_dir, "/germ_cell_pseudotime.csv"),
+          row.names = FALSE)
+
+datatable(head(germ_out, 50), rownames = FALSE)
+```
+
+# Summary
+
+```{r}
+summary_tbl = data.frame(
+  question = c("germ cells",
+               "clusters used",
+               "libraries contributing",
+               "share from the largest single library",
+               "root node",
+               "variance in pseudotime explained by library",
+               "genes at FDR < 0.01 along a path"),
+  answer = c(format(ncol(merged.germ.sce), big.mark = ","),
+             paste(germ_clusters, collapse = ", "),
+             as.character(dplyr::n_distinct(germ_out$library)),
+             paste0(top_pct, "% (", top_lib, ")"),
+             params$root_node,
+             paste0(round(100 * pseudo_lib_r2, 1), "%"),
+             format(nrow(test_pseudo_filt_df), big.mark = ",")))
+
+datatable(summary_tbl, rownames = FALSE,
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
+**What to do with this.** The gene list is a hypothesis about germ cell
+maturation that this dataset cannot test, because the maturation axis and the
+collection axis are the same axis here. Testing it means asking whether the same
+genes move the same way in an independently collected series, which is what the
+Yasmin comparison is for. Until that is done, the ordering should be described as
+a transcriptional axis across the germ cell clusters rather than as
+developmental time.
+
+# Session info
+
+```{r}
+sessionInfo()
+```
