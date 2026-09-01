@@ -588,16 +588,10 @@ names(list_of_dfs)  = gsub("\\(", "", names(list_of_dfs))
 file_names = gsub(" ", "_", names(list_of_dfs))
 file_names = paste0(file_names, "_germ_cell_clusters")
 
-# Cluster numbers are used here in place of the `broad` annotation, so both
-# sides of the join inside plot_marker_bubbles must be character. read.csv
-# silently reads a column of "1","2","3" back as integer, which will not join
-# against the factor held in colData. The original script avoided this only
-# because `broad` holds non-numeric strings.
-ct        = as.character(colData(merged.sex.sce)$label)
-ct_levels = as.character(sort(unique(as.numeric(ct))))
-
-combined.sex.sce$CellType = factor(ct, levels = ct_levels)
-combined.sex.sce$cluster  = factor(ct, levels = ct_levels)
+ct = colData(merged.sex.sce)$label
+combined.sex.sce$CellType = ct
+combined.sex.sce$CellType = factor(combined.sex.sce$CellType, levels = unique(ct))
+combined.sex.sce$cluster  = ct
 
 plot_dir = paste0(results_dir, "/germ_cell_bubble")
 if (!dir.exists(plot_dir)) dir.create(plot_dir)
@@ -609,8 +603,7 @@ scatter_markers_df_read = read.csv(
 markers = scatter_markers_df_read %>%
   dplyr::rename(CellType = "cluster") %>%
   select(WangGeneID, CellType, FDR, summary.logFC) %>%
-  dplyr::rename(Gene = "WangGeneID") %>%
-  mutate(CellType = as.character(CellType))
+  dplyr::rename(Gene = "WangGeneID")
 
 for (i in 1:length(list_of_dfs)) {
   plot_marker_bubbles(
@@ -619,7 +612,7 @@ for (i in 1:length(list_of_dfs)) {
     gene_description = gene_description,
     cell_type_name   = names(list_of_dfs)[i],
     cell_type_genes  = list_of_dfs[[i]],
-    anno             = ct_levels,
+    anno             = unique(ct),
     results_dir      = plot_dir,
     file_name        = file_names[i]
   )
