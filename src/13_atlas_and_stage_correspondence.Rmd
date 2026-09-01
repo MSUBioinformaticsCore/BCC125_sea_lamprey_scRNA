@@ -1124,12 +1124,83 @@ cell_key$final_label = as.character(final_label)
 stopifnot(!any(is.na(final_label)),
           length(final_label) == nrow(cell_key))
 
-datatable(as.data.frame(table(label = final_label)) %>%
-            dplyr::rename(n_cells = Freq),
+# Cell type names supplied by the Chung-Davidson lab for this labelling. Their
+# 12L and 12T are the larval and transformer halves of the split cluster.
+anno = tibble::tribble(
+  ~final_label,      ~cell_type,
+  "1",               "Fibroblasts",
+  "2",               "Mesonephric cells",
+  "3",               "Migrating erythrocytes",
+  "4",               "Granulosa cells",
+  "5",               "Oogonia/Oocytes",
+  "6",               "Endothelial cells",
+  "7",               "Podocytes",
+  "8",               "Erythrocytes",
+  "9",               "Migrating pre-granulosa cells",
+  "10",              "Hemopoietic stem cells",
+  "11",              "Migrating immune cells",
+  "12_larva",        "Mitotic macrophages",
+  "12_transformer",  "Migrating primordial germ cells",
+  "13",              "Macrophages",
+  "14",              "Migrating/mitotic pre-granulosa cells",
+  "15",              "Mitotic primordial germ cells",
+  "16",              "Spermatocytes I",
+  "17",              "Spermatocytes II",
+  "18",              "Migrating male germ cells")
+
+# These names describe this clustering at this k and this doublet rate. Louvain
+# renumbers on any rerun, so a mismatch here means the names no longer apply and
+# must be re-derived rather than reused.
+missing_anno = setdiff(levels(final_label), anno$final_label)
+extra_anno   = setdiff(anno$final_label, levels(final_label))
+if (length(missing_anno) > 0 || length(extra_anno) > 0)
+  stop("The annotation does not match this labelling. ",
+       if (length(missing_anno)) paste0("Unnamed label(s): ",
+           paste(missing_anno, collapse = ", "), ". ") else "",
+       if (length(extra_anno)) paste0("Named but absent: ",
+           paste(extra_anno, collapse = ", "), ". ") else "",
+       "Re-derive the annotation for this clustering before relabelling.")
+
+cell_key = cell_key %>% left_join(anno, by = "final_label")
+
+# The per-cell assignment, saved. Everything else this document writes is
+# aggregated by label, so without this the split labelling exists only for the
+# duration of the knit and nothing downstream can use it.
+cell_labels = cell_key %>%
+  dplyr::select(barcode, batch, library, stage,
+                cluster = label, final_label, cell_type)
+
+write.csv(cell_labels,
+          file = paste0(results_dir, "/cell_cluster_labels.csv"),
+          row.names = FALSE)
+
+# also as an Rds, so a downstream document can attach it to an SCE by name
+# without a read.csv and a match()
+saveRDS(setNames(cell_labels$final_label, cell_labels$barcode),
+        file = paste0(Robject_out_dir, "/final_label.Rds"))
+
+datatable(as.data.frame(table(final_label = final_label)) %>%
+            dplyr::rename(n_cells = Freq) %>%
+            mutate(final_label = as.character(final_label)) %>%
+            left_join(anno, by = "final_label") %>%
+            dplyr::select(final_label, cell_type, n_cells),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
 `r if (length(split_candidates) == 0) "No cluster met the conditions, so the final labelling is the original clustering unchanged." else paste0("Cluster(s) ", paste(split_candidates, collapse = ", "), " were split, giving ", nlevels(final_label), " labels from ", length(all_clusters), " clusters.")`
+
+The per-cell assignment is written to `cell_cluster_labels.csv`, one row per
+barcode with its library, stage, original cluster and final label, and as
+`Robjects/final_label.Rds`, a named vector for attaching to an object directly:
+
+```r
+labs <- readRDS("<results_dir>/Robjects/final_label.Rds")
+sce$final_label <- labs[colnames(sce)]
+```
+
+Note that `merged.sce` is saved before the split, so its own `label` column is
+the original clustering. Anything wanting the split labelling has to take it
+from one of these two files rather than from the object.
 
 ## Composition of the final labelling
 
