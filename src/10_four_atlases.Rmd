@@ -13,6 +13,7 @@ params:
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
     n_workers: 8
+    no_dbl_date: "20260803"
 ---
 
 ```{r setup, include=FALSE}
@@ -41,14 +42,24 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir     = paste0(params$project_dir, "/results/20260812_four_atlases")
+# doublet-filtered per-sample objects, produced by
+# 01_all_cells_clustering_annotation_no_doublets.Rmd. 20260803 used
+# scDblFinder's 10x-calibrated default rate; 20260813 uses the PIPseq T20 v4.0
+# specification (dbr 0.08, dbr_sd 0.02). This document reads all.sce and builds
+# its own clusterings, so it carries no annotation tied to a particular run and
+# either date can be used.
+no_dbl_dir = paste0(params$project_dir, "/results/", params$no_dbl_date,
+                    "_no_doublets")
+
+# results_dir carries no_dbl_date so the two runs write to separate places and,
+# more importantly, so the cached Robjects below are not reused across a change
+# of input. They are keyed on file existence alone, so a shared output directory
+# would silently serve the other run's atlases, markers and label transfers.
+results_dir     = paste0(params$project_dir, "/results/", params$no_dbl_date,
+                         "_four_atlases")
 Robject_out_dir = paste0(results_dir, "/Robjects")
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 data_dir        = paste0(params$project_dir, "/data")
-
-# doublet-filtered per-sample objects, produced by
-# 01_all_cells_clustering_annotation_no_doublets.Rmd
-no_dbl_dir = paste0(params$project_dir, "/results/20260803_no_doublets")
 ```
 
 ```{r}
