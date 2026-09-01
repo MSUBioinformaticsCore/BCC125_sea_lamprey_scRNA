@@ -208,9 +208,7 @@ datatable(df_all, rownames = FALSE, options = list(dom = "t"))
 
 # Merge
 
-Samples are merged with `fastMNN` and embedded with UMAP and t-SNE. Neither the
-correction nor the embedding depends on `k`, so this step is done once and reused
-across any choice of `k` in the next two sections.
+Samples are merged with `fastMNN` and embedded with UMAP and t-SNE. 
 
 ```{r}
 if (build_mnn) {
@@ -326,7 +324,7 @@ the peak should not be read as the biologically correct resolution.
 
 # Cluster
 
-The shared nearest neighbour graph is built on the corrected space at
+The shared nearest neighbor graph is built on the corrected space at
 `k` = `r params$k`, and communities are found with Louvain.
 
 ```{r}
@@ -364,7 +362,7 @@ if (build_combined) {
 stopifnot(identical(colnames(combined.sce), colnames(merged.sce)))
 ```
 
-`r paste0("The atlas holds ", format(ncol(merged.sce), big.mark = ","), " cells in ", nlevels(colData(merged.sce)$label), " clusters. Cluster numbering is an output of the clustering and does not correspond to any other run's numbering.")`
+`r paste0("The atlas holds ", format(ncol(merged.sce), big.mark = ","), " cells in ", nlevels(colData(merged.sce)$label), " clusters.")`
 
 ```{r, fig.width=6, fig.height=6}
 plotTSNE(merged.sce, colour_by = "label", text_by = "label",
@@ -375,8 +373,7 @@ ggsave(file = paste0(results_dir, "/all_cells_tsne.png"), width = 6, height = 6)
 ```
 
 Each library against the full embedding. The grey layer is all cells, so the
-panels share one coordinate frame; subsetting the object per panel would give
-each its own axis limits and make the positions incomparable.
+panels share one coordinate frame.
 
 ```{r, fig.width=9, fig.height=8}
 tsne_df = data.frame(reducedDim(merged.sce, "TSNE"))
@@ -489,7 +486,7 @@ top_qc     = qc_summary %>% slice_max(median_genes, n = 1, with_ties = FALSE)
 bot_qc     = qc_summary %>% slice_min(median_genes, n = 1, with_ties = FALSE)
 ```
 
-`r paste0("Median genes per cell ranges from ", bot_qc$median_genes, " in cluster ", bot_qc$cluster, " to ", top_qc$median_genes, " in cluster ", top_qc$cluster, ", against a median across clusters of ", med_of_med, ". Some spread is expected, since cell types genuinely differ in how much RNA they carry, so this is a flag to follow up rather than a fault in itself. The way to tell the two apart is whether the cluster's markers hold up against genes matched for expression level; a cluster that scores high on unrelated genes too is being separated by cell depth.")`
+`r paste0("Median genes per cell ranges from ", bot_qc$median_genes, " in cluster ", bot_qc$cluster, " to ", top_qc$median_genes, " in cluster ", top_qc$cluster, ", against a median across clusters of ", med_of_med, ". Some spread is expected, since cell types genuinely differ in how much RNA they carry.")`
 
 # Stage and library metadata
 
@@ -613,7 +610,7 @@ ggsave(p_stage_pre, file = paste0(results_dir, "/cluster_composition_by_stage.pn
 one_lib_pre = flag_one_library(comp_pre)
 ```
 
-`r if (nrow(one_lib_pre) == 0) "No cluster draws 90% or more of its cells from a single library." else paste0("**", nrow(one_lib_pre), " cluster(s) draw 90% or more of their cells from one library: ", paste(one_lib_pre$label, collapse = ", "), ".** For those, any contrast against another cluster is also a contrast between animals, and where that library is a transformer it is a contrast between sexes as well. This has to be reported alongside their marker lists, since the design separates none of it.")`
+`r if (nrow(one_lib_pre) == 0) "No cluster draws 90% or more of its cells from a single library." else paste0("**", nrow(one_lib_pre), " cluster(s) draw 90% or more of their cells from one library: ", paste(one_lib_pre$label, collapse = ", "), ".** For those, any contrast against another cluster is also a contrast between animals, and where that library is a transformer it is a contrast between sexes as well.")`
 
 # Do the clusters contain the same populations at both stages?
 
@@ -1244,22 +1241,12 @@ new_flags    = setdiff(one_lib_post$label, one_lib_pre$label)
 # Cluster marker genes
 
 Markers for every cluster of the final labeling, computed on uncorrected
-counts with library blocked. The split halves are tested against the same
-competing set as every other cluster and against each other, so the lists are
-comparable across the whole atlas.
+counts with library blocked. 
 
 **No effect size threshold is applied to the test.** `findMarkers` is run without
 `lfc`, so the null is that the log fold change is zero and the saved result is
 complete. Effect size is applied afterwards, as a filter on `meanLogFC`, where a
 working list is needed.
-
-That is deliberate but it is not the same test as `lfc = 1`. With `lfc` set, the
-null becomes "the log fold change is no greater than 1" and the p-value answers
-that question directly. Filtering afterwards asks a weaker pair of questions,
-whether the change is distinguishable from zero and separately whether it is
-large. Both are defensible; only the first is a claim that the effect exceeds
-the threshold. Anything reported as significantly greater than `r lfc_thresh`
-should be recomputed with `lfc` set rather than taken from here.
 
 ```{r}
 # no lfc in the call, so the cached object is not interchangeable with one
@@ -1298,12 +1285,7 @@ datatable(marker_counts, rownames = FALSE,
 
 `r paste0("The gap between the two columns is the point of the effect size filter: FDR alone gives a median of ", format(round(median(marker_counts$n_FDR)), big.mark = ","), " genes per cluster, and requiring a mean log fold change of at least ", lfc_thresh, " leaves a median of ", format(round(median(marker_counts$n_FDR_and_lfc)), big.mark = ","), ".")`
 
-`r if (all(marker_counts$n_FDR_and_lfc > 0)) "Every cluster has at least one marker passing both." else paste0("**Cluster(s) ", paste(marker_counts$cluster[marker_counts$n_FDR_and_lfc == 0], collapse = ", "), " have no gene passing both FDR < 0.01 and a mean log fold change of ", lfc_thresh, ".** Such a cluster is not distinguishable from the rest of the atlas at this effect size, and it will be absent from the overlap and ontology results below rather than appearing as an empty column. For a split half this is a direct argument that the split was not warranted; for an original cluster it says the cluster has no profile of its own once the others compete. Its genes are still in the unfiltered file, so the cutoff can be relaxed and the consequence seen.")`
-
-Two files are written. The unfiltered one holds every gene tested against every
-cluster, with no significance or effect size cutoff, so a gene absent from the
-significant list can still be looked up rather than assumed untested. The
-filtered one is the working list used everywhere below.
+`r if (all(marker_counts$n_FDR_and_lfc > 0)) "Every cluster has at least one marker passing both." else paste0("**Cluster(s) ", paste(marker_counts$cluster[marker_counts$n_FDR_and_lfc == 0], collapse = ", "), " have no gene passing both FDR < 0.01 and a mean log fold change of ", lfc_thresh, ".** Such a cluster is not distinguishable from the rest of the atlas at this effect size, and it will be absent from the overlap and ontology results below rather than appearing as an empty column. For a split half this is a direct argument that the split was not warranted; for an original cluster it says the cluster has no profile of its own once the others compete. Its genes are still in the unfiltered file, so the cutoff can be relaxed and the consequence seen.")` 
 
 ```{r}
 # built once without a cutoff; the filtered table is derived from it, so the two
@@ -1544,18 +1526,6 @@ write.csv(anno_tbl, file = paste0(results_dir, "/cell_type_annotation.csv"),
 
 datatable(anno_tbl, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
-
-Two cautions travel with this table.
-
-The names apply to **this** clustering, at this `k` and this doublet rate.
-Louvain renumbers on every rerun, so a name is a statement about a position in
-one particular labelling and not a durable identifier. The guard beside the
-annotation halts the knit rather than relabel the wrong cells if the two stop
-matching.
-
-A name describes a **cluster**, not separately each cell in it. That matters
-most for clusters holding cells from both stages, where the annotation may fit
-one stage's cells and not the other's. `r if (exists("split_candidates") && length(split_candidates) > 0) paste0("It matters most of all for the split cluster(s), ", paste(split_candidates, collapse = ", "), ", whose halves carry different names precisely because the correspondence test found them not to be one population.") else ""`
 
 # Summary
 
