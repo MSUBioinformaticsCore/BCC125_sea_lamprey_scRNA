@@ -12,6 +12,8 @@ params:
     project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
+    dbr: 0.08
+    dbr_sd: 0.02
 ---
 
 ```{r setup, include=FALSE}
@@ -43,7 +45,7 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-results_dir     = paste0(params$project_dir, "/results/20260803")
+results_dir     = paste0(params$project_dir, "/results/20260813_doublet_qc")
 Robject_out_dir = paste0(results_dir, "/Robjects")
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 ```
@@ -66,9 +68,29 @@ element already is one library. `sum` and `detected` (library size and genes
 detected, computed during per-sample QC) are carried along from each element's
 existing `colData` so they can be used in the diagnostic tables below.
 
+
+## Expected doublet rate
+
+`scDblFinder` documents `dbr` as *"The expected doublet rate. By default this is
+assumed to be 1% per thousand cells captured (so 4% among 4000 thousand cells),
+which is appropriate for 10x datasets."* At roughly 16,700 cells per library
+that default expects about 16.7% doublets.
+
+These libraries are PIPseq T20 3' v4.0. Cell concentration was adjusted to
+4 x 10^6 cells/ml and 10 ul loaded, which is 40,000 cells, the standard
+protocol. The kit user guide states that this gives recovery above 20,000 cells
+and a multiplet rate below 8%.
+
+`dbr` places the cutoff on the doublet score, so expecting roughly twice the
+rate the chemistry produces pushes the cutoff down and flags more cells than
+warranted. The rate is therefore set from the platform specification. Under 8%
+is an upper bound rather than a point estimate, so `r params$dbr` is
+conservative and `dbr.sd` sets the tolerance; both are document parameters.
+
 ```{r}
 set.seed(100)
-all.sce = lapply(all.sce, scDblFinder)
+all.sce = lapply(all.sce, function(x)
+  scDblFinder(x, dbr = params$dbr, dbr.sd = params$dbr_sd))
 
 dbl_df_list = lapply(names(all.sce), function(s) {
   cd = colData(all.sce[[s]])

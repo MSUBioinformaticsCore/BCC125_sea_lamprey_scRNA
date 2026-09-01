@@ -592,11 +592,44 @@ if (file.exists(novel_file)) {
 if (!is.null(novel)) {
   write.csv(novel, file = paste0(results_dir, "/novel_expression_test.csv"),
             row.names = FALSE)
-  datatable(novel, rownames = FALSE)
+  # written to disk rather than printed; the summary and histogram below are
+  # the readable form
+  invisible(NULL)
 }
 ```
 
-`r if (is.null(novel) || nrow(novel) == 0) "No cluster had enough flagged cells with an unambiguous origin to run this test." else paste0("Genes expressed above **both** putative parents, at FDR < 0.01: ", paste(paste0(novel$parentA, " + ", novel$parentB, ": ", novel$n_above_both), collapse = "; "), ". A count above zero means those cells contain expression that no mixture of the two parent types could produce, which is evidence they are not doublets. A count of zero is consistent with a mixture, though it does not prove one, since a transitional state can also lie between its endpoints without exceeding either.")`
+```{r, fig.width=9, fig.height=4}
+if (!is.null(novel) && nrow(novel) > 0) {
+  novel_summary = novel %>%
+    group_by(subset) %>%
+    summarize(n_groups        = dplyr::n(),
+              n_zero          = sum(n_above_both == 0),
+              pct_zero        = 100 * mean(n_above_both == 0),
+              median_n_above  = median(n_above_both),
+              max_n_above     = max(n_above_both),
+              .groups = "drop")
+
+  print(datatable(novel_summary %>%
+                    mutate(across(where(is.numeric), ~round(., 1))),
+                  rownames = FALSE,
+                  options = list(dom = "t", ordering = FALSE)))
+
+  p_novel = ggplot(novel, aes(x = n_above_both)) +
+    geom_histogram(bins = 40, fill = "#9ecae1", colour = "white") +
+    facet_wrap(~ subset, nrow = 1) +
+    xlab("genes above both parents") + ylab("origin groups") +
+    labs(caption = paste0("Zero means the group is consistent with a mixture. ",
+                          "Threshold: at least ", params$lfc,
+                          " log-fold above both parents, FDR < 0.01."))
+
+  print(p_novel)
+  ggsave(p_novel, file = paste0(results_dir, "/novel_expression_hist.png"),
+         width = 9, height = 4)
+}
+```
+
+`r if (is.null(novel) || nrow(novel) == 0) "No origin group had enough flagged cells with an unambiguous origin to run this test." else paste0("Of ", sum(novel$subset == "low"), " origin groups in the low subset, ", sum(novel$n_above_both == 0 & novel$subset == "low"), " have no gene above both parents and are consistent with a mixture. The rest contain expression no mixture of their two parents could produce. The full table is written to novel_expression_test.csv; the groups worth opening are those with a high count and a high median_lfc.")`
+
 
 # 4. Test 2: are they commoner than collision allows?
 
