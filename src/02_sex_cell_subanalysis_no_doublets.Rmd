@@ -48,23 +48,8 @@ library(ggrepel)
 source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
-This is a copy of `02_sex_cell_subanalysis.Rmd` that operates on the
-doublet-filtered, merged all-cells object produced by
-`01_all_cells_clustering_annotation_no_doublets.Rmd`. It must be run after
-that document (in the same session, or after it, since `merged.sce` below is
-not reloaded from disk in this document, matching the original script's
-convention).
-
-**The `label %in% c(...)` cluster numbers below, used to pick out the sex/germ
-cell clusters from the all-cells clustering, and the `anno`/`narrow`
-annotation vectors further down, are copied unchanged from
-`02_sex_cell_subanalysis.Rmd`.** They are specific to the 19-cluster,
-with-doublets annotation and are almost certainly wrong here: removing
-doublets upstream changes which cluster numbers correspond to germ cells, and
-re-clustering the germ/sex cell subset here can change the number and order of
-sex-cell subclusters too. Identify the correct cluster numbers from the
-doublet-filtered annotation in `01_all_cells_clustering_annotation_no_doublets.Rmd`
-before trusting any results below.
+This document inputs the doublet-filtered, merged all-cells object produced by
+`13_atlas_and_stage_correspondance.Rmd`. 
 
 ```{r}
 # Which doublet-filtered run this reads and writes. 20260813 uses the PIPseq
