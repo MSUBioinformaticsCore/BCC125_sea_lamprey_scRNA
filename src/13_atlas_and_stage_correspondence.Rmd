@@ -1181,11 +1181,13 @@ saveRDS(setNames(cell_labels$final_label, cell_labels$barcode),
 
 datatable(as.data.frame(table(final_label = final_label)) %>%
             dplyr::rename(n_cells = Freq) %>%
-            mutate(final_label = as.character(final_label)) %>%
-            left_join(anno, by = "final_label") %>%
-            dplyr::select(final_label, cell_type, n_cells),
+            dplyr::select(final_label, n_cells),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
+
+The cell type names are held back until after the marker sections, so the
+evidence is read before the interpretation. They are applied in **Cell type
+annotation** below.
 
 `r if (length(split_candidates) == 0) "No cluster met the conditions, so the final labelling is the original clustering unchanged." else paste0("Cluster(s) ", paste(split_candidates, collapse = ", "), " were split, giving ", nlevels(final_label), " labels from ", length(all_clusters), " clusters.")`
 
@@ -1513,6 +1515,47 @@ ggsave(p_bubble, file = paste0(results_dir, "/canonical_marker_bubble_all_cluste
 The underlying values are written to
 `canonical_marker_expression_per_cluster.csv`, one row per gene per cluster with
 the percentage expressing and the mean log expression.
+
+# Cell type annotation
+
+Names supplied by the Chung-Davidson lab for this labelling. They come last on
+purpose: everything above is the evidence a reader would use to judge them, and
+placing the names earlier would invite reading the marker and GO sections as
+confirmation of a conclusion already stated.
+
+Nothing in this document tests these names. The data-driven markers, the
+comparison with the curated list and the GO enrichment above are what evidence
+exists; where they disagree with a name, the disagreement is the finding.
+
+```{r}
+# captured before the pipe: inside it, final_label is the character column and
+# levels() of a character vector is NULL, which would silently drop the ordering
+lab_levels = levels(final_label)
+
+anno_tbl = as.data.frame(table(final_label = final_label)) %>%
+  dplyr::rename(n_cells = Freq) %>%
+  mutate(final_label = as.character(final_label)) %>%
+  left_join(anno, by = "final_label") %>%
+  dplyr::select(final_label, cell_type, n_cells) %>%
+  arrange(match(final_label, lab_levels))
+
+write.csv(anno_tbl, file = paste0(results_dir, "/cell_type_annotation.csv"),
+          row.names = FALSE)
+
+datatable(anno_tbl, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+Two cautions travel with this table.
+
+The names apply to **this** clustering, at this `k` and this doublet rate.
+Louvain renumbers on every rerun, so a name is a statement about a position in
+one particular labelling and not a durable identifier. The guard beside the
+annotation halts the knit rather than relabel the wrong cells if the two stop
+matching.
+
+A name describes a **cluster**, not separately each cell in it. That matters
+most for clusters holding cells from both stages, where the annotation may fit
+one stage's cells and not the other's. `r if (exists("split_candidates") && length(split_candidates) > 0) paste0("It matters most of all for the split cluster(s), ", paste(split_candidates, collapse = ", "), ", whose halves carry different names precisely because the correspondence test found them not to be one population.") else ""`
 
 # Summary
 
