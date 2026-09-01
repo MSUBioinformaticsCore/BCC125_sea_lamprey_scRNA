@@ -276,25 +276,46 @@ plot_stability_metrics(stab)$data
 ```
 
 ```{r}
-# results of the run above, transcribed so the document is readable without it
-stability = tibble::tribble(
-  ~k, ~mean_n_clusters, ~cv_n_clusters, ~mean_ari, ~min_ari,
-  10, 24.8, 0.0371, 0.9167, 0.8870,
-  20, 20.0, 0.0236, 0.9408, 0.9061,
-  30, 18.1, 0.0175, 0.9584, 0.9058,
-  40, 17.9, 0.0177, 0.9405, 0.8736,
-  50, 17.5, 0.0301, 0.9261, 0.7970)
+stable_k_file = paste0(params$project_dir, "/results/", params$results_date,
+                       "_stable_k/stability_by_k.csv")
 
-datatable(stability, rownames = FALSE,
-          options = list(dom = "t", ordering = FALSE))
+if (!file.exists(stable_k_file))
+  stop("missing ", stable_k_file,
+       ". The stability sweep has not been run for this results_date. ",
+       "Submit src/slurm_stable_k.sh and let it finish first.")
+
+stability_cols = c("k", "mean_n_clusters", "cv_n_clusters", "mean_ari", "min_ari")
+
+stability = read.csv(stable_k_file, stringsAsFactors = FALSE)
+
+missing_cols = setdiff(stability_cols, colnames(stability))
+if (length(missing_cols) > 0)
+  stop(stable_k_file, " is missing column(s): ",
+       paste(missing_cols, collapse = ", "),
+       ". It should be the stability_by_k.csv written by src/run_stable_k.R.")
+
+stability = stability %>%
+  dplyr::select(dplyr::all_of(stability_cols)) %>%
+  dplyr::arrange(k)
+
+datatable(stability %>% mutate(across(where(is.numeric), ~signif(., 4))),
+          rownames = FALSE, options = list(dom = "t", ordering = FALSE))
 ```
+
+`r paste0("Read from ", stable_k_file, ", written by src/run_stable_k.R.")`
+
+`r if (!params$k %in% stability$k) paste0("**Note that k = ", params$k, " is not one of the values swept** (", paste(stability$k, collapse = ", "), "), so the dotted line below marks a k whose stability was not measured.") else ""`
 
 ```{r, fig.width=9, fig.height=3.5}
 p_stab = (ggplot(stability, aes(k, mean_ari)) +
             geom_line(colour = "darkgreen") + geom_point(size = 2) +
             geom_vline(xintercept = params$k, linetype = "dotted") +
             geom_hline(yintercept = 0.9, linetype = "dashed", colour = "red") +
-            ylim(0.8, 1) + ylab("mean ARI between subsamples") +
+            # keeps the 0.8-to-1 frame when the data allows it, but widens
+            # rather than clipping a k that scored below it
+            coord_cartesian(ylim = c(min(0.8, min(stability$mean_ari,
+                                                  na.rm = TRUE)), 1)) +
+            ylab("mean ARI between subsamples") +
             ggtitle("Stability")) |
           (ggplot(stability, aes(k, mean_n_clusters)) +
             geom_line(colour = "steelblue") + geom_point(size = 2) +
@@ -1326,17 +1347,14 @@ write.csv(markers_unfiltered, file = unfiltered_file, row.names = FALSE)
 # the working list: significant and of a usable size. Both cutoffs are applied
 # here rather than in the test, so the unfiltered table above stays complete.
 markers_all = markers_unfiltered %>%
-  filter(FDR < 0.01, meanLogFC >= lfc_thresh)
+  filter(FDR < 0.01, meanLogFC >= lfc_thresh) %>%
+  # ordered by effect within a cluster, since FDR alone ranks by cell number
+  group_by(cluster) %>%
+  arrange(desc(meanLogFC), FDR, .by_group = TRUE) %>%
+  ungroup()
 
 write.csv(markers_all, file = paste0(results_dir, "/cluster_marker_genes.csv"),
           row.names = FALSE)
-
-# ordered by effect within a cluster, since FDR alone ranks by cell number
-markers_top100 = markers_all %>%
-  group_by(cluster) %>%
-  arrange(desc(meanLogFC), FDR, .by_group = TRUE) %>%
-  slice_head(n = 100) %>%
-  ungroup()
 ```
 
 `r paste0("**cluster_marker_genes_unfiltered.csv** holds ", format(nrow(markers_unfiltered), big.mark = ","), " rows, every one of ", format(dplyr::n_distinct(markers_unfiltered$Gene), big.mark = ","), " genes against each of ", dplyr::n_distinct(markers_unfiltered$cluster), " clusters, at ", round(file.size(unfiltered_file) / 1e6), " MB. **cluster_marker_genes.csv** is the same table filtered to FDR < 0.01 and mean log fold change at least ", lfc_thresh, ", ", format(nrow(markers_all), big.mark = ","), " rows. Everything below runs on the filtered list.")`
@@ -1350,14 +1368,21 @@ per-comparison `logFC.*` columns if an individual pairwise contrast is needed;
 p-value and so is not a fixed contrast.
 
 ```{r}
-datatable(markers_top100 %>% mutate(across(where(is.numeric), ~signif(., 3))),
+datatable(markers_all %>% mutate(across(where(is.numeric), ~signif(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
 # Comparison with the curated markers
 
 Rows are marker sets, columns are clusters, color is the significance of the
-overlap with each cluster's top 100 markers.
+overlap with each cluster's full marker list, every gene passing FDR < 0.01 and
+a mean log fold change of at least `r lfc_thresh`.
+
+The lists are of unequal length, because clusters differ in how many genes
+distinguish them. The hypergeometric accounts for list size, so this does not
+bias the p-values. It does affect power: a cluster with a long list can reach
+significance on a weaker proportional overlap than one with a short list. Read a
+strong overlap in a cluster with few markers as the stronger result of the two.
 
 ```{r}
 curated = read.csv(paste0(data_dir, "/", params$marker_file),
@@ -1382,9 +1407,15 @@ marker_symbols = curated %>%
 
 stopifnot(!any(duplicated(marker_symbols$Gene)))
 
-marker_test_genes = markers_top100 %>%
+# the full lfc-filtered list, not a fixed top n. Feeds both the overlap heatmap
+# below and the GO enrichment in the next section, so the two run on the same
+# gene set rather than on different definitions of "this cluster's markers".
+marker_test_genes = markers_all %>%
   dplyr::select(Gene, cluster) %>%
-  mutate(cluster = paste0("cluster", cluster))
+  mutate(cluster = paste0("cluster", cluster)) %>%
+  distinct()
+
+list_sizes = marker_test_genes %>% dplyr::count(cluster, name = "n_markers")
 
 set_sizes = curated %>% dplyr::count(CellTypeMarkerSet, name = "n_genes") %>%
   mutate(below_coherence_floor = n_genes < 3)
@@ -1394,6 +1425,8 @@ datatable(set_sizes, rownames = FALSE,
 ```
 
 `r paste0(nrow(known_markers), " gene-to-set assignments resolve against this count matrix, over ", dplyr::n_distinct(known_markers$CellType), " sets. ", sum(set_sizes$below_coherence_floor), " set(s) hold fewer than three genes; a single significant overlap in those rows is one gene, not a set agreeing.")`
+
+`r paste0("On the other side of the test, the cluster marker lists run from ", format(min(list_sizes$n_markers), big.mark = ","), " to ", format(max(list_sizes$n_markers), big.mark = ","), " genes (median ", format(round(median(list_sizes$n_markers)), big.mark = ","), "), across ", nrow(list_sizes), " clusters.")`
 
 ```{r, fig.width=9}
 plot_marker_overlap_heatmap(
@@ -1502,7 +1535,7 @@ p_bubble = ggplot(marker_bubble,
   facet_grid(CellType ~ ., scales = "free_y", space = "free_y") +
   theme(strip.text.y = element_text(angle = 0, size = 6),
         axis.text.y  = element_text(size = 6),
-        axis.text.x  = element_text(size = 8),
+        axis.text.x  = element_text(size = 8, angle = 45, hjust = 1),
         panel.grid.major = element_line(linewidth = .2)) +
   xlab("cluster") + ylab(NULL) +
   labs(size = "% expressing", colour = "mean logexpr")
@@ -1560,30 +1593,69 @@ one stage's cells and not the other's. `r if (exists("split_candidates") && leng
 # Summary
 
 ```{r}
+n_clusters = nlevels(colData(merged.sce)$label)
+n_core     = nrow(outcome_tbl)   # clusters that entered the comparison at all
+
+# Every subset row carries its own denominator, because there are three of them:
+# all clusters, the core set that had enough cells per side to be compared, and
+# the readable set whose replicate comparison succeeded. Each level is a subset
+# of the one above, and the rows are ordered so that nesting is visible.
+stopifnot(n_untestable + n_readable == n_core, n_core <= n_clusters)
+
 summary_tbl = data.frame(
-  question = c("cells in the atlas",
-               "clusters from the doublet-filtered clustering",
-               "clusters comparable across stages",
-               "correspond between two larval animals",
+  stage = c("atlas", "atlas",
+            "entering the test", "entering the test",
+            "of those compared", "of those compared",
+            "control", "stage test", "stage test",
+            "outcome", "outcome"),
+  quantity = c("cells",
+               "clusters before splitting",
+               paste0("too few cells to compare (under ", min_cells_side,
+                      " on a side)"),
+               "compared",
+               "untestable at their own cell depth",
+               "readable across the stage boundary",
+               "correspond between the two larval animals",
                "correspond across the stage boundary",
                "fail across the stage boundary",
-               "untestable at their own cell depth",
                "clusters split",
-               "clusters in the final labelling"),
-  answer = c(format(ncol(merged.sce), big.mark = ","),
-             as.character(nlevels(colData(merged.sce)$label)),
-             as.character(n_readable),
-             paste0(rep_recip, " of ", rep_n),
-             as.character(n_corresponds),
-             as.character(n_fails),
-             as.character(n_untestable),
-             if (length(split_candidates) == 0) "none"
-               else paste(split_candidates, collapse = ", "),
-             as.character(nlevels(final_label))))
+               "labels in the final labelling"),
+  value = c(format(ncol(merged.sce), big.mark = ","),
+            as.character(n_clusters),
+            paste0(n_clusters - n_core, " of ", n_clusters),
+            paste0(n_core, " of ", n_clusters),
+            paste0(n_untestable, " of ", n_core),
+            paste0(n_readable, " of ", n_core),
+            paste0(rep_recip, " of ", rep_n),
+            paste0(n_corresponds, " of ", n_readable),
+            paste0(n_fails, " of ", n_readable),
+            if (length(split_candidates) == 0) "0"
+              else paste0(length(split_candidates), " (",
+                          paste(split_candidates, collapse = ", "), ")"),
+            as.character(nlevels(final_label))),
+  stringsAsFactors = FALSE)
 
-datatable(summary_tbl, rownames = FALSE,
+datatable(summary_tbl, rownames = FALSE, colnames = c("", "", ""),
           options = list(dom = "t", ordering = FALSE, paging = FALSE))
 ```
+
+**The control and stage-test rows are meant to be read against each other.** The
+control is the same test run between the two larval animals, collected on the
+same day, where nothing but animal-to-animal variation separates the two sides.
+The stage test is the same test run across the July-to-November boundary. The
+gap between the two is the result. The stage row alone is not, because it has no
+meaning without knowing what this test scores when nothing is wrong.
+
+**The denominators narrow down the table and each is a subset of the one above.**
+Of `r n_clusters` clusters, `r n_core` had enough cells on every side to be
+compared at all. Of those, `r n_readable` were readable, meaning their replicate
+comparison succeeded. The stage result is out of that `r n_readable`.
+
+Clusters drop out for two different reasons and neither is a failure. Too few
+cells on a side means the comparison never ran. Untestable at their own cell
+depth means it ran and the cluster could not find itself even between the two
+larval animals, so a stage result would report cell numbers rather than stage.
+Both are reported and counted neither way.
 
 ## What this document does not answer
 
