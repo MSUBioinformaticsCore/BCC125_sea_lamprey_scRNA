@@ -1,0 +1,488 @@
+---
+title: "18_germ_pseudotime_monocle3"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    results_date: "20260813"
+    lineage: "female"
+    female_clusters: "5"
+    male_clusters: "12_transformer,15,16,17,18"
+    male_root: "12_transformer"
+    all_clusters: "5,12_transformer,15,16,17,18"
+    all_root: "12_transformer"
+    root_label: ""
+    root_monocle_cluster: ""
+    min_library_cells: 50
+    use_partition: FALSE
+    graph_q: 0.01
+    cores: 4
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+cat("#### Lineage:", params$lineage, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(batchelor)
+library(BiocSingular)
+library(monocle3)
+library(patchwork)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+monocle3 pseudotime for the `r params$lineage` germ cell clusters. The lineage
+is `female`, `male`, or `all`, which orders every germ cluster in one graph.
+`17_germ_pseudotime_tscan.Rmd` computes TSCAN pseudotime for the same cells, and
+`knit_17_18_pseudotime.sh` knits both documents for each lineage.
+
+Both documents use the same cells and the same corrected space, built by
+`build_lineage_sce` in `scRNA_seq_functions.R`. monocle3 learns its principal
+graph on the UMAP of that space, and its genes are tested on uncorrected counts.
+
+Stage and collection date vary together in this dataset, so the ordering is not
+shown to be developmental. The variance in pseudotime explained by library is
+reported with the result.
+
+```{r}
+lineage = as.character(params$lineage)
+if (!lineage %in% c("female", "male", "all"))
+  stop("lineage must be 'female', 'male' or 'all', not '", lineage, "'")
+
+clusters = trimws(strsplit(as.character(switch(lineage,
+  female = params$female_clusters,
+  male   = params$male_clusters,
+  all    = params$all_clusters)), ",")[[1]])
+clusters = clusters[nzchar(clusters)]
+
+object_dir      = paste0(params$project_dir, "/results/", params$results_date,
+                         "_no_doublets")
+atlas_dir       = paste0(params$project_dir, "/results/", params$results_date,
+                         "_atlas")
+results_dir     = paste0(params$project_dir, "/results/", params$results_date,
+                         "_pseudotime_monocle3_", lineage)
+tscan_file = paste0(params$project_dir, "/results/", params$results_date,
+                    "_pseudotime_tscan_", lineage, "/pseudotime_per_cell.csv")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+
+label_file = paste0(atlas_dir, "/cell_cluster_labels.csv")
+if (!file.exists(label_file))
+  stop("missing ", label_file, ". Run 13_atlas_and_stage_correspondence.Rmd first.")
+
+cell_labels      = read.csv(label_file, stringsAsFactors = FALSE)
+all.sce          = readRDS(paste0(object_dir, "/all.sce.Rds"))
+gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE) %>%
+  dplyr::distinct(Gene, .keep_all = TRUE)
+
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+
+use_partition = isTRUE(as.logical(params$use_partition))
+```
+
+# Cells
+
+```{r}
+absent = setdiff(clusters, cell_labels$final_label)
+if (length(absent) > 0)
+  stop("cluster(s) ", paste(absent, collapse = ", "), " are not in ", label_file,
+       ". Labels present: ",
+       paste(sort(unique(cell_labels$final_label)), collapse = ", "),
+       ". Set the ", lineage, "_clusters parameter from the current labelling.")
+
+lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
+
+comp_tab = lineage_key %>%
+  dplyr::count(final_label, cell_type, library, name = "n") %>%
+  tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
+  dplyr::mutate(Total = rowSums(dplyr::across(dplyr::any_of(names(lib_cols))))) %>%
+  dplyr::arrange(match(final_label, clusters))
+
+write.csv(comp_tab, file = paste0(results_dir, "/cluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(comp_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ".")`
+
+# Corrected space
+
+Libraries contributing fewer than `r params$min_library_cells` cells are dropped.
+With more than one library left, the space is `fastMNN` output computed on these
+cells alone. With one library, it is PCA on that library.
+
+```{r}
+obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
+obj_sig_file = paste0(Robject_out_dir, "/lineage_objects_signature.txt")
+obj_sig      = paste(lineage, paste(sort(clusters), collapse = ","),
+                     nrow(lineage_key), params$min_library_cells, sep = "|")
+
+if (file.exists(obj_file) && file.exists(obj_sig_file) &&
+    identical(readLines(obj_sig_file, warn = FALSE)[1], obj_sig)) {
+  objs = readRDS(obj_file)
+} else {
+  objs = build_lineage_sce(all.sce, lineage_key$barcode,
+                           min_library_cells = params$min_library_cells)
+  saveRDS(objs, file = obj_file)
+  writeLines(obj_sig, obj_sig_file)
+}
+
+merged   = objs$corrected
+combined = objs$combined
+
+# metadata attached by barcode, never by position
+key_idx = match(colnames(merged), lineage_key$barcode)
+stopifnot(!anyNA(key_idx))
+merged$library     = lineage_key$library[key_idx]
+merged$stage       = lineage_key$stage[key_idx]
+merged$final_label = lineage_key$final_label[key_idx]
+merged$cell_type   = lineage_key$cell_type[key_idx]
+
+lib_tab = data.frame(batch   = names(objs$n_by_library),
+                     n_cells = as.integer(objs$n_by_library),
+                     kept    = names(objs$n_by_library) %in% objs$kept_batches,
+                     stringsAsFactors = FALSE) %>%
+  dplyr::left_join(dplyr::distinct(cell_labels, batch, library), by = "batch")
+
+datatable(lib_tab, rownames = FALSE, options = list(dom = "t"))
+```
+
+`r n_kept = length(objs$kept_batches); paste0(format(ncol(merged), big.mark = ","), " cells from ", n_kept, " librar", if (n_kept == 1) "y" else "ies", " are kept.")`
+
+# Principal graph
+
+The cell data set holds uncorrected counts. The corrected space and its UMAP are
+placed in its reduced dimensions, and `cluster_cells` and `learn_graph` run on
+that UMAP.
+
+`r if (use_partition) "use_partition is TRUE, so a separate graph is learned for each partition. Cells in partitions that do not contain the root get infinite pseudotime." else "use_partition is FALSE, so one graph is learned across all cells and every cell receives a pseudotime."`
+
+```{r}
+graph_file     = paste0(Robject_out_dir, "/cds_learned.Rds")
+graph_sig_file = paste0(Robject_out_dir, "/cds_learned_signature.txt")
+graph_sig      = paste(obj_sig, use_partition, sep = "|")
+
+if (file.exists(graph_file) && file.exists(graph_sig_file) &&
+    identical(readLines(graph_sig_file, warn = FALSE)[1], graph_sig)) {
+  cds = readRDS(graph_file)
+} else {
+  cell_md = as.data.frame(colData(merged))
+  gene_md = data.frame(gene_short_name = rownames(combined),
+                       row.names = rownames(combined))
+
+  cds = new_cell_data_set(counts(combined),
+                          cell_metadata = cell_md[colnames(combined), , drop = FALSE],
+                          gene_metadata = gene_md)
+
+  pca  = reducedDim(merged, "corrected"); rownames(pca)  = colnames(merged)
+  umap = reducedDim(merged, "UMAP");      rownames(umap) = colnames(merged)
+  reducedDim(cds, "PCA")  = pca[colnames(cds), , drop = FALSE]
+  reducedDim(cds, "UMAP") = umap[colnames(cds), , drop = FALSE]
+
+  cds = cluster_cells(cds, reduction_method = "UMAP", random_seed = 1)
+  cds = learn_graph(cds, use_partition = use_partition)
+
+  saveRDS(cds, file = graph_file)
+  writeLines(graph_sig, graph_sig_file)
+}
+
+colData(cds)$monocle_cluster = as.character(monocle3::clusters(cds))
+
+n_monocle_clusters = dplyr::n_distinct(colData(cds)$monocle_cluster)
+n_partitions = dplyr::n_distinct(cds@clusters[["UMAP"]]$partitions)
+```
+
+`r paste0("cluster_cells finds ", n_monocle_clusters, " cluster", if (n_monocle_clusters == 1) "" else "s", " in ", n_partitions, " partition", if (n_partitions == 1) "" else "s", ".")`
+
+`r if (n_partitions > 1 && !use_partition) paste0("These cells fall into ", n_partitions, " partitions, but one graph is learned across them because use_partition is FALSE. The edges joining separate partitions are placed by the method, not by continuity in the data.") else ""`
+
+## Root
+
+```{r}
+zp_genes = gene_description %>%
+  dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
+  dplyr::pull(Gene) %>%
+  intersect(rownames(combined))
+
+zp_cell = if (length(zp_genes) > 0) {
+  colMeans(as.matrix(logcounts(combined)[zp_genes, colnames(cds), drop = FALSE]))
+} else {
+  rep(NA_real_, ncol(cds))
+}
+
+zp_by_cluster = data.frame(monocle_cluster = colData(cds)$monocle_cluster,
+                           zp = zp_cell) %>%
+  dplyr::group_by(monocle_cluster) %>%
+  dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop") %>%
+  dplyr::arrange(as.integer(monocle_cluster))
+
+if (nzchar(params$root_label)) {
+  root_desc  = paste0("final label ", params$root_label, ", set by the root_label parameter")
+  root_cells = colnames(cds)[colData(cds)$final_label == params$root_label]
+} else if (nzchar(params$root_monocle_cluster)) {
+  root_desc  = paste0("monocle3 cluster ", params$root_monocle_cluster,
+                      ", set by the root_monocle_cluster parameter")
+  root_cells = colnames(cds)[colData(cds)$monocle_cluster == params$root_monocle_cluster]
+} else if (lineage %in% c("male", "all")) {
+  root_param = if (lineage == "male") "male_root" else "all_root"
+  root_value = as.character(params[[root_param]])
+  root_desc  = paste0("final label ", root_value, ", set by the ", root_param, " parameter")
+  root_cells = colnames(cds)[colData(cds)$final_label == root_value]
+} else {
+  if (length(zp_genes) == 0)
+    stop("no ZP genes resolved, so the female root cannot be chosen ",
+         "automatically. Set root_label or root_monocle_cluster.")
+  low_zp     = as.character(zp_by_cluster$monocle_cluster[which.min(zp_by_cluster$mean_ZP)])
+  root_desc  = paste0("monocle3 cluster ", low_zp,
+                      ", the cluster with the lowest mean zona pellucida (ZP) expression")
+  root_cells = colnames(cds)[colData(cds)$monocle_cluster == low_zp]
+}
+
+if (length(root_cells) == 0)
+  stop("no cells match the root (", root_desc, ").")
+
+# the principal graph vertex most of the root cells project onto
+closest = cds@principal_graph_aux[["UMAP"]]$pr_graph_cell_proj_closest_vertex
+closest = as.matrix(closest[colnames(cds), , drop = FALSE])
+vertex_names = igraph::V(principal_graph(cds)[["UMAP"]])$name
+root_pr_node = vertex_names[as.numeric(names(which.max(table(closest[root_cells, ]))))]
+
+cds = order_cells(cds, reduction_method = "UMAP", root_pr_nodes = root_pr_node)
+
+pt = pseudotime(cds)
+colData(cds)$monocle_pseudotime = pt
+n_infinite = sum(!is.finite(pt))
+
+datatable(zp_by_cluster %>% mutate(mean_ZP = signif(mean_ZP, 3)),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r paste0("The ordering is rooted at principal graph vertex ", root_pr_node, ", the vertex most cells of ", root_desc, " project onto. The root is an assumption: rooting the same graph elsewhere gives a different ordering.")`
+
+`r if (n_infinite == 0) "Every cell has a finite pseudotime." else paste0("**", n_infinite, " cells have infinite pseudotime**, because they sit in partitions not connected to the root. They are excluded from the correlations and gene heatmap below.")`
+
+# Trajectory
+
+```{r, fig.width=13, fig.height=4.5}
+colour_label = if (lineage == "female") "monocle_cluster" else "final_label"
+
+p_pt = plot_cells(cds, color_cells_by = "pseudotime", label_cell_groups = FALSE,
+                  label_leaves = FALSE, label_branch_points = FALSE,
+                  label_roots = TRUE, cell_size = 0.5) +
+  ggtitle("Pseudotime")
+p_cl = plot_cells(cds, color_cells_by = colour_label, label_cell_groups = TRUE,
+                  label_leaves = FALSE, label_branch_points = FALSE,
+                  cell_size = 0.5, group_label_size = 3) +
+  ggtitle(colour_label)
+p_lib = plot_cells(cds, color_cells_by = "library", label_cell_groups = FALSE,
+                   label_leaves = FALSE, label_branch_points = FALSE,
+                   cell_size = 0.5) +
+  scale_color_manual(values = lib_cols) +
+  ggtitle("Library")
+
+p_pt | p_cl | p_lib
+ggsave(p_pt | p_cl | p_lib, file = paste0(results_dir, "/monocle3_trajectory_umap.png"),
+       width = 13, height = 4.5)
+```
+
+```{r, fig.width=12, fig.height=4}
+pt_df = as.data.frame(colData(cds)) %>%
+  tibble::rownames_to_column("barcode") %>%
+  dplyr::filter(is.finite(monocle_pseudotime))
+
+p_box_lab = ggplot(pt_df, aes(x = final_label, y = monocle_pseudotime)) +
+  geom_boxplot(outlier.size = .3) +
+  xlab("final label") + ylab("pseudotime")
+p_box_lib = ggplot(pt_df, aes(x = library, y = monocle_pseudotime, fill = library)) +
+  geom_boxplot(outlier.size = .3) +
+  scale_fill_manual(values = lib_cols) +
+  xlab(NULL) + ylab("pseudotime") +
+  theme(legend.position = "none")
+
+p_box_lab | p_box_lib
+ggsave(p_box_lab | p_box_lib,
+       file = paste0(results_dir, "/monocle3_pseudotime_by_label.png"),
+       width = 12, height = 4)
+```
+
+## Library and stage
+
+```{r}
+lib_r2 = if (dplyr::n_distinct(pt_df$library) > 1)
+  summary(lm(monocle_pseudotime ~ library, data = pt_df))$r.squared else NA_real_
+stage_r2 = if (dplyr::n_distinct(pt_df$stage) > 1)
+  summary(lm(monocle_pseudotime ~ stage, data = pt_df))$r.squared else NA_real_
+```
+
+`r if (is.na(lib_r2)) "All cells with a finite pseudotime come from one library, so library cannot explain pseudotime." else paste0("Library explains ", round(100 * lib_r2, 1), "% of the variance in pseudotime", if (!is.na(stage_r2)) paste0(", and stage explains ", round(100 * stage_r2, 1), "%") else "", ".")`
+
+# Genes varying along the graph
+
+`graph_test` with `neighbor_graph = "principal_graph"` tests each gene for
+spatial autocorrelation over the principal graph (Moran's I). Genes at
+q < `r params$graph_q` are written to `monocle3_graph_genes.csv`.
+
+```{r}
+gt_file     = paste0(Robject_out_dir, "/graph_test.Rds")
+gt_sig_file = paste0(Robject_out_dir, "/graph_test_signature.txt")
+
+if (file.exists(gt_file) && file.exists(gt_sig_file) &&
+    identical(readLines(gt_sig_file, warn = FALSE)[1], graph_sig)) {
+  gt = readRDS(gt_file)
+} else {
+  gt = graph_test(cds, neighbor_graph = "principal_graph",
+                  cores = as.integer(params$cores))
+  saveRDS(gt, file = gt_file)
+  writeLines(graph_sig, gt_sig_file)
+}
+
+graph_genes = gt %>%
+  tibble::rownames_to_column("Gene") %>%
+  dplyr::filter(q_value < params$graph_q) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::select(Gene, WangGeneID, description, morans_I, p_value, q_value) %>%
+  dplyr::arrange(desc(morans_I))
+
+write.csv(graph_genes, file = paste0(results_dir, "/monocle3_graph_genes.csv"),
+          row.names = FALSE)
+
+datatable(graph_genes %>% mutate(across(c(morans_I, p_value, q_value), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+`r paste0(format(nrow(graph_genes), big.mark = ","), " genes at q < ", params$graph_q, ".")`
+
+## Heatmap
+
+The 50 genes with the highest Moran's I, ordered by pseudotime.
+
+```{r, fig.width=7, fig.height=6}
+if (nrow(graph_genes) > 0) {
+  combined$monocle_pseudotime = pt[colnames(combined)]
+
+  # the heatmap's pseudotime bar uses a fixed 0 to 1 color scale
+  finite_pt = combined$monocle_pseudotime[is.finite(combined$monocle_pseudotime)]
+  combined$pseudotime_scaled = (combined$monocle_pseudotime - min(finite_pt)) /
+    diff(range(finite_pt))
+
+  gene_ids    = head(graph_genes$Gene, 50)
+  gene_labels = ifelse(is.na(graph_genes$WangGeneID[match(gene_ids, graph_genes$Gene)]),
+                       gene_ids,
+                       graph_genes$WangGeneID[match(gene_ids, graph_genes$Gene)])
+  cell_subset = colnames(combined)[is.finite(combined$monocle_pseudotime)]
+
+  hm = plot_pseudotime_heatmap(combined, gene_ids, gene_labels, cell_subset,
+                               pseudotime_column = "pseudotime_scaled")
+  hp = (hm[[1]] / hm[[2]]) + plot_layout(heights = c(0.03, 1))
+  print(hp)
+  ggsave(hp, file = paste0(results_dir, "/monocle3_heatmap.png"), width = 7, height = 6)
+}
+```
+
+# Comparison with TSCAN
+
+```{r}
+have_tscan = file.exists(tscan_file)
+```
+
+`r if (!have_tscan) paste0("The TSCAN result for this lineage is not present at ", tscan_file, ". Knit 17_germ_pseudotime_tscan.Rmd first to compare the two orderings.") else ""`
+
+```{r, eval=have_tscan, fig.width=5, fig.height=4.5}
+tscan_pt = read.csv(tscan_file, stringsAsFactors = FALSE) %>%
+  dplyr::select(barcode, tscan_pseudotime = pseudotime)
+
+pt_compare = pt_df %>%
+  dplyr::select(barcode, library, monocle_pseudotime) %>%
+  dplyr::inner_join(tscan_pt, by = "barcode") %>%
+  dplyr::filter(is.finite(tscan_pseudotime))
+
+rho_methods = cor(pt_compare$monocle_pseudotime, pt_compare$tscan_pseudotime,
+                  method = "spearman")
+
+p_cmp = ggplot(pt_compare, aes(x = tscan_pseudotime, y = monocle_pseudotime,
+                               colour = library)) +
+  geom_point(size = .4, alpha = .5) +
+  scale_colour_manual(values = lib_cols) +
+  xlab("TSCAN pseudotime") + ylab("monocle3 pseudotime") +
+  ggtitle(paste0("Spearman rho = ", signif(rho_methods, 3)))
+
+p_cmp
+ggsave(p_cmp, file = paste0(results_dir, "/monocle3_vs_tscan.png"), width = 5, height = 4.5)
+```
+
+`r if (have_tscan) paste0("Across ", format(nrow(pt_compare), big.mark = ","), " cells with a pseudotime from both methods, the Spearman correlation between the two orderings is ", signif(rho_methods, 3), ". Both orderings use the same cells and the same corrected space, so agreement between them does not address the stage confound.") else ""`
+
+# Export
+
+```{r}
+umap = reducedDim(cds, "UMAP")
+
+cell_out = as.data.frame(colData(cds)) %>%
+  tibble::rownames_to_column("barcode") %>%
+  dplyr::select(barcode, library, stage, final_label, cell_type,
+                monocle_cluster, pseudotime = monocle_pseudotime)
+cell_out$UMAP1 = umap[cell_out$barcode, 1]
+cell_out$UMAP2 = umap[cell_out$barcode, 2]
+
+write.csv(cell_out, file = paste0(results_dir, "/pseudotime_per_cell.csv"),
+          row.names = FALSE)
+```
+
+Per-cell pseudotime is written to `pseudotime_per_cell.csv`.
+
+# Summary
+
+```{r}
+summary_tbl = data.frame(
+  quantity = c("lineage", "clusters", "cells", "libraries kept",
+               "monocle3 clusters", "partitions", "use_partition", "root vertex",
+               "cells with infinite pseudotime",
+               "variance in pseudotime explained by library",
+               paste0("genes at q < ", params$graph_q),
+               "Spearman rho with TSCAN"),
+  value = c(lineage,
+            paste(clusters, collapse = ", "),
+            format(ncol(cds), big.mark = ","),
+            paste(objs$kept_batches, collapse = ", "),
+            as.character(n_monocle_clusters),
+            as.character(n_partitions),
+            as.character(use_partition),
+            root_pr_node,
+            as.character(n_infinite),
+            if (is.na(lib_r2)) "one library" else paste0(round(100 * lib_r2, 1), "%"),
+            format(nrow(graph_genes), big.mark = ","),
+            if (have_tscan) as.character(signif(rho_methods, 3)) else "not run"),
+  stringsAsFactors = FALSE)
+
+datatable(summary_tbl, rownames = FALSE, colnames = c("", ""),
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```

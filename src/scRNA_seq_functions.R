@@ -845,6 +845,81 @@ run_go_enrichment <- function(gaf, gene_description, go_names,
 }
 
 
+# build_lineage_sce -------------------------------------------------------
+#' @name build_lineage_sce
+#' @description Corrected space and uncorrected counts for one set of cells,
+#'   shared by 17_germ_pseudotime_tscan.Rmd and 18_germ_pseudotime_monocle3.Rmd
+#'   so both methods run on the same cells and the same correction.
+#' @param all.sce named list of per-library SCEs with counts and logcounts
+#' @param cells barcodes to keep
+#' @param min_library_cells libraries contributing fewer cells are dropped
+#' @param n_hvg number of highly variable genes for the correction
+#' @param seed random seed
+#' @return list with $corrected (reducedDims "corrected", "UMAP", "TSNE"),
+#'   $combined (counts and logcounts, same cells and order), $kept_batches,
+#'   $n_by_library
+
+build_lineage_sce <- function(all.sce, cells, min_library_cells = 50,
+                              n_hvg = 5000, seed = 1) {
+  lib_list <- lapply(all.sce, function(x) {
+    keep <- intersect(colnames(x), cells)
+    if (length(keep) == 0) return(NULL)
+    x[, keep]
+  })
+  lib_list <- lib_list[!vapply(lib_list, is.null, logical(1))]
+
+  n_by_library <- vapply(lib_list, ncol, integer(1))
+  kept <- names(n_by_library)[n_by_library >= min_library_cells]
+  if (length(kept) == 0)
+    stop("no library contributes at least ", min_library_cells, " of these cells")
+  lib_list <- lib_list[kept]
+
+  universe <- Reduce(intersect, lapply(lib_list, rownames))
+  lib_list <- lapply(lib_list, function(x) {
+    x <- x[universe, ]
+    SingleCellExperiment::reducedDims(x) <- list()
+    x
+  })
+
+  dec      <- lapply(lib_list, scran::modelGeneVar)
+  comb_dec <- if (length(dec) > 1) do.call(scran::combineVar, dec) else dec[[1]]
+  hvg      <- scran::getTopHVGs(comb_dec, n = n_hvg)
+
+  set.seed(seed)
+  if (length(lib_list) > 1) {
+    normed    <- do.call(batchelor::multiBatchNorm, lib_list)
+    corrected <- do.call(batchelor::fastMNN,
+                         c(normed, list(subset.row = hvg,
+                                        BSPARAM = BiocSingular::RandomParam())))
+  } else {
+    # one library has nothing to correct between; PCA takes the same name
+    corrected <- scater::runPCA(lib_list[[1]], subset_row = hvg, ncomponents = 50,
+                                BSPARAM = BiocSingular::RandomParam())
+    SingleCellExperiment::reducedDim(corrected, "corrected") <-
+      SingleCellExperiment::reducedDim(corrected, "PCA")
+    corrected$batch <- kept[1]
+  }
+
+  set.seed(seed)
+  corrected <- scater::runUMAP(corrected, dimred = "corrected")
+  set.seed(seed)
+  corrected <- scater::runTSNE(corrected, dimred = "corrected")
+
+  combined <- do.call(cbind, lapply(lib_list, function(x) {
+    SingleCellExperiment::SingleCellExperiment(
+      assays = list(counts    = SingleCellExperiment::counts(x),
+                    logcounts = SingleCellExperiment::logcounts(x)))
+  }))
+  combined <- combined[, colnames(corrected)]
+  stopifnot(identical(colnames(combined), colnames(corrected)))
+
+  list(corrected    = corrected,
+       combined     = combined,
+       kept_batches = kept,
+       n_by_library = n_by_library)
+}
+
+
 # run_pairwise_de ---------------------------------------------------------
 #' @name run_pairwise_de
 #' @description Subsets cells by cluster label, runs findMarkers, writes CSVs.

@@ -1,0 +1,602 @@
+---
+title: "17_germ_pseudotime_tscan"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    results_date: "20260813"
+    lineage: "female"
+    female_clusters: "5"
+    male_clusters: "12_transformer,15,16,17,18"
+    male_root: "12_transformer"
+    all_clusters: "5,12_transformer,15,16,17,18"
+    all_root: "12_transformer"
+    split_by_subcluster: "5"
+    sub_k: 0
+    sub_k_range: "5,10,15,20,25,30,40,50"
+    sub_n_iterations: 10
+    root_node: ""
+    min_library_cells: 50
+    fdr_cut: 0.01
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+cat("#### Lineage:", params$lineage, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(batchelor)
+library(BiocSingular)
+library(TSCAN)
+library(patchwork)
+library(DT)
+library(ggraph)
+library(tidygraph)
+library(scatterpie)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+TSCAN pseudotime for the `r params$lineage` germ cell clusters. The lineage is
+`female`, `male`, or `all`, which orders every germ cluster in one tree.
+`18_germ_pseudotime_monocle3.Rmd` computes pseudotime for the same cells with
+monocle3, and `knit_17_18_pseudotime.sh` knits both documents for each lineage.
+
+Clusters named in `split_by_subcluster` are subclustered within this document
+and enter the tree as their subclusters.
+
+Stage and collection date vary together in this dataset, so the ordering is not
+shown to be developmental. The library composition of each node and the variance
+in pseudotime explained by library are reported with the result.
+
+```{r}
+lineage = as.character(params$lineage)
+if (!lineage %in% c("female", "male", "all"))
+  stop("lineage must be 'female', 'male' or 'all', not '", lineage, "'")
+
+clusters = trimws(strsplit(as.character(switch(lineage,
+  female = params$female_clusters,
+  male   = params$male_clusters,
+  all    = params$all_clusters)), ",")[[1]])
+clusters = clusters[nzchar(clusters)]
+
+object_dir      = paste0(params$project_dir, "/results/", params$results_date,
+                         "_no_doublets")
+atlas_dir       = paste0(params$project_dir, "/results/", params$results_date,
+                         "_atlas")
+results_dir     = paste0(params$project_dir, "/results/", params$results_date,
+                         "_pseudotime_tscan_", lineage)
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+
+label_file = paste0(atlas_dir, "/cell_cluster_labels.csv")
+if (!file.exists(label_file))
+  stop("missing ", label_file, ". Run 13_atlas_and_stage_correspondence.Rmd first.")
+
+cell_labels      = read.csv(label_file, stringsAsFactors = FALSE)
+all.sce          = readRDS(paste0(object_dir, "/all.sce.Rds"))
+gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE) %>%
+  dplyr::distinct(Gene, .keep_all = TRUE)
+
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+```
+
+# Cells
+
+```{r}
+absent = setdiff(clusters, cell_labels$final_label)
+if (length(absent) > 0)
+  stop("cluster(s) ", paste(absent, collapse = ", "), " are not in ", label_file,
+       ". Labels present: ",
+       paste(sort(unique(cell_labels$final_label)), collapse = ", "),
+       ". Set the ", lineage, "_clusters parameter from the current labelling.")
+
+lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
+
+comp_tab = lineage_key %>%
+  dplyr::count(final_label, cell_type, library, name = "n") %>%
+  tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
+  dplyr::mutate(Total = rowSums(dplyr::across(dplyr::any_of(names(lib_cols))))) %>%
+  dplyr::arrange(match(final_label, clusters))
+
+write.csv(comp_tab, file = paste0(results_dir, "/cluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(comp_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ".")`
+
+# Corrected space
+
+Libraries contributing fewer than `r params$min_library_cells` cells are dropped.
+With more than one library left, the space is `fastMNN` output computed on these
+cells alone. With one library, it is PCA on that library.
+
+```{r}
+obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
+obj_sig_file = paste0(Robject_out_dir, "/lineage_objects_signature.txt")
+obj_sig      = paste(lineage, paste(sort(clusters), collapse = ","),
+                     nrow(lineage_key), params$min_library_cells, sep = "|")
+
+if (file.exists(obj_file) && file.exists(obj_sig_file) &&
+    identical(readLines(obj_sig_file, warn = FALSE)[1], obj_sig)) {
+  objs = readRDS(obj_file)
+} else {
+  objs = build_lineage_sce(all.sce, lineage_key$barcode,
+                           min_library_cells = params$min_library_cells)
+  saveRDS(objs, file = obj_file)
+  writeLines(obj_sig, obj_sig_file)
+}
+
+merged   = objs$corrected
+combined = objs$combined
+
+# metadata attached by barcode, never by position
+key_idx = match(colnames(merged), lineage_key$barcode)
+stopifnot(!anyNA(key_idx))
+merged$library     = lineage_key$library[key_idx]
+merged$stage       = lineage_key$stage[key_idx]
+merged$final_label = lineage_key$final_label[key_idx]
+merged$cell_type   = lineage_key$cell_type[key_idx]
+
+lib_tab = data.frame(batch   = names(objs$n_by_library),
+                     n_cells = as.integer(objs$n_by_library),
+                     kept    = names(objs$n_by_library) %in% objs$kept_batches,
+                     stringsAsFactors = FALSE) %>%
+  dplyr::left_join(dplyr::distinct(cell_labels, batch, library), by = "batch")
+
+datatable(lib_tab, rownames = FALSE, options = list(dom = "t"))
+```
+
+`r n_kept = length(objs$kept_batches); paste0(format(ncol(merged), big.mark = ","), " cells from ", n_kept, " librar", if (n_kept == 1) "y" else "ies", " are kept.")`
+
+# Nodes
+
+TSCAN builds a minimum spanning tree over node centroids, so it needs at least
+two nodes.
+
+```{r}
+split_clusters = trimws(strsplit(as.character(params$split_by_subcluster), ",")[[1]])
+split_clusters = intersect(split_clusters[nzchar(split_clusters)], clusters)
+have_split     = length(split_clusters) > 0
+```
+
+`r if (have_split) paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " are subclustered in this lineage's corrected space, using only that cluster's cells, and every other cluster is one node. k is the most reproducible value in a subsampling stability sweep that gives at least two clusters, unless the sub_k parameter is set. The space depends on the lineage, so cluster 5 subclusters from the female and all runs are computed separately and need not match.") else paste0("The ", length(clusters), " selected clusters are the nodes.")`
+
+```{r, eval=have_split}
+k_range = as.integer(trimws(strsplit(as.character(params$sub_k_range), ",")[[1]]))
+stopifnot(length(k_range) > 0, !anyNA(k_range))
+
+sub_assign = list()
+stab_tabs  = list()
+chosen_ks  = integer(0)
+
+for (cl in split_clusters) {
+  cl_cells = colnames(merged)[merged$final_label == cl]
+
+  stab_file     = paste0(Robject_out_dir, "/subcluster_stability_", cl, ".Rds")
+  stab_sig_file = paste0(Robject_out_dir, "/subcluster_stability_", cl, "_signature.txt")
+  stab_sig      = paste(obj_sig, cl, length(cl_cells), paste(k_range, collapse = ","),
+                        params$sub_n_iterations, sep = "|")
+
+  if (file.exists(stab_file) && file.exists(stab_sig_file) &&
+      identical(readLines(stab_sig_file, warn = FALSE)[1], stab_sig)) {
+    stab = readRDS(stab_file)
+  } else {
+    # coordinates only, since find_stable_k subsets the object once per iteration
+    # column names first: reducedDim<- checks its rownames against them
+    lean = SingleCellExperiment(assays = list(), colData = colData(merged)[cl_cells, ])
+    colnames(lean) = cl_cells
+    reducedDim(lean, "corrected") = reducedDim(merged, "corrected")[cl_cells, , drop = FALSE]
+
+    stab = find_stable_k(lean, k_range = k_range,
+                         n_iterations = params$sub_n_iterations,
+                         use.dimred = "corrected")
+    saveRDS(stab, file = stab_file)
+    writeLines(stab_sig, stab_sig_file)
+  }
+
+  tab = dplyr::bind_rows(lapply(stab, function(z)
+    data.frame(cluster = cl, k = z$k, mean_n_clusters = z$mean_n_clusters,
+               mean_ari = z$mean_ari, min_ari = z$min_ari)))
+
+  eligible = tab %>% dplyr::filter(mean_n_clusters >= 2, !is.na(mean_ari))
+
+  k_cl =
+    if (as.integer(params$sub_k) > 0) {
+      as.integer(params$sub_k)
+    } else if (nrow(eligible) > 0) {
+      eligible$k[which.max(eligible$mean_ari)]
+    } else {
+      NA_integer_
+    }
+
+  if (is.na(k_cl))
+    stop("cluster ", cl, ": no k in the sweep gave two or more subclusters. ",
+         "Set sub_k to force a value.")
+
+  set.seed(1)
+  snn = buildSNNGraph(merged[, cl_cells], k = k_cl, use.dimred = "corrected")
+  sub_assign[[cl]] = setNames(igraph::cluster_louvain(snn)$membership, cl_cells)
+
+  stab_tabs[[cl]] = tab
+  chosen_ks[cl]   = k_cl
+}
+
+stab_tab = dplyr::bind_rows(stab_tabs)
+write.csv(stab_tab, file = paste0(results_dir, "/subcluster_stability.csv"),
+          row.names = FALSE)
+
+datatable(stab_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (have_split) paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".") else ""`
+
+```{r}
+node_chr = merged$final_label
+
+if (have_split) {
+  for (cl in split_clusters) {
+    idx = which(merged$final_label == cl)
+    # matched by barcode, never by position
+    node_chr[idx] = paste0(cl, ".", sub_assign[[cl]][colnames(merged)[idx]])
+  }
+}
+
+# cluster order from the parameter, subclusters numerically within their cluster
+node_levels = data.frame(parent = merged$final_label, node = node_chr,
+                         stringsAsFactors = FALSE) %>%
+  dplyr::distinct() %>%
+  dplyr::mutate(sub_n = suppressWarnings(
+                  as.integer(sub("^.*\\.([0-9]+)$", "\\1", node))),
+                sub_n = ifelse(node == parent, 0L, sub_n)) %>%
+  dplyr::arrange(match(parent, clusters), sub_n) %>%
+  dplyr::pull(node)
+
+if (length(node_levels) < 2)
+  stop("only one node (", node_levels, "). TSCAN needs at least two; for a ",
+       "single cluster, name it in split_by_subcluster.")
+
+merged$node   = factor(node_chr, levels = node_levels)
+combined$node = merged$node
+
+node_tab = as.data.frame(colData(merged)) %>%
+  dplyr::count(node, library, name = "n") %>%
+  tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
+  dplyr::mutate(Total = rowSums(dplyr::across(dplyr::any_of(names(lib_cols)))))
+
+write.csv(node_tab, file = paste0(results_dir, "/node_composition.csv"),
+          row.names = FALSE)
+
+datatable(node_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## Root
+
+```{r}
+zp_genes = gene_description %>%
+  dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
+  dplyr::pull(Gene) %>%
+  intersect(rownames(combined))
+
+zp_cell = if (length(zp_genes) > 0) {
+  colMeans(as.matrix(logcounts(combined)[zp_genes, , drop = FALSE]))
+} else {
+  rep(NA_real_, ncol(combined))
+}
+
+zp_by_node = data.frame(node = merged$node, zp = zp_cell) %>%
+  dplyr::group_by(node) %>%
+  dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop")
+
+root =
+  if (nzchar(params$root_node)) {
+    as.character(params$root_node)
+  } else if (lineage %in% c("male", "all")) {
+    as.character(if (lineage == "male") params$male_root else params$all_root)
+  } else {
+    if (length(zp_genes) == 0)
+      stop("no ZP genes resolved, so the female root cannot be chosen ",
+           "automatically. Set the root_node parameter.")
+    as.character(zp_by_node$node[which.min(zp_by_node$mean_ZP)])
+  }
+
+if (!root %in% levels(merged$node))
+  stop("root '", root, "' is not a node. Nodes: ",
+       paste(levels(merged$node), collapse = ", "))
+
+root_type = unique(lineage_key$cell_type[lineage_key$final_label == root])
+
+datatable(zp_by_node %>% mutate(mean_ZP = signif(mean_ZP, 3)),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r paste0("The ordering is rooted at node **", root, "**", if (length(root_type) == 1) paste0(" (", root_type, ")") else "", ". ", if (nzchar(params$root_node)) "It was set by the root_node parameter." else if (lineage != "female") paste0("It was set by the ", lineage, "_root parameter.") else "It is the node with the lowest mean zona pellucida (ZP) expression, taken as the least oocyte-like.", " The root is an assumption: rooting the same tree elsewhere gives a different ordering.")`
+
+# Trajectory
+
+```{r}
+pseudo_file     = paste0(Robject_out_dir, "/tscan_pseudo.Rds")
+pseudo_sig_file = paste0(Robject_out_dir, "/tscan_pseudo_signature.txt")
+pseudo_sig      = paste(obj_sig, root, paste(node_levels, collapse = ","),
+                        paste(as.integer(table(merged$node)), collapse = ","),
+                        sep = "|")
+
+if (file.exists(pseudo_file) && file.exists(pseudo_sig_file) &&
+    identical(readLines(pseudo_sig_file, warn = FALSE)[1], pseudo_sig)) {
+  pseudo = readRDS(pseudo_file)
+} else {
+  set.seed(1)
+  pseudo = quickPseudotime(merged,
+                           clusters   = merged$node,
+                           use.dimred = "corrected",
+                           outgroup   = FALSE,
+                           start      = root)
+  saveRDS(pseudo, file = pseudo_file)
+  writeLines(pseudo_sig, pseudo_sig_file)
+}
+
+merged$pseudotime   = averagePseudotime(pseudo$ordering)
+combined$pseudotime = merged$pseudotime
+n_paths = ncol(pseudo$ordering)
+```
+
+`r paste0(n_paths, " path", if (n_paths == 1) "" else "s", " from the root: ", paste(colnames(pseudo$ordering), collapse = ", "), ". The tree is fitted on node centroids in the corrected space and drawn below on the UMAP of that space.")`
+
+```{r, fig.width=12, fig.height=5}
+by_node = aggregateAcrossCells(
+  merged, ids = merged$node,
+  use.assay.type = if ("reconstructed" %in% assayNames(merged)) "reconstructed" else "logcounts")
+
+edges_umap = reportEdges(by_node, mst = pseudo$mst, clusters = NULL,
+                         use.dimred = "UMAP")
+
+p_node = plotUMAP(merged, colour_by = "node", text_by = "node", point_size = .5) +
+  geom_line(data = edges_umap, mapping = aes(x = UMAP1, y = UMAP2, group = edge)) +
+  ggtitle("Nodes")
+p_pt = plotUMAP(merged, colour_by = "pseudotime", point_size = .5) +
+  geom_line(data = edges_umap, mapping = aes(x = UMAP1, y = UMAP2, group = edge)) +
+  ggtitle("Pseudotime")
+
+p_node | p_pt
+ggsave(p_node | p_pt, file = paste0(results_dir, "/tscan_trajectory_umap.png"),
+       width = 12, height = 5)
+```
+
+```{r, fig.width=12, fig.height=4}
+pt_df = as.data.frame(colData(merged))
+
+p_box_node = ggplot(pt_df, aes(x = node, y = pseudotime)) +
+  geom_boxplot(outlier.size = .3) +
+  xlab("node") + ylab("pseudotime")
+p_box_lib = ggplot(pt_df, aes(x = library, y = pseudotime, fill = library)) +
+  geom_boxplot(outlier.size = .3) +
+  scale_fill_manual(values = lib_cols) +
+  xlab(NULL) + ylab("pseudotime") +
+  theme(legend.position = "none")
+
+p_box_node | p_box_lib
+ggsave(p_box_node | p_box_lib, file = paste0(results_dir, "/tscan_pseudotime_by_node.png"),
+       width = 12, height = 4)
+```
+
+## Node graph
+
+Pie charts give the library composition of each node, and the lower panel colors
+nodes by mean pseudotime.
+
+```{r, fig.width=7, fig.height=7}
+sample_tally = pt_df %>%
+  mutate(node = as.factor(node), library = as.factor(library)) %>%
+  group_by(node, library, .drop = FALSE) %>%
+  tally()
+
+node_meta = sample_tally %>%
+  tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
+  ungroup()
+for (l in names(lib_cols)) if (!l %in% names(node_meta)) node_meta[[l]] = 0
+node_meta = node_meta %>%
+  mutate(totalCells = rowSums(across(all_of(names(lib_cols))))) %>%
+  dplyr::rename(name = "node") %>%
+  mutate(name = as.character(name))
+
+mean_pseudo = pt_df %>%
+  group_by(node) %>%
+  summarise(mean_pseudo = mean(pseudotime, na.rm = TRUE), .groups = "drop") %>%
+  dplyr::rename(name = "node") %>%
+  mutate(name = as.character(name))
+
+gr = as_tbl_graph(pseudo$mst) %>%
+  activate(nodes) %>%
+  left_join(node_meta, by = "name") %>%
+  left_join(mean_pseudo, by = "name")
+
+layout_data = create_layout(gr, layout = "stress")
+
+gr_pie =
+  ggraph(layout_data) +
+  geom_edge_link() +
+  geom_scatterpie(aes(x, y), cols = names(lib_cols), data = layout_data,
+                  colour = NA, pie_scale = 1.5) +
+  scale_fill_manual(name = "Library", values = lib_cols) +
+  geom_node_text(aes(label = name), color = "black", size = 2.6) +
+  theme_void(base_size = 8) +
+  theme(legend.position = "left") +
+  labs(tag = "A")
+
+gr_pseudo =
+  ggraph(layout_data) +
+  geom_edge_link() +
+  geom_node_point(aes(color = mean_pseudo), size = 9) +
+  scale_color_viridis_c() +
+  geom_node_text(aes(label = name), vjust = .75, size = 2.6, color = "red") +
+  scale_x_continuous(expand = expansion(mult = 0.15)) +
+  scale_y_continuous(expand = expansion(mult = 0.15)) +
+  theme_void(base_size = 8) +
+  theme(legend.position = "left") +
+  labs(tag = "B")
+
+(gr_pie + coord_fixed()) / (gr_pseudo + coord_fixed())
+ggsave(file = paste0(results_dir, "/tscan_node_graph.pdf"), width = 7, height = 7)
+```
+
+## Library and stage
+
+```{r}
+lib_r2 = if (dplyr::n_distinct(pt_df$library) > 1)
+  summary(lm(pseudotime ~ library, data = pt_df))$r.squared else NA_real_
+stage_r2 = if (dplyr::n_distinct(pt_df$stage) > 1)
+  summary(lm(pseudotime ~ stage, data = pt_df))$r.squared else NA_real_
+```
+
+`r if (is.na(lib_r2)) "All cells come from one library, so library cannot explain pseudotime." else paste0("Library explains ", round(100 * lib_r2, 1), "% of the variance in pseudotime", if (!is.na(stage_r2)) paste0(", and stage explains ", round(100 * stage_r2, 1), "%") else "", ".")`
+
+# Pseudotime-associated genes
+
+Genes changing along each path, tested on uncorrected log counts. All genes at
+FDR < `r params$fdr_cut` are written to `tscan_pseudotime_genes.csv`.
+
+```{r}
+test_file     = paste0(Robject_out_dir, "/tscan_test_pseudotime.Rds")
+test_sig_file = paste0(Robject_out_dir, "/tscan_test_pseudotime_signature.txt")
+
+pseudo_mat = pathStat(pseudo$ordering)
+
+if (file.exists(test_file) && file.exists(test_sig_file) &&
+    identical(readLines(test_sig_file, warn = FALSE)[1], pseudo_sig)) {
+  test_pseudo = readRDS(test_file)
+} else {
+  test_pseudo = TSCAN::testPseudotime(combined, pseudotime = pseudo_mat)
+  saveRDS(test_pseudo, file = test_file)
+  writeLines(pseudo_sig, test_sig_file)
+}
+
+path_genes = dplyr::bind_rows(lapply(seq_along(test_pseudo), function(i) {
+  as.data.frame(test_pseudo[[i]]) %>%
+    tibble::rownames_to_column("Gene") %>%
+    dplyr::mutate(Path = names(test_pseudo)[i])
+})) %>%
+  dplyr::filter(FDR < params$fdr_cut) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::mutate(Direction = ifelse(logFC > 0, "up", "down")) %>%
+  dplyr::select(Path, Direction, Gene, WangGeneID, description, logFC, p.value, FDR) %>%
+  dplyr::arrange(Path, FDR)
+
+write.csv(path_genes, file = paste0(results_dir, "/tscan_pseudotime_genes.csv"),
+          row.names = FALSE)
+
+datatable(path_genes %>% mutate(across(c(logFC, p.value, FDR), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+`r paste0(format(nrow(path_genes), big.mark = ","), " gene-path results at FDR < ", params$fdr_cut, ".")`
+
+## Heatmaps
+
+The 25 most significant genes in each direction along each path.
+
+```{r}
+top_by_path = path_genes %>%
+  dplyr::mutate(set = paste0(Path, ".", Direction)) %>%
+  dplyr::group_by(set) %>%
+  dplyr::arrange(FDR, desc(abs(logFC)), .by_group = TRUE) %>%
+  dplyr::slice_head(n = 25) %>%
+  dplyr::summarise(Gene = list(Gene), .groups = "drop") %>%
+  tibble::deframe()
+
+# the heatmap's pseudotime bar uses a fixed 0 to 1 color scale
+pt_range = range(combined$pseudotime, na.rm = TRUE)
+combined$pseudotime_scaled = (combined$pseudotime - pt_range[1]) / diff(pt_range)
+
+heatmaps = list()
+for (s in names(top_by_path)) {
+  gene_ids    = top_by_path[[s]]
+  gene_labels = gene_description$WangGeneID[match(gene_ids, gene_description$Gene)]
+  gene_labels = ifelse(is.na(gene_labels), gene_ids, gene_labels)
+
+  path_name   = sub("\\.(up|down)$", "", s)
+  cell_subset = rownames(pseudo_mat)[!is.na(pseudo_mat[, path_name])]
+
+  heatmaps[[s]] = plot_pseudotime_heatmap(combined, gene_ids, gene_labels,
+                                          cell_subset,
+                                          pseudotime_column = "pseudotime_scaled")
+}
+```
+
+```{r, fig.width=7, fig.height=5, results="asis"}
+for (s in names(heatmaps)) {
+  cat("\n\n### ", s, "\n\n", sep = "")
+  hp = (heatmaps[[s]][[1]] / heatmaps[[s]][[2]]) + plot_layout(heights = c(0.03, 1))
+  print(hp)
+  ggsave(hp, file = paste0(results_dir, "/tscan_heatmap_",
+                           gsub("[^A-Za-z0-9]+", "_", s), ".png"),
+         width = 7, height = 5)
+}
+```
+
+# Export
+
+```{r}
+cell_out = pt_df %>%
+  tibble::rownames_to_column("barcode") %>%
+  dplyr::select(barcode, library, stage, final_label, cell_type, node, pseudotime)
+
+umap = reducedDim(merged, "UMAP")
+cell_out$UMAP1 = umap[, 1]
+cell_out$UMAP2 = umap[, 2]
+
+write.csv(cell_out, file = paste0(results_dir, "/pseudotime_per_cell.csv"),
+          row.names = FALSE)
+```
+
+Per-cell pseudotime is written to `pseudotime_per_cell.csv`.
+
+# Summary
+
+```{r}
+summary_tbl = data.frame(
+  quantity = c("lineage", "clusters", "cells", "libraries kept", "nodes", "root",
+               "paths", "variance in pseudotime explained by library",
+               paste0("gene-path results at FDR < ", params$fdr_cut)),
+  value = c(lineage,
+            paste(clusters, collapse = ", "),
+            format(ncol(merged), big.mark = ","),
+            paste(objs$kept_batches, collapse = ", "),
+            as.character(nlevels(merged$node)),
+            root,
+            as.character(n_paths),
+            if (is.na(lib_r2)) "one library" else paste0(round(100 * lib_r2, 1), "%"),
+            format(nrow(path_genes), big.mark = ",")),
+  stringsAsFactors = FALSE)
+
+datatable(summary_tbl, rownames = FALSE, colnames = c("", ""),
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
