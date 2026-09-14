@@ -213,10 +213,8 @@ Subclustering uncorrected cells from several libraries recovers the libraries,
 because they are the largest source of variation. A trajectory over nodes
 defined that way would be a graph of libraries. The subclusters are therefore
 built in `fastMNN` corrected space, computed on this cluster's cells alone
-rather than inherited from the all-cells correction.
-`14_germ_cell_trajectory.Rmd` uses the same recipe for the germ clusters. The
-correction runs across every library that contributes cells to this cluster,
-larval libraries included.
+rather than inherited from the all-cells correction. The correction runs across
+every library that contributes cells to this cluster, larval libraries included.
 
 The corrected object defines subcluster membership and nothing else. The
 continuum tests stay on uncorrected expression.

@@ -1,0 +1,586 @@
+---
+title: "16_bulk_validation"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    results_date: "20260813"
+    genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
+    nfcore_dir: ""
+    marker_file: canonical_markers_S1_only_2026-08-14.csv
+    top_n_list: "100,250,500"
+    n_boot: 2000
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(edgeR)
+library(patchwork)
+library(ggrepel)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+Independent evidence for the stage-associated patterns, following
+`revision_yasmin_validation_plan.md`. Answers the reviewer's request for
+"independent evidence supporting the stage-associated patterns, such as
+agreement with staining or previous bulk RNA-seq studies."
+
+# Scope
+
+**What agreement shows.** Whether the larva-to-transformer expression changes we
+report reproduce in animals collected, dissected, prepared and sequenced by a
+different group at a different time. Our July-to-November technical batch does
+not exist in Yasmin's data, so a pattern driven by that batch has no reason to
+appear there.
+
+**What it does not show.** That the changes are developmental. Yasmin's series
+has its own collection structure and may carry its own confounds. Agreement shows
+the pattern is not specific to our batch. That is what the reviewer asks for,
+and the claim goes no further.
+
+**Bulk is a mixture.** A gene changing in bulk can reflect a shift in which cell
+types are present rather than a change within any cell type. Pseudobulk shares
+this property, so the comparison is like for like. The composition section tests
+how much of the agreement it explains.
+
+**The larval endpoint is the weakest match.** Our larvae are 112 mm. Every
+larval-stage animal in Yasmin's series is smaller, the largest being 99 mm, and
+their 74–99 mm animals are already classed as past the point where ovarian
+differentiation completes. The transformer endpoints match on both axes; the
+larval endpoint is a size extrapolation on both.
+
+```{r}
+object_dir  = paste0(params$project_dir, "/results/", params$results_date,
+                     "_no_doublets")
+atlas_dir   = paste0(params$project_dir, "/results/", params$results_date,
+                     "_atlas")
+results_dir = paste0(params$project_dir, "/results/", params$results_date,
+                     "_bulk_validation")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+data_dir    = paste0(params$project_dir, "/data")
+```
+
+```{r}
+# The Yasmin reads were quantified with nf-core/rnaseq. Point nfcore_dir at that
+# run's output directory: either the top level, which contains star_salmon/, or
+# star_salmon/ itself. Both are accepted.
+#
+# Preference order is deliberate. length-scaled counts are the right input for
+# edgeR without offsets, because they carry the transcript-length correction
+# that makes gene-level Salmon estimates comparable across samples. Plain
+# gene_counts is used only if the length-scaled file is absent, and is rounded.
+nfcore_candidates = c(
+  "star_salmon/salmon.merged.gene_counts_length_scaled.tsv",
+  "salmon/salmon.merged.gene_counts_length_scaled.tsv",
+  "star_salmon/salmon.merged.gene_counts.tsv",
+  "salmon/salmon.merged.gene_counts.tsv",
+  "salmon.merged.gene_counts_length_scaled.tsv",
+  "salmon.merged.gene_counts.tsv")
+
+nfcore_dir  = as.character(params$nfcore_dir)
+count_path  = NA_character_
+
+if (nzchar(nfcore_dir)) {
+  hits = file.path(nfcore_dir, nfcore_candidates)
+  hits = hits[file.exists(hits)]
+  if (length(hits) > 0) count_path = hits[1]
+}
+
+have_bulk    = !is.na(count_path)
+length_scaled = have_bulk && grepl("length_scaled", count_path)
+```
+
+`r if (!have_bulk && !nzchar(nfcore_dir)) "**The nfcore_dir parameter is not set**, so everything below is skipped. Set it to the nf-core/rnaseq output directory for the Yasmin data, either the run's top level or its star_salmon subdirectory." else ""`
+
+`r if (!have_bulk && nzchar(nfcore_dir)) paste0("**No gene count matrix was found under ", nfcore_dir, "**, so everything below is skipped. Looked for: ", paste(nfcore_candidates, collapse = ", "), ". Found instead: ", paste(head(list.files(nfcore_dir), 20), collapse = ", "), ".") else ""`
+
+`r if (have_bulk) paste0("Counts read from ", basename(count_path), if (length_scaled) ". This is the length-scaled matrix, the appropriate edgeR input without offsets." else ". **This is the unscaled gene_counts matrix**, so the transcript-length correction is absent; prefer salmon.merged.gene_counts_length_scaled.tsv if the run produced one.") else ""`
+
+# The Yasmin series
+
+```{r, eval=have_bulk}
+sample_meta = read.csv(paste0(data_dir, "/yasmin_PRJNA749754_sample_groups.csv"),
+                       stringsAsFactors = FALSE)
+
+# nf-core/rnaseq gene matrix: gene_id, gene_name, then one column per sample.
+x = read.delim(count_path, check.names = FALSE, stringsAsFactors = FALSE)
+
+id_cols = intersect(c("gene_id", "gene_name"), colnames(x))
+if (!"gene_id" %in% id_cols)
+  stop("no gene_id column in ", count_path, ". Columns found: ",
+       paste(head(colnames(x), 10), collapse = ", "))
+
+yasmin_counts = as.matrix(x[, setdiff(colnames(x), id_cols), drop = FALSE])
+rownames(yasmin_counts) = x$gene_id
+
+# Salmon estimates are non-integer. edgeR wants counts, and the length-scaled
+# matrix is already on the count scale, so rounding is the only step needed.
+yasmin_counts = round(yasmin_counts)
+storage.mode(yasmin_counts) = "integer"
+
+# nf-core sample names come from whatever samplesheet was used, which may carry
+# run accessions or the paper's own names. Try each candidate column rather than
+# assuming, and say which one matched.
+id_candidates = c("run", "sample_name", "library_name", "suppT1_id")
+id_candidates = intersect(id_candidates, colnames(sample_meta))
+
+n_matched = vapply(id_candidates, function(cl)
+  sum(colnames(yasmin_counts) %in% sample_meta[[cl]]), integer(1))
+sample_id_col = names(which.max(n_matched))
+
+if (max(n_matched) < ncol(yasmin_counts))
+  stop("could not match all ", ncol(yasmin_counts), " count columns to the ",
+       "sample sheet. Best column was '", sample_id_col, "' matching ",
+       max(n_matched), ". Unmatched: ",
+       paste(setdiff(colnames(yasmin_counts), sample_meta[[sample_id_col]]),
+             collapse = ", "),
+       ". Add the nf-core sample names to ",
+       "data/yasmin_PRJNA749754_sample_groups.csv as a new column, or rename ",
+       "the count columns to run accessions.")
+
+absent = setdiff(sample_meta[[sample_id_col]], colnames(yasmin_counts))
+if (length(absent) > 0)
+  stop(length(absent), " sample(s) in the sample sheet are missing from the ",
+       "count matrix: ", paste(absent, collapse = ", "),
+       ". The nf-core run is incomplete, or its samplesheet omitted them.")
+
+sample_meta = sample_meta[match(colnames(yasmin_counts),
+                                sample_meta[[sample_id_col]]), ]
+stopifnot(identical(sample_meta[[sample_id_col]], colnames(yasmin_counts)))
+```
+
+```{r, eval=have_bulk}
+# a numeric developmental position per animal, parsed from the recorded life
+# stage rather than from the group label, since the mid female group spans
+# stage 1 to post-metamorphosis
+stage_score = function(s) {
+  s = tolower(s)
+  dplyr::case_when(
+    grepl("post-metamorphosis", s)             ~ 8,
+    grepl("metamorphosing stage", s)           ~ suppressWarnings(
+                                                   as.numeric(sub(".*stage ([0-9]+).*",
+                                                                  "\\1", s))),
+    grepl("larval", s)                         ~ 0,
+    grepl("upstream migrant", s)               ~ 10,
+    TRUE                                       ~ NA_real_)
+}
+
+sample_meta$stage_score = stage_score(sample_meta$suppT1_life_stage)
+stopifnot(!any(is.na(sample_meta$stage_score)))
+
+series_tab = sample_meta %>%
+  dplyr::group_by(group_textcounts) %>%
+  dplyr::summarise(n = dplyr::n(),
+                   length_mm = paste0(min(suppT1_length_mm), "-",
+                                      max(suppT1_length_mm)),
+                   stages = paste(sort(unique(suppT1_life_stage)), collapse = "; "),
+                   .groups = "drop")
+
+datatable(series_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## Stage correspondence
+
+Our animals are 112 mm larvae described as sex-labile and 131 mm newly
+transformed transformers. The matches below follow the validation plan and use
+the per-animal records in Supplementary Table 1 rather than the group labels.
+
+```{r, eval=have_bulk}
+# the two stage-matched female transformers, selected by recorded stage rather
+# than by group, since mid females span stage 1 to post-metamorphosis
+tf_match_runs = sample_meta$run[
+  sample_meta$group_textcounts == "MF mid females" &
+  sample_meta$stage_score >= 7]
+
+if (length(tf_match_runs) != 2)
+  stop("expected 2 stage-matched mid females at stage 7 or post-metamorphosis, ",
+       "found ", length(tf_match_runs),
+       ". Check suppT1_life_stage in the sample sheet.")
+
+match_tab = tibble::tribble(
+  ~ours,             ~yasmin,                                          ~basis,
+  "larvae, 112 mm",  "undifferentiated larvae, 57-66 mm",              "both pre-differentiation by description; ours is larger than any larval animal in their series",
+  "TM, 131 mm",      "mid males, 114-133 mm, stage 5 to post-metamorphosis", "lab confirmed; lengths and stages agree",
+  "TF, 131 mm",      paste0(paste(sample_meta$sample_name[
+                                    match(tf_match_runs, sample_meta$run)],
+                                  collapse = ", "), ", 129-130 mm"),
+                                                                       "stage 7 and post-metamorphosis mid females; mirrors the male match")
+
+datatable(match_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+# Pseudobulk
+
+Raw counts are summed across all cells within each library, giving four samples.
+Corrected and per-cell normalized values are not used, because a bulk library
+measures summed raw counts.
+
+```{r, eval=have_bulk}
+pseudo_file = paste0(Robject_out_dir, "/pseudobulk.Rds")
+
+if (file.exists(pseudo_file)) {
+  pseudobulk = readRDS(pseudo_file)
+} else {
+  all.sce = readRDS(paste0(object_dir, "/all.sce.Rds"))
+  universe = Reduce(intersect, lapply(all.sce, rownames))
+  pseudobulk = vapply(all.sce, function(x)
+    Matrix::rowSums(counts(x[universe, ])), numeric(length(universe)))
+  rownames(pseudobulk) = universe
+  saveRDS(pseudobulk, file = pseudo_file)
+}
+
+library_meta = data.frame(
+  batch   = c("UND1_C00004336", "UND2_C00004362", "TF_C00004337", "TM_C00004374"),
+  library = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male"),
+  stage   = c("larva", "larva", "transformer", "transformer"),
+  stringsAsFactors = FALSE)
+
+colnames(pseudobulk) = library_meta$library[
+  match(colnames(pseudobulk), library_meta$batch)]
+stopifnot(!any(is.na(colnames(pseudobulk))))
+```
+
+`r if (have_bulk) paste0("Pseudobulk over ", format(nrow(pseudobulk), big.mark = ","), " genes and ", ncol(pseudobulk), " libraries.") else ""`
+
+## Shared gene set
+
+```{r, eval=have_bulk}
+shared = intersect(rownames(pseudobulk), rownames(yasmin_counts))
+
+overlap_tab = data.frame(
+  set = c("our single-cell genes", "Yasmin quantified genes", "shared"),
+  n   = c(nrow(pseudobulk), nrow(yasmin_counts), length(shared)))
+
+datatable(overlap_tab, rownames = FALSE, options = list(dom = "t"))
+
+if (length(shared) < 0.5 * nrow(pseudobulk))
+  stop("only ", length(shared), " of ", nrow(pseudobulk), " genes are shared. ",
+       "Both sides should be NCBI kPetMar1 gene ids, so a low overlap means the ",
+       "nf-core run used a different annotation from the single-cell counts. ",
+       "Diagnose before continuing.")
+```
+
+`r if (have_bulk) paste0("**", format(length(shared), big.mark = ","), " genes are shared** and everything below runs on that set. Genes are matched by identifier, with no ortholog assignment.") else ""`
+
+# Yasmin stage effects
+
+```{r, eval=have_bulk}
+y = DGEList(counts = yasmin_counts[shared, ], samples = sample_meta)
+keep = filterByExpr(y, group = sample_meta$group_textcounts)
+y = y[keep, , keep.lib.sizes = FALSE]
+y = calcNormFactors(y)
+
+tested = rownames(y)
+```
+
+`r if (have_bulk) paste0(format(length(tested), big.mark = ","), " genes pass filterByExpr in the Yasmin series and carry through to the comparison.") else ""`
+
+```{r, eval=have_bulk}
+# Four contrasts: an endpoint-matched two-group test and an ordered trend, on
+# each sex axis. The endpoint tests supply effect sizes for the correlation; the
+# trends supply per-gene significance for any gene named individually.
+run_two_group = function(dge, run_a, run_b, label) {
+  sub = dge[, c(run_a, run_b)]
+  grp = factor(c(rep("early", length(run_a)), rep("late", length(run_b))),
+               levels = c("early", "late"))
+  des = model.matrix(~grp)
+  sub = estimateDisp(sub, des)
+  fit = glmQLFit(sub, des)
+  res = glmQLFTest(fit, coef = 2)
+  topTags(res, n = Inf, sort.by = "none")$table %>%
+    tibble::rownames_to_column("Gene") %>%
+    dplyr::select(Gene, logFC, PValue, FDR) %>%
+    dplyr::rename_with(~paste0(label, "_", .x), -Gene)
+}
+
+run_trend = function(dge, runs, score, label) {
+  sub = dge[, runs]
+  des = model.matrix(~score)
+  sub = estimateDisp(sub, des)
+  fit = glmQLFit(sub, des)
+  res = glmQLFTest(fit, coef = 2)
+  topTags(res, n = Inf, sort.by = "none")$table %>%
+    tibble::rownames_to_column("Gene") %>%
+    dplyr::select(Gene, logFC, PValue, FDR) %>%
+    dplyr::rename_with(~paste0(label, "_", .x), -Gene)
+}
+
+g = sample_meta$group_textcounts
+runs_ud = sample_meta$run[g == "UD undifferentiated larvae"]
+runs_pm = sample_meta$run[g == "PM prospective males"]
+runs_em = sample_meta$run[g == "EM early males"]
+runs_mm = sample_meta$run[g == "MM mid males"]
+runs_ef = sample_meta$run[g == "EF early females"]
+runs_mf = sample_meta$run[g == "MF mid females"]
+
+# male endpoint and male ordered trend over the four ordered male-axis groups
+male_end = run_two_group(y, runs_ud, runs_mm, "male_end")
+
+male_runs  = c(runs_ud, runs_pm, runs_em, runs_mm)
+male_score = c(rep(0, length(runs_ud)), rep(1, length(runs_pm)),
+               rep(2, length(runs_em)), rep(3, length(runs_mm)))
+male_trend = run_trend(y, male_runs, male_score, "male_trend")
+
+# female endpoint uses the two stage-matched mid females, not the whole group
+fem_end = run_two_group(y, runs_ud, tf_match_runs, "fem_end")
+
+fem_runs  = c(runs_ud, runs_ef, runs_mf)
+fem_score = c(rep(0, length(runs_ud)), rep(1, length(runs_ef)),
+              2 + rank(sample_meta$stage_score[match(runs_mf, sample_meta$run)],
+                       ties.method = "min") / length(runs_mf))
+fem_trend = run_trend(y, fem_runs, fem_score, "fem_trend")
+
+yasmin_res = Reduce(function(a, b) dplyr::full_join(a, b, by = "Gene"),
+                    list(male_end, male_trend, fem_end, fem_trend))
+```
+
+```{r, eval=have_bulk}
+contrast_tab = data.frame(
+  contrast = c("male endpoint", "male trend", "female endpoint", "female trend"),
+  design   = c(paste0("UD (n=", length(runs_ud), ") vs mid males (n=",
+                      length(runs_mm), ")"),
+               paste0("UD, PM, EM, MM ordered (n=", length(male_runs), ")"),
+               paste0("UD (n=", length(runs_ud), ") vs stage-matched mid females (n=",
+                      length(tf_match_runs), ")"),
+               paste0("UD, EF, MF ordered (n=", length(fem_runs), ")")),
+  n_FDR_05 = c(sum(yasmin_res$male_end_FDR   < 0.05, na.rm = TRUE),
+               sum(yasmin_res$male_trend_FDR < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_end_FDR    < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_trend_FDR  < 0.05, na.rm = TRUE)))
+
+datatable(contrast_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+The endpoint contrasts have little power, the female one least at 2 against 2.
+The correlation below uses effect sizes only, and noise in the Yasmin estimates
+pulls agreement toward zero, so low power makes that test conservative. Per-gene
+significance comes from the trends.
+
+# Our stage effect
+
+With two larval libraries against one transformer library per sex, this is not a
+formal test. The log fold change is used as an effect size and no p-values are
+reported from it.
+
+```{r, eval=have_bulk}
+p = DGEList(counts = pseudobulk[shared, ][tested, ])
+p = calcNormFactors(p)
+plog = cpm(p, log = TRUE, prior.count = 1)
+
+larva_mean = rowMeans(plog[, c("Undifferentiated.1", "Undifferentiated.2")])
+
+ours = data.frame(
+  Gene       = rownames(plog),
+  ours_male  = plog[, "Male"]   - larva_mean,
+  ours_female = plog[, "Female"] - larva_mean,
+  stringsAsFactors = FALSE)
+```
+
+# The comparison
+
+```{r, eval=have_bulk}
+cmp = ours %>% dplyr::inner_join(yasmin_res, by = "Gene")
+
+top_ns = as.integer(trimws(strsplit(as.character(params$top_n_list), ",")[[1]]))
+
+# Spearman with a bootstrap CI: cor.test gives a p-value but no interval, and
+# the interval is the more informative quantity here
+spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
+  ok = is.finite(x) & is.finite(y)
+  x = x[ok]; y = y[ok]
+  r = suppressWarnings(cor(x, y, method = "spearman"))
+  set.seed(seed)
+  bs = replicate(n_boot, {
+    i = sample(length(x), replace = TRUE)
+    suppressWarnings(cor(x[i], y[i], method = "spearman"))
+  })
+  c(rho = r, lo = unname(quantile(bs, .025, na.rm = TRUE)),
+    hi = unname(quantile(bs, .975, na.rm = TRUE)), n = length(x))
+}
+
+# genome-wide, then restricted to our strongest stage genes. The contrast
+# between the two is the informative quantity: any two gonad datasets correlate
+# positively genome-wide because both are dominated by the same abundant genes.
+agreement_for = function(ours_col, yas_col, axis) {
+  rows = list()
+  gw = spearman_ci(cmp[[ours_col]], cmp[[yas_col]])
+  rows[[1]] = data.frame(axis = axis, set = "genome-wide", n = gw[["n"]],
+                         rho = gw[["rho"]], lo = gw[["lo"]], hi = gw[["hi"]],
+                         pct_same_sign = NA_real_, binom_p = NA_real_)
+
+  ord = order(abs(cmp[[ours_col]]), decreasing = TRUE)
+  for (n in top_ns) {
+    idx = ord[seq_len(min(n, nrow(cmp)))]
+    s = spearman_ci(cmp[[ours_col]][idx], cmp[[yas_col]][idx])
+    agree = sign(cmp[[ours_col]][idx]) == sign(cmp[[yas_col]][idx])
+    agree = agree[is.finite(agree)]
+    bt = binom.test(sum(agree), length(agree), p = 0.5)
+    rows[[length(rows) + 1]] = data.frame(
+      axis = axis, set = paste0("top ", n), n = length(idx),
+      rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]],
+      pct_same_sign = 100 * mean(agree), binom_p = bt$p.value)
+  }
+  dplyr::bind_rows(rows)
+}
+
+agreement = dplyr::bind_rows(
+  agreement_for("ours_male",   "male_end_logFC", "male, endpoint"),
+  agreement_for("ours_male",   "male_trend_logFC", "male, trend"),
+  agreement_for("ours_female", "fem_end_logFC",  "female, endpoint"),
+  agreement_for("ours_female", "fem_trend_logFC", "female, trend"))
+
+write.csv(agreement, file = paste0(results_dir, "/bulk_agreement.csv"),
+          row.names = FALSE)
+
+datatable(agreement %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (have_bulk) { a = agreement[agreement$axis == "male, endpoint", ]; gw = a$rho[a$set == "genome-wide"]; tp = a$rho[a$set == paste0("top ", top_ns[1])]; sg = a$pct_same_sign[a$set == paste0("top ", top_ns[1])]; paste0("On the male axis the genome-wide correlation is ", signif(gw, 3), " and the correlation across our top ", top_ns[1], " stage genes is ", signif(tp, 3), ", with ", signif(sg, 3), "% sign agreement. Report both. Any two gonad datasets correlate positively genome-wide, so the difference between the two values carries the information.") } else ""`
+
+```{r, eval=have_bulk, fig.width=11, fig.height=5.5}
+scatter_for = function(ours_col, yas_col, title, n_label = 15) {
+  d = cmp %>%
+    dplyr::select(Gene, ours = dplyr::all_of(ours_col),
+                  yasmin = dplyr::all_of(yas_col)) %>%
+    dplyr::filter(is.finite(ours), is.finite(yasmin))
+  lab = d %>% dplyr::slice_max(abs(ours), n = n_label, with_ties = FALSE)
+
+  ggplot(d, aes(x = ours, y = yasmin)) +
+    geom_hline(yintercept = 0, colour = "grey80") +
+    geom_vline(xintercept = 0, colour = "grey80") +
+    geom_point(alpha = .2, size = .5) +
+    geom_point(data = lab, colour = "#c1272d", size = 1.2) +
+    geom_text_repel(data = lab, aes(label = Gene), size = 2.5, max.overlaps = 20) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = .5, colour = "#004488") +
+    labs(x = "our pseudobulk log2FC, larva to transformer",
+         y = "Yasmin log2FC", title = title) +
+    theme_bw()
+}
+
+p_male = scatter_for("ours_male", "male_end_logFC", "Male axis, endpoint-matched")
+p_fem  = scatter_for("ours_female", "fem_end_logFC", "Female axis, endpoint-matched")
+
+p_male + p_fem
+
+ggsave(p_male + p_fem, file = paste0(results_dir, "/bulk_agreement_scatter.png"),
+       width = 11, height = 5.5, dpi = 300)
+```
+
+# Composition
+
+A bulk change can arise because a cell type became more abundant rather than
+because any cell changed. If agreement is concentrated in cell type marker
+genes, the shared signal is largely compositional: both datasets see the same
+shift in which cell types are present. If it holds for non-markers too,
+expression is changing within cell types in both.
+
+Either outcome supports the reviewer's point. The result decides how the claim
+is worded.
+
+```{r, eval=have_bulk}
+marker_path = paste0(data_dir, "/", params$marker_file)
+have_markers = file.exists(marker_path)
+
+if (have_markers) {
+  km = read.csv(marker_path, stringsAsFactors = FALSE)
+  marker_genes = unique(c(km$loc_id, km$symbol))
+  marker_genes = marker_genes[!is.na(marker_genes) & nzchar(marker_genes)]
+
+  cmp$is_marker = cmp$Gene %in% marker_genes
+
+  comp_rows = lapply(c(TRUE, FALSE), function(m) {
+    d = cmp[cmp$is_marker == m, ]
+    s = spearman_ci(d$ours_male, d$male_end_logFC)
+    data.frame(gene_set = if (m) "cell type markers" else "all other genes",
+               n = s[["n"]], rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]])
+  })
+  comp_tab = dplyr::bind_rows(comp_rows)
+
+  datatable(comp_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+            rownames = FALSE, options = list(dom = "t"))
+}
+```
+
+`r if (have_bulk && exists("have_markers") && !have_markers) paste0("**Composition check skipped**, the marker file ", params$marker_file, " was not found in the data directory.") else ""`
+
+`r if (have_bulk && exists("comp_tab")) { mk = comp_tab$rho[comp_tab$gene_set == "cell type markers"]; ot = comp_tab$rho[comp_tab$gene_set == "all other genes"]; if (is.finite(mk) && is.finite(ot) && mk - ot > 0.1) "Agreement is stronger among marker genes than among other genes, so part of the shared signal is compositional. Describe it as a shift in gonad composition and expression together." else "Agreement is not concentrated in marker genes, so it is not mainly compositional. Expression appears to change within cell types in both datasets." } else ""`
+
+# Export
+
+```{r, eval=have_bulk}
+out = cmp %>%
+  dplyr::select(Gene, ours_male, ours_female,
+                dplyr::starts_with("male_"), dplyr::starts_with("fem_"))
+
+write.csv(out, file = paste0(results_dir, "/bulk_vs_pseudobulk_per_gene.csv"),
+          row.names = FALSE)
+
+datatable(head(out %>% mutate(across(where(is.numeric), ~signif(., 3))), 100),
+          rownames = FALSE, filter = "top")
+```
+
+# Summary
+
+```{r, eval=have_bulk}
+male_row = agreement[agreement$axis == "male, endpoint" &
+                       agreement$set == paste0("top ", top_ns[1]), ]
+fem_row  = agreement[agreement$axis == "female, endpoint" &
+                       agreement$set == paste0("top ", top_ns[1]), ]
+
+summary_tbl = data.frame(
+  question = c("shared genes tested",
+               "male axis, rho on top genes",
+               "male axis, % same sign",
+               "female axis, rho on top genes",
+               "female axis, % same sign",
+               "female animals at the matched endpoint"),
+  answer = c(format(nrow(cmp), big.mark = ","),
+             signif(male_row$rho, 3),
+             paste0(signif(male_row$pct_same_sign, 3), "%"),
+             signif(fem_row$rho, 3),
+             paste0(signif(fem_row$pct_same_sign, 3), "%"),
+             as.character(length(tf_match_runs))))
+
+datatable(summary_tbl, rownames = FALSE,
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
+## What this does not answer
+
+Agreement shows the pattern reproduces in a series without our July-to-November
+batch. It does not separate stage from batch within our data.
+
+The female result rests on two stage-matched animals. It supports the male axis
+rather than replicating it independently.
+
+The larval endpoint is matched by stage description rather than by size. Our
+larvae are larger than every larval animal in the comparison series, and
+settling that is a question for the lab's staging practice.
+
+# Session info
+
+```{r}
+sessionInfo()
+```
