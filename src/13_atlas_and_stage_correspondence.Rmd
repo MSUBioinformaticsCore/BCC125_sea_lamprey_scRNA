@@ -249,8 +249,8 @@ determines how many communities Louvain clustering finds.
 
 The sweep clusters ten independent 80% subsamples of the cells at each `k` and
 compares pairs of subsamples on the cells they share. Agreement is the adjusted
-Rand index. It asks, for every pair of cells, whether the two different clustering results
-agree about putting that pair together or apart, and sums over all pairs.
+Rand index, which scores whether two clusterings agree about putting each pair
+of cells together or apart, adjusted for the agreement expected by chance.
 
 The sweep takes about 45 minutes on the full object, so it is run separately by
 `src/slurm_stable_k.sh`, which reads the merged object and writes to
@@ -326,18 +326,15 @@ ggsave(p_stab, file = paste0(results_dir, "/clustering_stability.png"),
 best_k = stability$k[which.max(stability$mean_ari)]
 ```
 
-`r paste0("**The most stable k is ", best_k, "**, at a mean ARI of ", max(stability$mean_ari), ". The document clusters at k = ", params$k, if (best_k == params$k) ", which is that value." else paste0(", which is not that value; set the k parameter to ", best_k, " to use it."), " Every k from ", min(stability$k), " to ", max(stability$k), " clears 0.91, so the curve is a shallow arc rather than a knife edge and the choice is not load bearing.")`
+`r paste0("**The most stable k is ", best_k, "**, with a mean ARI of ", signif(max(stability$mean_ari), 3), ". The document clusters at k = ", params$k, if (best_k == params$k) "." else paste0(". Set the k parameter to ", best_k, " to use the most stable value."), " Mean ARI ranges from ", signif(min(stability$mean_ari), 3), " to ", signif(max(stability$mean_ari), 3), " across the sweep.")`
 
-**What this does and does not support.** A high ARI at a given `k` means the
-clusters reproduce when the cells are perturbed at that `k`. It does not mean
-the partition is insensitive to `k` itself: mean cluster count moves from 24.8
-down to 17.5 across the sweep. So the sweep supports "the clustering is
-reproducible at the chosen `k`", not "this is the correct number of clusters".
+A high ARI at a given `k` means the clusters reproduce when the cells are
+perturbed at that `k`. It does not mean the partition is insensitive to `k`
+itself. `r paste0("Mean cluster count moves from ", signif(max(stability$mean_n_clusters), 3), " to ", signif(min(stability$mean_n_clusters), 3), " across the sweep.")` The sweep supports "the clustering is reproducible at the
+chosen `k`", not "this is the correct number of clusters".
 
-Worth keeping in mind that stability alone is not a sufficient criterion, since
-a coarser clustering is generally more stable. Here the curve peaks in the
-middle rather than rising with `k`, so the two are not simply trading off, but
-the peak should not be read as the biologically correct resolution.
+Stability alone does not pick a resolution, because a coarser clustering is
+generally more stable. `r if (best_k > min(stability$k) && best_k < max(stability$k)) "Here the most stable value lies inside the sweep rather than at its coarsest end, but that peak is still not the biologically correct resolution." else "Here the most stable value lies at the edge of the sweep, so the sweep may not contain the peak."`
 
 # Cluster
 
@@ -503,7 +500,7 @@ top_qc     = qc_summary %>% slice_max(median_genes, n = 1, with_ties = FALSE)
 bot_qc     = qc_summary %>% slice_min(median_genes, n = 1, with_ties = FALSE)
 ```
 
-`r paste0("Median genes per cell ranges from ", bot_qc$median_genes, " in cluster ", bot_qc$cluster, " to ", top_qc$median_genes, " in cluster ", top_qc$cluster, ", against a median across clusters of ", med_of_med, ". Some spread is expected, since cell types genuinely differ in how much RNA they carry.")`
+`r paste0("Median genes per cell ranges from ", bot_qc$median_genes, " in cluster ", bot_qc$cluster, " to ", top_qc$median_genes, " in cluster ", top_qc$cluster, ", against a median across clusters of ", med_of_med, ". Cell types differ in how much RNA they carry, so some spread is expected.")`
 
 # Stage and library metadata
 
@@ -535,8 +532,8 @@ datatable(library_meta, rownames = FALSE, options = list(dom = "t"))
 **Stage is confounded with collection date and technical batch.** Larvae were
 collected in July and transformers in November, so nothing computed from this
 dataset can say how much of the larva-to-transformer difference is
-developmental. The analysis below does not try. It asks whether the populations
-correspond, not what makes them differ.
+developmental. The analysis below asks whether the populations correspond, not
+what makes them differ.
 
 # Cluster composition
 
@@ -629,7 +626,7 @@ one_lib_pre = flag_one_library(comp_pre)
 
 `r if (nrow(one_lib_pre) == 0) "No cluster draws 90% or more of its cells from a single library." else paste0("**", nrow(one_lib_pre), " cluster(s) draw 90% or more of their cells from one library: ", paste(one_lib_pre$label, collapse = ", "), ".** For those, any contrast against another cluster is also a contrast between animals, and where that library is a transformer it is a contrast between sexes as well.")`
 
-# Do the clusters contain the same populations at both stages?
+# Cluster correspondence across stages
 
 Each cluster's markers are computed from larval cells alone and, separately,
 from transformer cells alone, on uncorrected values. If the genes that define
@@ -638,13 +635,15 @@ and they match cluster 8 better than any other cluster, then cluster 8 is the
 same population on both sides.
 
 **No corrected values enter this test**, so its answer does not depend on the
-`fastMNN` correction being right. And it does not require comparing 
-larva to transformer gene expression directly, which is why it survives the confound.
+`fastMNN` correction. The test compares marker lists within each stage rather
+than expression levels across stages, so a uniform shift between collections
+does not change the result.
 
-**Everything is read against a reference computed the same way.**
+**Every result is read against a replicate reference computed the same way.**
 Undifferentiated.1 against Undifferentiated.2 is two animals of the same stage
-collected on the same date, so it shows what correspondence looks like when only
-replicate variation separates the sides. That is the ceiling, not 100%.
+collected on the same date. It shows how well clusters correspond when only
+replicate variation separates the sides. That sets the ceiling, and the ceiling
+is below 100%.
 
 ## Clusters with enough cells from each side to compare
 
@@ -711,9 +710,8 @@ For each comparison:
 2. **Repeat the following 10 times.**
 
     a. From side A, draw that many cells of every eligible cluster, without
-       replacement. Do the same from side B. Both sides therefore contribute an
-       identical number of cells for every cluster, so neither side has more
-       statistical power than the other.
+       replacement. Do the same from side B, so both sides contribute the same
+       number of cells for every cluster.
 
     b. Run `findMarkers` separately on each side's drawn cells, with the eligible
        clusters as the grouping and **the same cluster set as the competing
@@ -762,32 +760,30 @@ For each comparison:
    cell depth**, since it cannot find itself even between two animals of the same
    stage; otherwise it **corresponds** or **fails** according to its stage result.
 
-### What equal cell depth does and does not equalize
+### Limits of equal cell depth
 
 Step 2a gives both sides the same number of cells, so neither side is favored by
-sample size. It does not make the two sides equally informative, and three things
-still differ when one side is scarce.
+sample size. It does not make the two sides equally informative. When one side
+is scarce:
 
-A side drawn from a pool barely larger than the draw returns nearly the same
-cells every time, so averaging over the 10 draws reduces its noise very little,
-while a side drawn from thousands averages over ten genuinely different subsets.
+* **Draws repeat.** A side drawn from a pool barely larger than the draw returns
+  nearly the same cells every time, so averaging over the 10 draws reduces its
+  noise very little. A side drawn from thousands averages over ten different
+  subsets.
+* **Lists shorten.** Fewer cells yield fewer significant genes, so that side's
+  list is shorter and the denominator in step 2d shrinks with it. On a list of
+  ten, one chance overlap moves the score by ten points, so a self-match can
+  lose to a competitor on noise alone. The `sig_larva` and `sig_transformer`
+  columns report the list lengths.
+* **Boundaries follow the larger side.** Where a cluster holds almost all of one
+  side's cells, the draw takes the whole population, including cells at its
+  boundary, while the other side contributes a random sample of a
+  well-populated core. The cluster boundary came from a clustering of all
+  cells, so it mostly reflects the larger side.
 
-Fewer cells also yield fewer significant genes, and since the lists are filtered
-to significant genes, that side's list is shorter and the denominator in step 2d
-shrinks with it. On a list of ten, one gene overlapping by chance moves the score
-by ten points, so a self-match can lose to a competitor on noise alone. The
-`sig_larva` and `sig_transformer` columns report the lengths directly, so a
-result resting on a short list is visible rather than inferred.
-
-And the cells themselves are differently representative. Where a cluster holds
-almost all of one side's cells, the draw takes the entire population including
-whatever sits at its boundary, while the other side contributes a random sample
-of a well-populated core. The cluster boundary was drawn by a clustering computed
-on all cells, so it was set largely by whichever side is larger.
-
-These are reasons a scarce side can fail without the two populations differing,
-which is why the untestable category exists and why failures are reported
-alongside their cell counts.
+A scarce side can therefore fail without the two populations differing. The
+untestable category exists for this reason, and failures are reported with
+their cell counts.
 
 ```{r}
 n_top      = 50
@@ -893,9 +889,9 @@ run_comparison = function(sideA_libs, sideB_libs, clusters_keep, n_by_cluster,
 ```
 
 Cell numbers are matched per cluster across every side of every comparison.
-Library is deliberately **not** blocked, because library is the variable being
-measured. Ten independent draws, similarity matrices averaged before any verdict
-is read off them.
+Library is not blocked, because library is the variable being measured.
+Similarity matrices from ten independent draws are averaged before any verdict
+is read.
 
 ```{r}
 # The depth scheme is part of the cache key, not just the tuning parameters, so
@@ -917,10 +913,8 @@ if (file.exists(comparison_file)) {
 }
 ```
 
-A cluster **corresponds** when it is its own best match in both directions,
-which is stricter than being the best match one way, since a diffuse cluster can
-be many clusters' best partner without any of them being its own. The **margin**
-is how far the self-match sits above the strongest competitor.
+A cluster **corresponds** when it is its own best match in both directions. The
+**margin** is how far the self-match sits above the strongest competitor.
 
 ```{r}
 reciprocal_from_sim = function(sim) {
@@ -942,9 +936,8 @@ recip = bind_rows(lapply(names(comparisons), function(nm)
   reciprocal_from_sim(comparisons[[nm]]$sim) %>%
     mutate(comparison = nm,
            n_per_side = comparisons[[nm]]$n_by_cluster[cluster],
-           # mean over draws of how many of each side's top n_top genes were
-           # actually significant. The lists are always n_top long; this is how
-           # much of each is real rather than ranking noise.
+           # mean over draws of each side's marker list length: the number of
+           # significant genes, capped at n_top
            sig_A      = round(comparisons[[nm]]$sig_A[cluster], 1),
            sig_B      = round(comparisons[[nm]]$sig_B[cluster], 1)))) %>%
   dplyr::select(comparison, cluster, n_per_side, sig_A, sig_B,
@@ -957,12 +950,11 @@ datatable(recip %>% mutate(across(where(is.numeric), ~round(., 1))),
           filter = "top", rownames = FALSE)
 ```
 
-## Check that clusters correspond between two larval animals
+## Replicate control
 
-A cluster that does not correspond to itself **between two larval animals**, at
-the cell depth its stage test runs at, has not shown it is resolvable at that cell depth by
-any comparison. Its stage result carries no information, and calling it a failure
-would be reading noise as disagreement.
+A cluster that does not correspond to itself **between the two larval animals**,
+at the cell depth its stage test uses, is not resolvable at that depth. Its
+stage result carries no information and is not counted as a failure.
 
 ```{r}
 stage_tbl = recip %>% filter(comparison == "stage") %>%
@@ -1016,20 +1008,20 @@ short_side = outcome_tbl %>%
                 sig_larva, sig_transformer, margin_stage)
 ```
 
-**`sig_larva` and `sig_transformer` are how long each side's marker list actually
-was**, averaged over the draws, capped at `r n_top`.
+**`sig_larva` and `sig_transformer` are the lengths of each side's marker list**,
+averaged over the draws and capped at `r n_top`.
 
-The lists hold significant genes only, so a cluster's list is as long as its
-evidence and no longer. That length is also the denominator in step 2d, which
-means a cluster with few markers is scored on a small number: on a list of ten,
-a single chance overlap is worth ten points. Read a high similarity on a short
-list with that in mind, and read a failure on a short list as underpowered
-rather than as disagreement.
+The lists hold significant genes only, so a list is as long as the cluster's
+evidence. That length is also the denominator in step 2d, so a cluster with few
+markers is scored on a small number: on a list of ten, a single chance overlap
+is worth ten points. Read a high similarity on a short list with that in mind,
+and read a failure on a short list as underpowered.
 
-A cluster with no significant genes on one side scores `NA` rather than zero,
-which lands it in the untestable category rather than counting as a failure.
+A cluster with no significant genes on one side scores `NA` rather than zero. In
+the replicate comparison that makes the cluster untestable. In the stage
+comparison it counts as a failure, and the list lengths show why.
 
-`r if (nrow(short_side) == 0) paste0("Every failing cluster has at least ", round(short_cut), " significant genes on both sides, so none of the failures is explained by a mostly-noise list.") else paste0("**", nrow(short_side), " of the failing clusters have fewer than ", round(short_cut), " significant genes on one side: ", paste(short_side$cluster, collapse = ", "), ".** Read their results as underpowered rather than as disagreement, and compare the count against the cell count in the same row: few significant genes on the side with few cells is the expected pattern.")`
+`r if (nrow(short_side) == 0) paste0("Every failing cluster has at least ", round(short_cut), " significant genes on both sides, so no failure rests on a short list.") else paste0("**", nrow(short_side), " of the failing clusters have fewer than ", round(short_cut), " significant genes on one side: ", paste(short_side$cluster, collapse = ", "), ".** Read their results as underpowered, and compare each list length with the cell count in the same row.")`
 
 ```{r}
 n_corresponds = sum(outcome_tbl$outcome == "corresponds across stages")
@@ -1047,11 +1039,13 @@ fails_tbl = outcome_tbl %>% filter(outcome == "fails across stages")
 
 `r if (n_untestable == 0) "Every cluster is resolvable at its own cell depth, so no stage result is discarded for lack of cells." else paste0(n_untestable, " cluster(s) are untestable at this cell depth: ", paste(outcome_tbl$cluster[outcome_tbl$outcome == "untestable at this cell depth"], collapse = ", "), ". These fail to find themselves even between the two larval animals, so their stage result reflects cell numbers rather than stage. They are reported and not counted either way.")`
 
-**Read the `direction` column before deciding what a failure means.** A cluster
-whose larval markers still pick it out while its transformer markers pick out
-something else is usually short of transformer cells. A cluster that fails in both directions, pointing at two different partners, is the strongest failure. A cluster where both directions agree on the
-same other cluster is the only case where merging with that cluster is
-indicated.
+Read the `direction` column before deciding what a failure means:
+
+* **One side fails.** The cluster is usually short of cells on the failing side.
+* **Both fail and disagree.** The two sides point at different partners. This is
+  the strongest failure.
+* **Both point to the same other cluster.** This is the only case that indicates
+  merging with that cluster.
 
 ```{r, fig.width=13, fig.height=5}
 sim_long = bind_rows(lapply(names(comparisons), function(nm)
@@ -1063,7 +1057,7 @@ sim_long = bind_rows(lapply(names(comparisons), function(nm)
 
 p_sim = ggplot(sim_long, aes(x = side_B, y = side_A, fill = similarity)) +
   geom_tile() +
-  scale_fill_viridis_c(name = "top 50\noverlap %") +
+  scale_fill_viridis_c(name = "marker list\noverlap %") +
   facet_wrap(~ comparison, nrow = 1, scales = "free") +
   xlab("cluster, second side") + ylab("cluster, first side") +
   theme(axis.text = element_text(size = 7))
@@ -1089,13 +1083,15 @@ ggsave(p_margin, file = paste0(results_dir, "/self_match_margin.png"),
        width = 9, height = 4)
 ```
 
-# Splitting the clusters that do not correspond
+# Splitting
 
-A cluster that fails in both directions and has enough cells on either side to describe is not one population. It is split into a larval and a transformer half, and everything downstream runs on that labeling.
+A cluster is split into a larval and a transformer half when it fails in both
+directions and has enough cells on each side to describe. Everything downstream
+runs on that labelling.
 
-The other failures are left whole. A cluster failing in one direction only, with
-62 to 250 cells on its sparser side, would yield a half too small to
-characterize, and the failure is better explained by that scarcity.
+Other failures are left whole. A cluster that fails in one direction only, or
+has too few cells on a side, would yield a half too small to characterize, and
+its failure is better explained by scarcity.
 
 ```{r}
 split_min_cells  = 300   # per side, enough to compute a marker profile
@@ -1253,7 +1249,7 @@ new_flags    = setdiff(one_lib_post$label, one_lib_pre$label)
 
 `r if (length(split_candidates) == 0) "No cluster was split, so this matches the composition table above." else paste0("Only cluster(s) ", paste(split_candidates, collapse = ", "), " differ from the table above, each replaced by two rows.")`
 
-`r if (length(new_flags) == 0) "The split introduces no cluster that is 90% or more one library beyond those already flagged." else paste0("**The split creates ", length(new_flags), " new single-library cluster(s): ", paste(new_flags, collapse = ", "), ".** That is expected, since the split is along the stage boundary and the transformer side of these clusters is dominated by one library, but it means the resulting half is a single animal and its markers should be described accordingly.")`
+`r if (length(new_flags) == 0) "The split introduces no cluster that is 90% or more one library beyond those already flagged." else paste0("**The split creates ", length(new_flags), " new single-library cluster(s): ", paste(new_flags, collapse = ", "), ".** The split follows the stage boundary, and the transformer side of these clusters is dominated by one library, so each such half is a single animal and its markers describe that animal.")`
 
 # Cluster marker genes
 
@@ -1300,9 +1296,9 @@ datatable(marker_counts, rownames = FALSE,
           options = list(dom = "t", paging = FALSE))
 ```
 
-`r paste0("The gap between the two columns is the point of the effect size filter: FDR alone gives a median of ", format(round(median(marker_counts$n_FDR)), big.mark = ","), " genes per cluster, and requiring a mean log fold change of at least ", lfc_thresh, " leaves a median of ", format(round(median(marker_counts$n_FDR_and_lfc)), big.mark = ","), ".")`
+`r paste0("FDR alone gives a median of ", format(round(median(marker_counts$n_FDR)), big.mark = ","), " genes per cluster, and requiring a mean log fold change of at least ", lfc_thresh, " leaves a median of ", format(round(median(marker_counts$n_FDR_and_lfc)), big.mark = ","), ".")`
 
-`r if (all(marker_counts$n_FDR_and_lfc > 0)) "Every cluster has at least one marker passing both." else paste0("**Cluster(s) ", paste(marker_counts$cluster[marker_counts$n_FDR_and_lfc == 0], collapse = ", "), " have no gene passing both FDR < 0.01 and a mean log fold change of ", lfc_thresh, ".** Such a cluster is not distinguishable from the rest of the atlas at this effect size, and it will be absent from the overlap and ontology results below rather than appearing as an empty column. For a split half this is a direct argument that the split was not warranted; for an original cluster it says the cluster has no profile of its own once the others compete. Its genes are still in the unfiltered file, so the cutoff can be relaxed and the consequence seen.")` 
+`r if (all(marker_counts$n_FDR_and_lfc > 0)) "Every cluster has at least one marker passing both." else paste0("**Cluster(s) ", paste(marker_counts$cluster[marker_counts$n_FDR_and_lfc == 0], collapse = ", "), " have no gene passing both FDR < 0.01 and a mean log fold change of ", lfc_thresh, ".** At this effect size such a cluster cannot be distinguished from the rest of the atlas, and it is absent from the overlap and ontology results below. For a split half this argues against the split. Its genes remain in the unfiltered file, so the cutoff can be relaxed.")` 
 
 ```{r}
 # built once without a cutoff; the filtered table is derived from it, so the two
@@ -1402,9 +1398,9 @@ datatable(set_sizes, rownames = FALSE,
           options = list(dom = "t", paging = FALSE))
 ```
 
-`r paste0(nrow(known_markers), " gene-to-set assignments resolve against this count matrix, over ", dplyr::n_distinct(known_markers$CellType), " sets. ", sum(set_sizes$below_coherence_floor), " set(s) hold fewer than three genes; a single significant overlap in those rows is one gene, not a set agreeing.")`
+`r paste0(nrow(known_markers), " gene-to-set assignments resolve against this count matrix, over ", dplyr::n_distinct(known_markers$CellType), " sets. ", sum(set_sizes$below_coherence_floor), " set(s) hold fewer than three genes. In those rows a single significant overlap is one gene.")`
 
-`r paste0("On the other side of the test, the cluster marker lists run from ", format(min(list_sizes$n_markers), big.mark = ","), " to ", format(max(list_sizes$n_markers), big.mark = ","), " genes (median ", format(round(median(list_sizes$n_markers)), big.mark = ","), "), across ", nrow(list_sizes), " clusters.")`
+`r paste0("Cluster marker lists run from ", format(min(list_sizes$n_markers), big.mark = ","), " to ", format(max(list_sizes$n_markers), big.mark = ","), " genes (median ", format(round(median(list_sizes$n_markers)), big.mark = ","), "), across ", nrow(list_sizes), " clusters.")`
 
 ```{r, fig.width=9}
 plot_marker_overlap_heatmap(
@@ -1459,12 +1455,13 @@ datatable(go_scores %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 # Marker expression across all clusters
 
-Every curated marker against every cluster, on uncorrected cell depth-normalized
+Every curated marker against every cluster, on uncorrected, depth-normalized
 values. Dot size is the percentage of cells in the cluster expressing the gene,
-color is the mean log expression.
+and color is the mean log expression.
 
-The overlap heatmap measures whether a cell type's markers are *enriched* among a cluster's strongest data-derived markers, which is a different question: a gene can be enriched in a
-cluster relative to the others while barely being transcribed there.
+This differs from the overlap heatmap, which tests whether a cell type's markers
+are *enriched* among a cluster's data-derived markers. A gene can be enriched in
+a cluster relative to the others while barely transcribed there.
 
 ```{r}
 marker_ids = intersect(unique(known_markers$Gene),
@@ -1529,14 +1526,12 @@ the percentage expressing and the mean log expression.
 
 # Cell type annotation
 
-Names supplied by the Chung-Davidson lab for this labelling. They come last on
-purpose: everything above is the evidence a reader would use to judge them, and
-placing the names earlier would invite reading the marker and GO sections as
-confirmation of a conclusion already stated.
+Names supplied by the Chung-Davidson lab for this labelling. They follow the
+marker and GO sections so the evidence is read before the names.
 
-Nothing in this document tests these names. The data-driven markers, the
-comparison with the curated list and the GO enrichment above are what evidence
-exists; where they disagree with a name, the disagreement is the finding.
+Nothing in this document tests these names. Where the data-driven markers, the
+curated overlap or the GO enrichment disagree with a name, report the
+disagreement.
 
 ```{r}
 # captured before the pipe: inside it, final_label is the character column and
@@ -1615,8 +1610,8 @@ datatable(summary_tbl, rownames = FALSE, colnames = c("", "", ""),
   population at both stages. It says nothing about which cell type that is. The
   curated marker overlap is suggestive and no more, since the sets are small and
   route through mammalian orthology.
-* **Independent evidence for the stage-associated patterns.** That needs an
-  external dataset or staining.
+* **Independent evidence for the stage-associated patterns.** That comes from
+  `16_bulk_validation.Rmd` or from staining.
 
 # Session info
 

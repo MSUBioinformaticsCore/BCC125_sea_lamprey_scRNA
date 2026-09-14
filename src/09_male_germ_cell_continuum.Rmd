@@ -27,30 +27,24 @@ cat("#### Lab:", params$lab, " \n")
 cat("#### Project:", params$project_name, " \n")
 ```
 
-This is the male counterpart to `08_female_germ_cell_continuum.Rmd`, and it asks
-the same question with the same methods.
+This is the male counterpart to `08_female_germ_cell_continuum.Rmd`. It uses the
+same methods to ask whether the male germ cells form an ordered progression.
 
-**Why it may work where the female analysis did not.** The female germ cells
-came from one all-cells cluster split across the larval and transformer
-libraries, so stage and collection date were confounded with everything. The
-male germ cells come from four separate clusters that are expected to sit
-predominantly in the single male transformer library. If that holds, this
-analysis is internally unconfounded: one animal, one collection date, one batch,
-four transcriptionally distinct states. A gradient found there cannot be a batch
-effect, because there is no second batch to produce one.
+**Library composition.** The male germ clusters are expected to come mostly from
+the male transformer library. Within one library, animal, collection date and
+batch are constant, so an ordering among those cells cannot be a batch effect.
+It still describes a single animal, and comparing it with larval germ cells
+brings the stage confound back. The composition check below therefore comes
+first.
 
-**The library composition check therefore comes first** and determines how
-everything below should be read.
+**A second grouping.** The male germ cells fall into several clusters defined in
+batch-corrected space. The diffusion axis below is computed on uncorrected
+values. If the clusters sit in sequence along that axis, two representations of
+the same cells agree on the order.
 
-**A second advantage.** The female cells were a single Louvain cluster, so there
-was no independent grouping to check an ordering against. Here there are four
-clusters already defined on batch-corrected values. If those four lay out in
-sequence along an axis computed on uncorrected values, that is two independent
-methods agreeing, which is considerably stronger than either alone.
-
-As in `08`, everything uses uncorrected normalized log-expression, and a
-pseudotime can be computed from any blob of cells, so the technical and marker
-checks decide rather than the existence of an ordering.
+Every test uses uncorrected, normalized log-expression. A pseudotime can be
+computed from any set of cells, so the technical and marker checks decide
+whether an ordering is real.
 
 ```{r}
 library(tidyverse)
@@ -112,14 +106,11 @@ Male germ cells are the cells whose cluster in the final labelling is one of
 Under the current annotation these are the migrating and mitotic primordial germ
 cells, the two spermatocyte clusters and the migrating male germ cells.
 
-**The stage boundary cannot be resolved inside this dataset**, and for this set
-it is compounded: these clusters are overwhelmingly one animal, the male
-transformer library. Any ordering recovered here is therefore equally consistent
-with spermatogenic maturation and with the July to November collection
-difference, and no alternative trajectory algorithm changes that. The genes that
-come out are to be checked against independently collected bulk data, which is
-where the distinction can be made. The library composition below is the number
-to read before anything else in this document.
+**The stage boundary cannot be resolved inside this dataset.** Larvae were
+collected in July and transformers in November. An ordering confined to the male
+transformer library avoids that confound, but any comparison with larval cells
+brings it back. Genes that change along the ordering are to be checked against
+independently collected bulk data.
 
 ```{r}
 absent = setdiff(male_clusters, cell_labels$final_label)
@@ -151,11 +142,13 @@ if (length(male_cells) < 100) {
 }
 ```
 
-## Library composition, which decides how everything below reads
+## Library composition
 
 ```{r}
-male_meta = germ_meta %>% filter(barcode %in% male_cells) %>%
-  left_join(library_meta, by = "batch")
+# library and stage already come from cell_cluster_labels.csv; joining
+# library_meta again would split them into library.x and library.y
+male_meta = germ_meta %>% filter(barcode %in% male_cells)
+stopifnot(all(c("library", "stage") %in% colnames(male_meta)))
 
 comp_tab = male_meta %>%
   dplyr::count(origin_cluster, library, name = "n") %>%
@@ -189,7 +182,7 @@ single_library   = dominant_pct >= 90
 
 `r round(dominant_pct, 1)`% of male germ cells come from **`r dominant_library`**.
 
-`r if (single_library) paste0("**These cells are effectively one library.** Animal, collection date, batch and sex are all constant, so any structure found below cannot be a batch effect and a correlation with detection rate is unambiguously technical. This is the unconfounded version of the question that the female analysis could not ask.") else paste0("**These cells span more than one library**, so the female problem applies here too: any axis separating them may be stage, batch or biology, and this analysis cannot fully separate those. The per-library section at the end is then the part that carries the argument, not the combined analysis.")`
+`r if (single_library) "**These cells are effectively one library.** Animal, collection date, batch and sex are constant, so structure among them cannot be a batch effect, and a correlation with detection rate is technical." else "**These cells span more than one library.** An axis that separates them may reflect stage, batch or biology, and this analysis cannot tell those apart."`
 
 ```{r, fig.width=9, fig.height=4}
 p_comp = ggplot(comp_tab, aes(x = origin_cluster, y = pct, fill = library)) +
@@ -245,8 +238,8 @@ male.sce$origin_cluster = germ_meta$origin_cluster[
 
 # Markers
 
-Families are declared so that early and late programmes can be tested against
-each other, which is stronger evidence than coherence within one family.
+Marker families are declared in advance so the early and late programmes can be
+tested against each other.
 
 ```{r}
 gene_description =
@@ -436,9 +429,9 @@ partial_reliable   = tech_max < 0.6
 Strongest absolute correlation between DC1 and a technical covariate:
 `r round(tech_max, 2)`.
 
-`r if (technical_confound) "**DC1 tracks detection rate.** With library constant this cannot be a batch effect, so it is technical, and the raw marker counts below will be inflated because expression correlates with depth for nearly every gene. The partial correlations are the ones to read." else "DC1 is not associated with detection rate, so the axis is not technical."`
+`r if (technical_confound) "**DC1 tracks detection rate.** Expression correlates with depth for nearly every gene, so the raw marker correlations below are inflated. Read the partial correlations instead." else "DC1 is not strongly associated with detection rate."`
 
-## Library, if more than one contributes
+## Library effect
 
 ```{r}
 lib_r2 = if (length(unique(cd$library)) > 1)
@@ -446,16 +439,13 @@ lib_r2 = if (length(unique(cd$library)) > 1)
 library_confound = isTRUE(lib_r2 >= 0.25)
 ```
 
-`r if (length(unique(cd$library)) < 2) "All retained male germ cells come from one library, so there is no library effect to test and none can be present." else paste0("Library of origin explains ", round(100 * lib_r2, 1), "% of the variance in DC1. ", if (library_confound) "That is substantial, so the axis is at least partly a sample effect." else "That is modest, so the axis is not primarily a sample effect.")`
+`r if (length(unique(cd$library)) < 2) "All retained male germ cells come from one library, so there is no library effect to test." else paste0("Library of origin explains ", round(100 * lib_r2, 1), "% of the variance in DC1. ", if (library_confound) "The axis is at least partly a library effect." else "The axis is not mainly a library effect.")`
 
-# 2. Do the four clusters order along the axis?
+# 2. Cluster order along DC1
 
-The female analysis had a single Louvain cluster, so there was no independent
-grouping to check an ordering against. Here there are four, defined on
-batch-corrected values by a different method. If they lay out in sequence along
-an axis computed on uncorrected values, two independent approaches agree, and
-the four clusters are discrete samples of one underlying progression rather than
-unrelated states.
+The clusters were defined in batch-corrected space, and DC1 is computed on
+uncorrected values. If the clusters sit in sequence along DC1, both
+representations agree on the order.
 
 ```{r}
 cluster_pos = cd %>%
@@ -507,7 +497,7 @@ clusters_graded = isTRUE(mean_overlap >= 0.4)
 clusters_ordered = isTRUE(kw$p.value < 0.05)
 ```
 
-`r if (!clusters_ordered) "The clusters do not occupy distinct positions along DC1, so the axis does not correspond to the existing grouping." else if (clusters_graded) paste0("The clusters occupy distinct positions along DC1 and their distributions overlap substantially (mean adjacent overlap ", round(mean_overlap, 2), "). That is what a continuum looks like when a clustering algorithm has been forced to cut it into groups: ordered, but grading into one another rather than separated.") else paste0("The clusters occupy distinct and well separated positions along DC1 (mean adjacent overlap ", round(mean_overlap, 2), "). They are ordered along the axis but do not grade into one another, which is more consistent with discrete states than with a continuum.")`
+`r if (!clusters_ordered) "The clusters do not occupy distinct positions along DC1, so the axis does not match the existing grouping." else if (clusters_graded) paste0("The clusters occupy distinct positions along DC1, and adjacent clusters overlap substantially (mean adjacent overlap ", round(mean_overlap, 2), "). They are ordered and grade into one another. Clustering a continuum into groups produces this pattern.") else paste0("The clusters occupy distinct, well separated positions along DC1 (mean adjacent overlap ", round(mean_overlap, 2), "). They are ordered but do not grade into one another. This pattern fits discrete states better than a continuum.")`
 
 ```{r, fig.width=10, fig.height=4}
 p_pos = ggplot(cd, aes(x = DC1, fill = origin_cluster, color = origin_cluster)) +
@@ -548,7 +538,7 @@ n_directional_partial = if ("rho_partial" %in% colnames(trends))
 
 `r n_directional` of `r nrow(trends)` markers correlate with DC1, and
 `r n_directional_partial` still do after regressing out `sum` and `detected`.
-`r if (!partial_reliable) "Because DC1 is itself close to detection rate here, the partial figure is underpowered and a low value is expected whether or not biology is present." else "DC1 is far from collinear with depth, so the partial figure is well powered."`
+`r if (!partial_reliable) "DC1 is strongly correlated with detection rate, so the partial correlations are underpowered. A low count is expected whether or not biology is present." else "DC1 is not strongly correlated with detection rate, so the partial correlations can be read."`
 
 ## Family coherence
 
@@ -611,7 +601,7 @@ dir_p = if (both_present) {
 
 `r if (!both_present) "One programme has no resolved genes, so the direction test cannot be run." else paste0("The late meiotic programme has a median rho of ", round(late_row$median_rho, 2), " across ", late_row$n_genes, " genes (", late_row$n_significant, " significant), and the early spermatogonial programme ", round(early_row$median_rho, 2), " across ", early_row$n_genes, " genes (", early_row$n_significant, " significant). Wilcoxon p = ", signif(dir_p, 2), ".")`
 
-`r if (opposite_directions) "**The two programmes move in opposite directions along DC1.** Spermatogonial markers are high at one end and meiotic markers at the other, which is the ordering expected of spermatogenesis." else if (both_present) "The two programmes do not move in opposite directions, so the axis does not correspond to an early to late transition." else ""`
+`r if (opposite_directions) "**The two programmes move in opposite directions along DC1.** Spermatogonial markers are high at one end and meiotic markers at the other. That order matches spermatogenesis." else if (both_present) "The two programmes do not move in opposite directions along DC1, so the axis does not show an early to late transition." else ""`
 
 ```{r, fig.width=11, fig.height=8}
 top_markers = trends %>% filter(!is.na(rho)) %>%
@@ -655,13 +645,13 @@ male_verdict = if (technical_confound && !partial_reliable) {
 `r switch(male_verdict,
   "technical" = "DC1 tracks detection rate and the partial correlations cannot separate biology from depth, so no ordering should be built on this axis.",
   "no marker signal" = "No markers vary monotonically along DC1 once depth is controlled, so there is no evidence that the axis corresponds to spermatogenic progression.",
-  "continuum" = "The four clusters occupy ordered, overlapping positions along an axis computed on uncorrected values, and the spermatogonial and meiotic programmes move in opposite directions along it. These cells form a continuous progression that the clustering has cut into four groups, rather than four unrelated states.",
-  "ordered discrete states" = "The four clusters are ordered along the axis and the early and late programmes separate, but the clusters do not grade into one another. They are discrete states in a developmental sequence rather than a sampled continuum.",
-  "structure without a programme" = "There is structure along DC1, but it does not correspond to an ordered early to late transition, so it should not be described as spermatogenic progression.")`
+  "continuum" = "The clusters occupy ordered, overlapping positions along an axis computed on uncorrected values, and the spermatogonial and meiotic programmes move in opposite directions along it. These cells form a continuous progression that the clustering has cut into groups.",
+  "ordered discrete states" = "The clusters are ordered along the axis and the early and late programmes separate, but the clusters do not grade into one another. They are discrete states in a developmental sequence.",
+  "structure without a programme" = "There is structure along DC1, but it does not show an ordered early to late transition. Do not describe it as spermatogenic progression.")`
 
-`r if (single_library) "Because these cells come from a single library, none of this can be a batch effect: animal, collection date, batch and sex are constant throughout." else "Note that these cells span more than one library, so the axis may carry a library contribution as well as biology."`
+`r if (single_library) "These cells come from a single library, so the ordering cannot be a batch effect." else "These cells span more than one library, so the axis may include a library effect."`
 
-# 5. Pseudotime, computed only if the axis is supported
+# 5. Pseudotime
 
 ```{r}
 order_supported = male_verdict %in% c("continuum", "ordered discrete states")
@@ -683,7 +673,7 @@ if (order_supported) {
 }
 ```
 
-`r if (!order_supported) "The axis is not supported, so no pseudotime is computed." else "Cells are ordered along the diffusion axis, rooted at the extreme of DC1."`
+`r if (!order_supported) "The verdict does not support an ordering, so no pseudotime is computed." else "Diffusion pseudotime is rooted at the cell with the lowest DC1. Which end of the axis is earliest is an assumption."`
 
 ```{r}
 if (order_supported) {
@@ -726,9 +716,9 @@ cat(paste0(
   " originating clusters, ", round(dominant_pct, 1), "% from ",
   dominant_library, ". ",
   if (single_library)
-    "Because they are effectively a single library, animal, collection date and batch are constant, so nothing here can be a batch effect. "
+    "They are effectively a single library, so the ordering cannot be a batch effect. "
   else
-    "They span more than one library, so a library contribution cannot be excluded. ",
+    "They span more than one library, so a library effect cannot be excluded. ",
   "PC1 explains ", round(emb$percentVar[1], 1),
   "% of variance and the strongest correlation between DC1 and a technical ",
   "covariate is ", round(tech_max, 2), ". ",
@@ -743,11 +733,11 @@ cat(paste0(
   else "",
   "Verdict: ", male_verdict, ". ",
   if (male_verdict == "continuum")
-    "This is the result the female analysis could not produce, and it carries no confound."
+    "The cells can be reported as a continuous progression."
   else if (male_verdict == "ordered discrete states")
-    "The states are ordered but do not grade into one another, so report them as a sequence of states rather than a continuous trajectory."
+    "Report them as a sequence of discrete states."
   else
-    "No ordering should be reported for these cells."))
+    "Do not report an ordering for these cells."))
 ```
 
 # Session info
