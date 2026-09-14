@@ -60,28 +60,22 @@ run, because the named clusters enter the trajectory as their subclusters and
 those come from `08`. Setting `split_by_subcluster` to an empty string removes
 that dependency and gives every cluster a single node.
 
-# What this document can and cannot establish
+# Limits of the ordering
 
-**The ordering it produces cannot be shown to be developmental from this dataset.**
-Larvae were collected in July and transformers in November, so stage, collection
-date, technical batch and animal vary together. A trajectory orders cells along
-the largest axis of variation in the data, and here that axis coincides with the
-library boundary. The ordering is therefore equally consistent with germ cell
-maturation and with the difference between collections.
+**The ordering cannot be shown to be developmental from this dataset.** Larvae
+were collected in July and transformers in November, so stage, collection date,
+technical batch and animal vary together. A trajectory orders cells along the
+largest axis of variation, and that axis can coincide with the library boundary.
+The ordering is then equally consistent with germ cell maturation and with the
+difference between collections. A different trajectory method faces the same
+confound.
 
-This is a property of the design, not of the algorithm. Running a different
-trajectory method recovers the same axis, so nothing below should be read as
-evidence that the axis is developmental.
+**Output.** The genes that change along the ordering are candidates to test
+against independently collected bulk RNA-seq, where the July-to-November batch
+does not exist.
 
-**What it is for.** The genes that change along the ordering are the output that
-matters. Those are to be tested against independently collected bulk RNA-seq,
-where the July-to-November batch does not exist, and that comparison is what can
-distinguish maturation from batch. This document produces the candidate list;
-it does not adjudicate it.
-
-The library composition of every node is reported below and drawn onto the
-trajectory graph, so the extent of the confound is visible on the figure rather
-than only in this paragraph.
+The library composition of every node is reported below and drawn on the
+trajectory graph.
 
 ```{r}
 object_dir  = paste0(params$project_dir, "/results/", params$results_date,
@@ -206,7 +200,7 @@ node_levels = germ_key %>%
 germ_cells = germ_key$barcode
 ```
 
-`r if (length(split_clusters) > 0) paste0("**Cluster(s) ", paste(split_clusters, collapse = ", "), " enter the trajectory as subclusters rather than as one node**, giving ", length(node_levels), " nodes in total. Two consequences follow. First, path length measured in nodes is not comparable between arms, because only some arms are subdivided; compare pseudotime, not node counts. Second, whatever the subclusters correspond to becomes trajectory structure: if they separate larval from transformer cells, as the leading diffusion component in cluster 5 does, then the MST will contain a larva-to-transformer edge inside that arm and the confound is now part of the trajectory rather than external to it. The subcluster composition table in 08 is what says which case this is.") else ""`
+`r if (length(split_clusters) > 0) paste0("**Cluster(s) ", paste(split_clusters, collapse = ", "), " enter the trajectory as subclusters**, giving ", length(node_levels), " nodes in total. Only these arms are subdivided, so compare pseudotime between arms rather than node counts. If the subclusters separate larval from transformer cells, the MST will contain a larva-to-transformer edge inside that arm, and the confound becomes part of the trajectory. The subcluster composition table in 08 shows which case applies.") else ""`
 
 ```{r}
 germ_tab = germ_key %>%
@@ -233,7 +227,7 @@ top_pct = lib_totals$pct[1]
 datatable(lib_totals, rownames = FALSE, options = list(dom = "t"))
 ```
 
-`r paste0("**", format(length(germ_cells), big.mark = ","), " germ cells across ", length(germ_clusters), " clusters, of which ", top_pct, "% come from a single library, ", top_lib, ".** Read every result below against that number. A trajectory over a set this dominated by one animal will place that animal's cells along most of the ordering whether or not the ordering is developmental.")`
+`r paste0("**", format(length(germ_cells), big.mark = ","), " germ cells across ", length(germ_clusters), " clusters; ", top_pct, "% come from ", top_lib, ".** The more one library dominates, the more of the ordering its cells occupy, whether or not the ordering is developmental.")`
 
 # Build the germ cell object
 
@@ -332,9 +326,8 @@ ggsave(file = paste0(results_dir, "/germ_tsne_node_and_library.png"),
        width = 7, height = 10)
 ```
 
-The two panels are the whole problem in one figure. If the node panel and the
-library panel show the same partition, the trajectory below is tracing the
-libraries.
+If the node panel and the library panel show the same partition, the trajectory
+below traces the libraries.
 
 # Gene annotation
 
@@ -389,8 +382,7 @@ ggsave(file = paste0(results_dir, "/germ_trajectory_tsne.png"),
 
 ## In batch-corrected expression space
 
-The trajectory is computed in corrected space, so this view is the one it was
-actually fitted in.
+The trajectory is fitted in this corrected space.
 
 ```{r, fig.width=7, fig.height=6}
 line.data_corrected = reportEdges(by.cluster, mst = mst, clusters = NULL,
@@ -414,7 +406,7 @@ if (!params$root_node %in% levels(colData(merged.germ.sce)$node))
        paste(levels(colData(merged.germ.sce)$node), collapse = ", "))
 ```
 
-`r paste0("The ordering is rooted at **", params$root_node, "**, chosen as the least mature of the annotated germ populations. The root is an assumption, not a result: the same graph rooted elsewhere gives a different ordering, and nothing in the data fixes it.")`
+`r paste0("The ordering is rooted at **", params$root_node, "**, chosen because its annotation marks it as the least mature germ population. The root is an assumption: the same graph rooted elsewhere gives a different ordering.")`
 
 ```{r}
 pseudo_file = paste0(Robject_out_dir, "/germ.pseudo.Rds")
@@ -450,9 +442,8 @@ combined.germ.sce$Pseudotime = common.pseudo
 ## Trajectory node graph
 
 Pie charts give the library composition of each node, and the lower panel colors
-nodes by mean pseudotime. **These two panels together are the diagnostic.** If
-the pies change composition along the same direction pseudotime increases, the
-ordering and the library boundary are the same axis.
+nodes by mean pseudotime. If the pies change composition in the direction that
+pseudotime increases, the ordering and the library boundary are the same axis.
 
 ```{r, fig.width=7, fig.height=7}
 meta_df = as.data.frame(colData(merged.germ.sce))
@@ -530,7 +521,7 @@ pseudo_stage_r2 = {
 }
 ```
 
-`r paste0("**Library of origin explains ", round(100 * pseudo_lib_r2, 1), "% of the variance in pseudotime", if (!is.na(pseudo_stage_r2)) paste0(", and stage alone explains ", round(100 * pseudo_stage_r2, 1), "%") else "", ".** This is the number to quote when describing the ordering. It does not say the ordering is wrong; it says how much of it is indistinguishable from the collection structure.")`
+`r paste0("**Library of origin explains ", round(100 * pseudo_lib_r2, 1), "% of the variance in pseudotime", if (!is.na(pseudo_stage_r2)) paste0(", and stage alone explains ", round(100 * pseudo_stage_r2, 1), "%") else "", ".** Quote this value when describing the ordering. It measures how much of the ordering cannot be distinguished from the collection structure.")`
 
 # Pseudotime-associated genes
 
@@ -575,7 +566,7 @@ test_pseudo100 = test_pseudo_dir %>%
 datatable(test_pseudo100, filter = "top", rownames = FALSE)
 ```
 
-`r paste0(format(nrow(test_pseudo_filt_df), big.mark = ","), " gene-path results at FDR < 0.01, over ", dplyr::n_distinct(test_pseudo_filt_df$Path), " path(s). **This list is the output to carry forward.** It is the input to the external bulk comparison, which is the only place the developmental question can be settled.")`
+`r paste0(format(nrow(test_pseudo_filt_df), big.mark = ","), " gene-path results at FDR < 0.01, over ", dplyr::n_distinct(test_pseudo_filt_df$Path), " path(s). These are the candidate genes for comparison with independent bulk data.")`
 
 ## Trajectory heatmaps
 
@@ -706,13 +697,12 @@ datatable(summary_tbl, rownames = FALSE,
           options = list(dom = "t", ordering = FALSE, paging = FALSE))
 ```
 
-**What to do with this.** The gene list is a hypothesis about germ cell
-maturation that this dataset cannot test, because the maturation axis and the
-collection axis are the same axis here. Testing it means asking whether the same
-genes move the same way in an independently collected series, which is what the
-Yasmin comparison is for. Until that is done, the ordering should be described as
-a transcriptional axis across the germ cell clusters rather than as
-developmental time.
+The gene list is a hypothesis about germ cell maturation that this dataset cannot
+test, because maturation and collection date vary together here. Testing it
+means asking whether the same genes change in the same direction in an
+independently collected series. Until then, describe the ordering as a
+transcriptional axis across the germ cell clusters rather than as developmental
+time.
 
 # Session info
 

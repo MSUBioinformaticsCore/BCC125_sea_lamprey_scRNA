@@ -31,61 +31,46 @@ cat("#### Project:", params$project_name, " \n")
 ```
 
 This document analyses one cluster from the all-cells labelling, set by the
-`female_cluster` parameter. It arrives as a single cluster, and it contains
-cells from both stages: the larval cells come from the two libraries this
-project calls Undifferentiated. **The cluster's annotation applies to the
-cluster, not separately to each cell in it**, so nothing below should be read as
-having established that the larval cells are female. That is one of the things a
-trajectory through this cluster would be trying to show, and naming them female
-in advance assumes it.
+`female_cluster` parameter. The cluster contains cells from both stages, and its
+larval cells come from the two libraries this project calls Undifferentiated.
+**The annotation describes the cluster, not each cell in it.** Nothing below
+establishes that the larval cells are female, and a trajectory through the
+cluster cannot assume it.
 
-Two different questions are asked of this cluster, and they have to be kept
-apart, because they have opposite requirements.
+The document asks two questions with different requirements.
 
-**Is there a continuum?** This needs no clusters at all. The diffusion component
-analyses below treat the cells as one set, and nothing in them subclusters or
-tunes a resolution.
+**Is there a continuum?** This needs no clusters. The diffusion component
+analyses treat the cells as one set and do not subcluster or tune a resolution.
 
-**Can a trajectory be fitted?** This does need clusters, because a minimum
-spanning tree is a graph over nodes and one node has no edges. That is a
-mechanical requirement of the method and not evidence that discrete
-subpopulations exist. The subclustering section below exists to supply those
-nodes and nothing else. To keep it from becoming a search for a parameter that
-produces a desired answer, `k` is chosen by the same subsampling stability sweep
-used in `13_atlas_and_stage_correspondence.Rmd` rather than by lowering it until
-clusters appear, and what the subclusters correspond to is reported before
-anything is built on top of them.
+**Can a trajectory be fitted?** A minimum spanning tree is a graph over nodes,
+and a single cluster is a single node, so this needs subclusters. The
+subclusters supply nodes and are not evidence of discrete subpopulations. `k` is
+chosen by the subsampling stability sweep used in
+`13_atlas_and_stage_correspondence.Rmd`, and what the subclusters correspond to
+is reported before anything is built on them.
 
-That last check is the one that matters, because the leading diffusion component
-in these cells separates larvae from transformers. If the subclusters recover
-that same split, then a trajectory over them orders cells along the stage and
-collection boundary, and no amount of trajectory machinery makes that ordering
-developmental.
+That correspondence matters because in earlier runs the leading diffusion
+component in these cells separated larvae from transformers. If the subclusters
+recover that split, a trajectory over them orders cells along the stage and
+collection boundary.
 
-The document then runs two analyses.
+The continuum question is asked twice.
 
-**Combined.** All female germ cells together. The leading diffusion component
-turns out to separate larval from transformer cells rather than describing a
-gradient. Stage and collection date vary together, so that separation is
-confounded, but a batch effect and a differentiation program are distinguishable
-by whether the marker changes are **coherent**: a batch effect does not
-coordinately move an entire known gene family in the biologically expected
-direction. That coherence test decides how the separation is reported.
+**Combined.** All cells in the cluster together. The leading diffusion component
+is tested for bimodality, technical association and stage. Marker coherence, an
+ambient RNA control and a direction test decide how any separation is reported.
 
-**Per library.** The same continuum test run inside each library separately.
-There, animal, collection date and batch are constant by construction, so a
-maturation gradient has nothing to be confounded with, and a correlation between
-the leading component and detection rate is unambiguously technical.
+**Per library.** The same tests inside each library separately. Animal,
+collection date and batch are constant within a library, so a gradient there
+cannot be a batch effect, and a correlation with detection rate is technical.
 
-**A pseudotime can be computed from any blob of cells**, so an ordering proves
-nothing on its own. The technical and marker checks decide, not the existence of
-an ordering.
+A pseudotime can be computed from any set of cells, so an ordering alone shows
+nothing. The technical and marker checks decide.
 
-Every test uses uncorrected, normalized log-expression. Running these on
-`fastMNN` output would remove the library signal by construction and make the
-central checks meaningless. The single exception is the subclustering section,
-which uses corrected space because it is defining nodes rather than testing
-anything; it feeds no result back into the tests.
+Every test uses uncorrected, normalized log-expression, because `fastMNN`
+correction would remove the library signal the tests measure. The subclustering
+section is the only exception. It uses corrected space to define nodes and feeds
+no result back into the tests.
 
 ```{r}
 library(tidyverse)
@@ -143,7 +128,7 @@ lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
              "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
 ```
 
-# Identify the female germ cells
+# Cells in the cluster
 
 ```{r}
 if (!as.character(params$female_cluster) %in% cell_labels$final_label)
@@ -164,14 +149,13 @@ female_type = unique(cell_labels$cell_type[cell_labels$final_label ==
 
 **The stage boundary cannot be resolved inside this dataset.** Larvae were
 collected in July and transformers in November, so any ordering recovered here
-is equally consistent with maturation and with a collection batch effect. That
-is a property of the design, not of the method, and no reordering or alternative
-trajectory algorithm changes it. The genes that come out are to be checked
-against independently collected bulk data, which is where the distinction can
-actually be made. Nothing below should be described as developmental time on
-the strength of this document alone.
+is equally consistent with maturation and with a collection batch effect. No
+alternative trajectory algorithm changes that. Genes that change along the
+ordering are to be checked against independently collected bulk data. Nothing
+below should be described as developmental time on the strength of this
+document alone.
 
-## Libraries contributing, and which are dropped
+## Libraries contributing
 
 ```{r}
 fem_list_all = lapply(all.sce, function(x) {
@@ -195,7 +179,7 @@ dropped = lib_counts %>% filter(!kept)
 fem_list = fem_list_all[lib_counts$batch[lib_counts$kept]]
 ```
 
-`r if (nrow(dropped) == 0) "Every library contributes enough cells to be analyzed." else paste0("Dropped for contributing fewer than ", params$min_library_cells, " cells: ", paste0(dropped$library, " (", dropped$n_cells, ")", collapse = "; "), ". At that size they cannot support a per-library analysis and would only add a colour to the plots.")`
+`r if (nrow(dropped) == 0) "Every library contributes enough cells to be analyzed." else paste0("Dropped for contributing fewer than ", params$min_library_cells, " cells: ", paste0(dropped$library, " (", dropped$n_cells, ")", collapse = "; "), ". They are too small for a per-library analysis.")`
 
 ```{r}
 universe = Reduce(intersect, lapply(fem_list, rownames))
@@ -220,23 +204,22 @@ fem.sce$stage   = library_meta$stage[match(fem.sce$batch, library_meta$batch)]
 `multiBatchNorm` rescales for sequencing depth only and does not adjust
 expression structure, so library differences remain visible and testable.
 
-# Subclustering, to provide trajectory nodes
+# Subclustering
 
-Everything else in this document runs on `fem.sce`, the uncorrected object built
-above. This section is the one exception, and it is deliberate.
+Every other section runs on `fem.sce`, the uncorrected object built above. This
+section is the exception.
 
-Subclustering uncorrected cells drawn from several libraries recovers the
-libraries, because that is the largest source of variation between them. Nodes
-defined that way would make any trajectory over them a graph of libraries. So
-the subclusters are built in `fastMNN` corrected space, computed on the cells of
-this cluster alone rather than inherited from the all-cells correction, which is
-the same recipe `14_germ_cell_trajectory.Rmd` uses for the six germ clusters.
-The correction is therefore computed across every library that contributes cells
-to this cluster, the larval ones included, not across a female subset.
+Subclustering uncorrected cells from several libraries recovers the libraries,
+because they are the largest source of variation. A trajectory over nodes
+defined that way would be a graph of libraries. The subclusters are therefore
+built in `fastMNN` corrected space, computed on this cluster's cells alone
+rather than inherited from the all-cells correction.
+`14_germ_cell_trajectory.Rmd` uses the same recipe for the germ clusters. The
+correction runs across every library that contributes cells to this cluster,
+larval libraries included.
 
-This object is used **only** to define subcluster membership. The continuum
-tests further down stay on uncorrected expression, since correction would remove
-by construction the library signal those tests exist to measure.
+The corrected object defines subcluster membership and nothing else. The
+continuum tests stay on uncorrected expression.
 
 ```{r}
 sub_file = paste0(Robject_out_dir, "/fem.corrected.sce.Rds")
@@ -284,15 +267,14 @@ stopifnot(!any(is.na(fem.corrected.sce$library)),
 
 ## Choosing k by stability
 
-`k` is not chosen by eye. Each value is scored by resampling 80% of the cells
-ten times, clustering each subsample independently, and taking the mean adjusted
-Rand index between every pair of runs on the cells they share. A `k` that
-produces the same partition from different subsamples is measuring something in
-the data; one whose partition changes with the sample is measuring the sample.
+`k` is chosen by a stability sweep. Each value is scored by resampling 80% of
+the cells ten times, clustering each subsample, and taking the mean adjusted
+Rand index between every pair of runs on the cells they share. A `k` that gives
+the same partition from different subsamples reflects structure in the data.
 
-Only values yielding at least two clusters are eligible, since a single node
-cannot carry a trajectory. Among those, the most reproducible wins. Setting the
-`sub_k` parameter to a non-zero value overrides the sweep.
+Only values that yield at least two clusters are eligible, since a single node
+cannot carry a trajectory. The most reproducible of those is chosen. A non-zero
+`sub_k` parameter overrides the sweep.
 
 ```{r}
 k_range = as.integer(trimws(strsplit(as.character(params$sub_k_range), ",")[[1]]))
@@ -352,7 +334,7 @@ ggsave(file = paste0(results_dir, "/female_subcluster_stability.png"),
        width = 7, height = 3.2, dpi = 300)
 ```
 
-`r paste0("**k = ", chosen_k, "**", if (as.integer(params$sub_k) > 0) " was set by the sub_k parameter, overriding the sweep." else paste0(" was chosen: it is the most reproducible value among those giving at least two clusters, at a mean pairwise ARI of ", stab_tab$mean_ari[stab_tab$k == chosen_k], "."))`
+`r paste0("**k = ", chosen_k, "**", if (as.integer(params$sub_k) > 0) " was set by the sub_k parameter, overriding the sweep." else paste0(" was chosen as the most reproducible value giving at least two clusters, with a mean pairwise ARI of ",stab_tab$mean_ari[stab_tab$k == chosen_k], "."))`
 
 ## The subclusters
 
@@ -408,9 +390,9 @@ agree_tab = data.frame(
 datatable(agree_tab, rownames = FALSE, options = list(dom = "t"))
 ```
 
-`r paste0("**", n_sub, " subclusters at k = ", chosen_k, ".** The adjusted Rand index compares the subclustering with a covariate as a partition of the same cells, so it is unaffected by how either is numbered: 1 means the two partitions are identical, 0 means they agree no better than chance.")`
+`r paste0("**", n_sub, " subclusters at k = ", chosen_k, ".** The adjusted Rand index compares two partitions of the same cells and ignores how either is numbered. A value of 1 means the partitions are identical, and 0 means they agree no better than chance.")`
 
-`r if (sub_is_stage) paste0("**The subclusters are the stage split** (ARI ", round(ari_stage, 3), " against stage). They separate larval from transformer cells, which in this dataset also means July from November and one collection batch from the other. A trajectory fitted over these nodes will order cells along that boundary, and that ordering has at least three readings this document cannot separate: a maturation gradient within an already committed female lineage; the transition out of the undifferentiated state, since the larval cells here come from animals this project calls undifferentiated and only the transformer side supports the oogonia annotation; and a four-month collection batch effect. Fit it if it is useful, but report it as the stage axis, do not describe the larval nodes as female on the strength of it, and settle the question against the independent bulk data rather than here.") else if (sub_is_library) paste0("**The subclusters track library rather than stage** (ARI ", round(ari_library, 3), " against library, ", round(ari_stage, 3), " against stage). Since the correction was computed across exactly these libraries, subclusters that still separate by library are the residual the correction failed to remove, not a biological subdivision. Nodes defined this way are a poor basis for a trajectory.") else paste0("**The subclusters do not correspond to stage or library** (ARI ", round(ari_stage, 3), " and ", round(ari_library, 3), " respectively). Whatever separates them is not the collection boundary and not a residual library effect, which is the necessary condition for a trajectory over these nodes to be worth fitting. It is not a sufficient one: what the subclusters actually are still has to be established from their markers.")`
+`r if (sub_is_stage) paste0("**The subclusters are the stage split** (ARI ", round(ari_stage, 3), " against stage). They separate larval from transformer cells, and in this dataset that also separates the July and November collections. A trajectory over these nodes will order cells along that boundary. The ordering could reflect maturation within a committed female lineage, the transition out of the undifferentiated state, or a four-month collection batch effect, and this document cannot tell them apart. Report any trajectory over these nodes as the stage axis, and do not describe the larval nodes as female on its strength.") else if (sub_is_library) paste0("**The subclusters track library rather than stage** (ARI ", round(ari_library, 3), " against library, ", round(ari_stage, 3), " against stage). The correction was computed across these libraries, so subclusters that still separate by library reflect what it failed to remove. These nodes are a poor basis for a trajectory.") else paste0("**The subclusters do not correspond to stage or library** (ARI ", round(ari_stage, 3), " and ", round(ari_library, 3), " respectively). A trajectory over these nodes needs this, but it is not enough: what the subclusters are still has to be established from their markers.")`
 
 ```{r, fig.width=13, fig.height=4}
 p_sub = plotReducedDim(fem.corrected.sce, dimred = "UMAP",
@@ -470,18 +452,13 @@ resolve_marker = function(symbol, rn, gd) {
 
 # families are declared, so coherence can be tested within a known programme
 zp_wang  = unique(gene_description$WangGeneID[grepl("^ZP[0-9]", gene_description$WangGeneID)])
-aep_wang = unique(gene_description$WangGeneID[grepl("^aep1", gene_description$WangGeneID,
-                                                    ignore.case = TRUE)])
 
 marker_families = bind_rows(
   data.frame(symbol = zp_wang,  family = "ZP (oocyte)",        stringsAsFactors = FALSE),
-  data.frame(symbol = aep_wang, family = "AEP1",               stringsAsFactors = FALSE),
   data.frame(symbol = c("DDX4", "PIWIL1", "SYCP3"),
              family = "germline, general",                     stringsAsFactors = FALSE),
   data.frame(symbol = c("ALPL", "PRDM14"),
-             family = "early germline",                        stringsAsFactors = FALSE),
-  data.frame(symbol = c("CUZD1", "S100A1"),
-             family = "female-associated",                     stringsAsFactors = FALSE)) %>%
+             family = "early germline",                        stringsAsFactors = FALSE)) %>%
   distinct(symbol, .keep_all = TRUE)
 
 rn = rownames(fem.sce)
@@ -495,7 +472,7 @@ resolved   = marker_families %>% filter(!is.na(gene_id)) %>%
 unresolved = marker_families %>% filter(is.na(gene_id))
 ```
 
-* Requested, after expanding the ZP and AEP families: `r nrow(marker_families)`
+* Requested, after expanding the ZP family: `r nrow(marker_families)`
 * Resolved in `rownames`: `r nrow(resolved)`
 * Not found, and therefore excluded: `r if (nrow(unresolved) == 0) "none" else paste(unresolved$symbol, collapse = ", ")`
 
@@ -617,11 +594,11 @@ cd$PC1 = emb$pca[, 1];    cd$PC2 = emb$pca[, 2]
 PC1 explains `r round(emb$percentVar[1], 1)`% of variance, PC2
 `r round(emb$percentVar[2], 1)`%.
 
-## Is DC1 bimodal?
+## Bimodality of DC1
 
-A correlation computed across a bimodal distribution measures the gap between
-the two modes, not a gradient within them. Bimodality is therefore tested first,
-because it changes what every subsequent statistic means.
+Across a bimodal distribution, a correlation measures the gap between the two
+modes rather than a gradient within them. Bimodality is tested first for that
+reason.
 
 ```{r}
 set.seed(1)
@@ -645,9 +622,9 @@ A two-means split of DC1 accounts for `r round(100 * between_ratio, 1)`% of its
 total variance, and the gap between the modes spans
 `r round(100 * gap_frac, 1)`% of the DC1 range.
 
-`r if (bimodal) "**DC1 is bimodal.** The cells fall into two separated groups rather than lying along a gradient, so DC1 is read below as a group separation and not as a pseudotime." else "DC1 is not clearly bimodal, so it is read below as a continuous axis."`
+`r if (bimodal) "**DC1 is bimodal.** The cells fall into two separated groups rather than lying along a gradient, so DC1 is read below as a separation between groups." else "DC1 is not clearly bimodal, so it is read below as a continuous axis."`
 
-## What separates the two modes
+## Separation between the modes
 
 ```{r}
 tech_vars = intersect(c("sum", "detected", "subsets_Mito_percent"), colnames(cd))
@@ -683,15 +660,15 @@ mode_is_stage = !is.na(stage_r2) && stage_r2 >= 0.5
 Stage explains `r round(100 * stage_r2, 1)`% of the variance in DC1, and library
 of origin `r round(100 * lib_r2, 1)`%.
 
-`r if (mode_is_stage) "**The two modes are the larval and transformer cells.** Because collection date varies with stage, this separation is confounded: it is equally consistent with a genuine difference between larval oogonia and transformer oocytes and with a July to November batch effect. The marker coherence test below is what distinguishes them." else "The modes do not correspond to stage, so whatever separates them is not the stage and batch contrast."`
+`r if (mode_is_stage) "**The two modes are the larval and transformer cells.** Collection date varies with stage, so the separation could reflect a difference between larval and transformer germ cells or a July to November batch effect. The marker tests below address which." else "The modes do not correspond to stage, so the stage and batch contrast does not separate them."`
 
-`r if (!is.na(lib_r2) && !is.na(stage_r2) && lib_r2 - stage_r2 < 0.05) "Note that library adds essentially nothing beyond stage, meaning the two libraries within each stage sit together. Were this per-library technical noise rather than a stage-level difference, all four libraries would have separated." else ""`
+`r if (!is.na(lib_r2) && !is.na(stage_r2) && lib_r2 - stage_r2 < 0.05) "Library explains little beyond stage: the two libraries within each stage sit together. Per-library technical noise would have separated all four libraries." else ""`
 
-## Technical covariates, within each mode
+## Technical covariates within each mode
 
-This is the diagnostic that the pooled correlation cannot give. If DC1 tracked
-detection rate as a gradient, the association would persist inside each mode. If
-it is only the two groups differing, the within-mode correlations collapse.
+If DC1 tracked detection rate as a gradient, the association would persist
+inside each mode. If only the two groups differ, the within-mode correlations
+collapse.
 
 ```{r}
 within_tech = bind_rows(lapply(unique(cd$mode), function(m) {
@@ -730,23 +707,22 @@ technical_gradient = isTRUE(max_within >= 0.4)
 The strongest pooled correlation is `r round(max_pooled, 2)`; the strongest
 within either mode is `r round(max_within, 2)`.
 
-`r if (technical_gradient) "**A technical gradient is present within a mode**, so detection rate structures the data even after the group separation is accounted for. Treat any ordering with suspicion." else "**The pooled association is entirely the group difference.** Within each mode, DC1 has essentially no relationship to detection rate or composition. The two groups differ in RNA content, which is not the same thing as DC1 being a technical artifact."`
+`r if (technical_gradient) "**A technical gradient is present within a mode.** Detection rate structures the data even after the group separation is accounted for, so treat any ordering with suspicion." else "**The pooled association comes from the group difference.** Within each mode, DC1 is not strongly related to detection rate. The two groups differ in RNA content, but that does not make DC1 a technical artifact."`
 
-## Do any later components avoid the stage split?
+## Later diffusion components
 
-DC1 is the stage separation, so the natural question is whether DC2 or a later
-component carries within-stage structure instead. Every component is scanned
-against the same tests.
+If DC1 is the stage separation, DC2 or a later component might carry structure
+within a stage. Every component is scanned with the same tests. Read the table
+with these limits in mind:
 
-Two caveats on reading this table. Later components are constrained to be
-orthogonal to DC1, which is a mathematical requirement rather than a biological
-one: a maturation gradient would partly align with the stage axis, since larval
-oogonia are less mature than transformer oocytes, so forcing it perpendicular to
-DC1 distorts the signal being looked for. And a diffusion component can be
-produced entirely by a few weakly connected cells, which is why outlier
-dominance is reported alongside. The per-library analysis in section 2 is the
-cleaner form of this question, because within a library there is no stage axis
-to be orthogonal to.
+* **Later components are orthogonal to DC1.** A maturation gradient would partly
+  align with the stage axis, so forcing it perpendicular to DC1 distorts the
+  signal being looked for.
+* **A few cells can produce a component.** Weakly connected cells can dominate a
+  diffusion component, so outlier dominance is reported alongside.
+
+The per-library analysis in section 2 asks the same question without a stage
+axis to be orthogonal to.
 
 ```{r}
 expr_long_all = marker_expression(fem.sce, resolved)
@@ -802,7 +778,7 @@ candidates = dc_scan %>% filter(candidate)
 later_batch_free = dc_scan %>% filter(component != "DC1", batch_free)
 ```
 
-`r if (nrow(candidates) > 0) paste0("**", paste(candidates$component, collapse = ", "), "** avoid the stage split, are not outlier driven, are not associated with detection rate, and carry monotonic marker changes. Worth examining as a candidate within-stage axis, subject to the orthogonality caveat above.") else if (nrow(later_batch_free) > 0) paste0(paste(later_batch_free$component, collapse = ", "), " avoid the stage split, but none of them pass the remaining checks: they are either driven by a small number of outlier cells, associated with detection rate, or carry no monotonic marker changes. No later component provides a usable within-stage axis.") else "No component other than DC1 avoids the stage split, so the combined embedding offers no batch-free axis at all. Any within-stage structure has to be looked for inside a single library, which is section 2."`
+`r if (nrow(candidates) > 0) paste0("**", paste(candidates$component, collapse = ", "), "** avoid the stage split, are not driven by outliers, are not associated with detection rate, and carry monotonic marker changes. Each is a candidate within-stage axis, subject to the orthogonality limit above.") else if (nrow(later_batch_free) > 0) paste0(paste(later_batch_free$component, collapse = ", "), " avoid the stage split but fail the remaining checks: each is driven by outlier cells, associated with detection rate, or carries no monotonic marker changes. No later component gives a usable within-stage axis.") else "No component other than DC1 avoids the stage split, so the combined embedding has no batch-free axis. Within-stage structure has to be looked for inside a single library, in section 2."`
 
 ```{r, fig.width=11, fig.height=3.5}
 dc_long = as.data.frame(emb$dc) %>%
@@ -824,17 +800,18 @@ ggsave(p_dcs, file = paste0(results_dir, "/all_DCs_by_library.png"),
 ## Marker expression across the modes
 
 Coherence within a declared gene family narrows the possibilities but does not
-by itself separate a differentiation programme from a technical difference. A
-batch effect can move a family as a set, by at least three routes: ambient RNA
-from an abundant cell type contaminating every droplet of one library,
-paralogous genes sharing length and GC so that a capture bias hits them
-together, and dissociation stress inducing the immediate-early and heat shock
-families coordinately.
+separate a differentiation programme from a technical difference. A batch effect
+can move a gene family as a set through:
 
-Ambient RNA is the serious candidate here. Oocytes are large, fragile and
-RNA-rich, zona pellucida transcripts are among the most abundant things in them,
-and the library showing the signal is the female transformer. The control for it
-is in the next section, and it is what the interpretation actually rests on.
+* ambient RNA from an abundant cell type contaminating every droplet of one
+  library
+* paralogous genes sharing length and GC content, so a capture bias hits them
+  together
+* dissociation stress inducing the immediate-early and heat shock families
+
+Ambient RNA is the main concern here. Oocytes are large, fragile and RNA-rich,
+zona pellucida transcripts are among their most abundant, and the signal appears
+in the female transformer library. The ambient RNA control below tests for it.
 
 ```{r}
 expr_long = marker_expression(fem.sce, resolved)
@@ -862,9 +839,8 @@ datatable(combined_trends %>% mutate(across(where(is.numeric), ~signif(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
-A family with fewer than three resolved genes cannot meet the criteria no
-matter what the data show, so those are reported as `NA`, meaning not testable,
-rather than `FALSE`, which would read as a negative result.
+A family with fewer than three resolved genes cannot meet the criteria, so it is
+reported as `NA` (not testable) rather than `FALSE`.
 
 ```{r}
 min_family_genes = 3
@@ -912,18 +888,17 @@ reaching |rho| >= 0.3 with FDR < 0.05.
 
 `r if (zp_coherent) paste0("The ZP family is coherent: ", zp_row$n_genes, " genes, median rho ", round(zp_row$median_rho, 2), ", ", round(zp_row$pct_same_sign), "% agreeing in sign, ", zp_row$n_significant, " significant.") else "The ZP family does not move coherently along DC1."`
 
-`r if (nrow(near_miss) > 0) paste0("Reported rather than discarded: ", paste0(near_miss$family, " (", near_miss$n_genes, " genes, median rho ", round(near_miss$median_rho, 2), ", ", round(near_miss$pct_same_sign), "% same sign, ", near_miss$n_significant, " significant)", collapse = "; "), ". ", if (nrow(near_miss) == 1) "This family falls" else "These families fall", " below the 80% sign threshold while still showing a strong majority direction and many significant genes. For a large paralogous family there is no reason to expect every member to share the same regulation, so a minority moving the other way is plausibly biological rather than noise. The threshold is a convention, not a finding.") else ""`
+`r if (nrow(near_miss) > 0) paste0("Near misses: ", paste0(near_miss$family, " (", near_miss$n_genes, " genes, median rho ", round(near_miss$median_rho, 2), ", ", round(near_miss$pct_same_sign), "% same sign, ", near_miss$n_significant, " significant)", collapse = "; "), ". ", if (nrow(near_miss) == 1) "This family falls" else "These families fall", " below the 80% sign threshold but show a strong majority direction and many significant genes. Members of a large paralogous family need not share regulation, so a minority moving the other way may be biological.") else ""`
 
-## Direction test: do early and late programmes move oppositely?
+## Direction test
 
-Coherence within one family is weaker evidence than two families moving in
-**opposite** directions. Ambient RNA, capture bias and sequencing depth all push
-a set of genes the same way. None of them raise an oocyte programme while
-lowering a general germline programme, in the order that matches known
-development.
+Two programmes moving in **opposite** directions is stronger evidence than
+coherence within one family. Ambient RNA, capture bias and sequencing depth push
+a set of genes the same way. None of them raises an oocyte programme while
+lowering the general germline programme.
 
 ```{r}
-late_families  = c("ZP (oocyte)", "AEP1")
+late_families  = c("ZP (oocyte)")
 early_families = c("germline, general", "early germline")
 
 dir_summary = combined_trends %>%
@@ -968,7 +943,7 @@ dir_p = if (both_present) {
 
 `r if (!both_present) "One of the two programmes has no resolved genes, so the direction test cannot be run." else paste0("The late oocyte programme has a median rho of ", round(late_row$median_rho, 2), " across ", late_row$n_genes, " genes (", late_row$n_significant, " significant), and the early germline programme a median rho of ", round(early_row$median_rho, 2), " across ", early_row$n_genes, " genes (", early_row$n_significant, " significant). Wilcoxon on the two sets of per-gene correlations: p = ", signif(dir_p, 2), ".")`
 
-`r if (opposite_directions) "**The two programmes move in opposite directions along DC1.** Oocyte genes are high at one end and general germline identity genes at the other. A technical difference between libraries acts on a set of genes in one direction; it does not raise one programme while lowering another in the sequence that matches oogonia giving way to oocytes. This is stronger evidence for a differentiation transition than coherence within either family alone." else if (both_present) "The two programmes do not move in opposite directions along DC1, so the separation does not show the early to late transition expected of a differentiation transition." else ""`
+`r if (opposite_directions) "**The two programmes move in opposite directions along DC1.** Oocyte genes are high at one end and general germline genes at the other. A technical difference between libraries would move both programmes the same way." else if (both_present) "The two programmes do not move in opposite directions along DC1, so the separation does not show an early to late transition." else ""`
 
 ```{r, fig.width=11, fig.height=8}
 top_markers = combined_trends %>% filter(!is.na(rho)) %>%
@@ -1077,7 +1052,7 @@ Mean ZP expression in non-germ cells of the female library is
 the non-germ cells of any other library. In the germ cluster of the female
 library it is `r round(fem_germ, 3)`.
 
-`r if (ambient_suspected) "**Ambient contamination is indicated.** Cells in the female library that cannot transcribe zona pellucida nevertheless carry it, so the germ cell signal is inflated by free-floating oocyte RNA and the size of the difference between the modes cannot be taken at face value." else "**Ambient contamination is ruled out.** Cells in the female library that cannot transcribe zona pellucida do not carry it, at levels comparable to the same compartment in every other library, while the germ cluster of that same library carries it strongly. Free-floating oocyte RNA would have appeared in every droplet from the library, so the signal is transcription confined to the germ cells."`
+`r if (ambient_suspected) "**Ambient contamination is indicated.** Non-germ cells in the female library carry ZP at three or more times the highest level in any other library. Free-floating oocyte RNA inflates the germ cell signal, so the difference between the modes cannot be taken at face value." else if (is.na(ambient_ratio)) "**The ambient control could not be computed.** Either the female library has no non-germ cells in this table, or no other library has ZP detected in its non-germ cells." else "**No sign of ambient contamination.** Non-germ cells in the female library carry ZP at less than three times the highest level in any other library. Free-floating oocyte RNA would appear in every droplet from that library, so the ZP signal reflects transcription in the germ cells."`
 
 ```{r, fig.width=8, fig.height=4}
 p_amb = ggplot(all_meta, aes(x = library, y = zp_mean, fill = compartment)) +
@@ -1113,18 +1088,18 @@ combined_verdict = if (technical_gradient) {
 **`r combined_verdict`.**
 
 `r switch(combined_verdict,
-  "technical" = "DC1 retains a strong association with detection rate inside each mode, so it is structured by technical variation and nothing should be built on it.",
-  "two groups, unexplained" = "The cells form two separated groups, but no declared marker family moves coherently across them, so the separation cannot be attributed to a differentiation programme and may be technical or batch driven.",
-  "two groups, ambient confounded" = "The cells form two separated groups and marker families move coherently, but non-germ cells of the female library also carry zona pellucida transcripts, which they cannot transcribe. The signal is therefore inflated by ambient oocyte RNA and the separation cannot be read as a differentiation difference on this evidence.",
-  "two states" = paste0("The female germ cells form two separated groups, not a gradient, and the separation carries a coherent differentiation programme that is not explained by ambient RNA: zona pellucida expression is confined to the germ cluster and is absent from the other cells of the same library, so it is transcribed rather than free-floating. ", if (opposite_directions) "The oocyte and general germline programmes also move in opposite directions along the axis, which no technical difference between libraries would produce. " else "", "Louvain at k = 8 not splitting these cells is a finding about the clustering rather than evidence of a continuum, and is expected given the subclustering in 02 runs on fastMNN corrected values where this between-library difference is removed by design. Stage and collection date remain confounded in general, but the specific alternative that the marker signal is a library artifact has been tested and rejected."),
-  "continuum" = "DC1 is unimodal, is not explained by detection rate, and maturation markers vary monotonically along it, which supports a continuous gradient.",
-  "no structure" = "DC1 is neither bimodal nor accompanied by monotonic marker changes, so there is no evidence of either discrete states or a gradient.")`
+  "technical" = "DC1 keeps a strong association with detection rate inside each mode, so it is structured by technical variation. Nothing should be built on it.",
+  "two groups, unexplained" = "The cells form two separated groups, but no declared marker family moves coherently across them. The separation cannot be attributed to a differentiation programme and may be technical or batch driven.",
+  "two groups, ambient confounded" = "The cells form two separated groups and marker families move coherently, but non-germ cells of the female library also carry zona pellucida transcripts. Ambient oocyte RNA inflates the signal, so the separation cannot be read as a differentiation difference.",
+  "two states" = paste0("The cells form two separated groups rather than a gradient. The separation carries a coherent marker programme, and zona pellucida expression is confined to the germ cluster, so ambient RNA does not explain it. ", if (opposite_directions) "The oocyte and general germline programmes also move in opposite directions. A uniform difference between libraries would move them the same way. " else "", "These tests rule out ambient RNA and a uniform library shift. They do not separate stage from collection date."),
+  "continuum" = "DC1 is unimodal and not explained by detection rate, and markers vary monotonically along it. This supports a continuous gradient.",
+  "no structure" = "DC1 is neither bimodal nor accompanied by monotonic marker changes, so there is no evidence of discrete states or a gradient.")`
 
 # 2. Per-library analysis
 
 Within a single library, animal, collection date and batch are constant, so a
 gradient there cannot be a batch effect and a correlation with detection rate is
-unambiguously technical. This is the clean test for a maturation continuum.
+technical.
 
 ```{r}
 perlib_file = paste0(Robject_out_dir, "/female_perlibrary.Rds")
@@ -1199,18 +1174,16 @@ datatable(perlib_summary %>% mutate(across(where(is.numeric), ~round(., 3))),
           rownames = FALSE)
 ```
 
-Marker counts are given twice. The raw count is the number of markers
-correlating with DC1. The partial count is the number still correlating once
-`sum` and `detected` are regressed out of both sides. Where DC1 is itself
-detection rate, nearly every gene will pass the raw test, because expression
-correlates with depth for almost all genes, so only the partial count carries
-information.
+Marker counts are given twice. The raw count is the number of markers correlating
+with DC1. The partial count is the number still correlating after `sum` and
+`detected` are regressed out of both sides. Expression correlates with depth for
+almost every gene, so where DC1 tracks detection rate nearly every marker passes
+the raw test and only the partial count carries information.
 
-The partial count has its own limit: regressing out a covariate that already
-explains most of the axis leaves little variance to work with, so when the
-technical correlation is high the partial figure is underpowered and a collapse
-to zero is expected whether or not biology is present. `partial_reliable` marks
-where it can be trusted.
+The partial count has its own limit. When DC1 is already highly correlated with
+depth, regressing depth out leaves little variance, so a partial count near zero
+is expected whether or not biology is present. `partial_reliable` marks where
+the partial count can be trusted.
 
 ```{r, results="asis"}
 for (i in seq_len(nrow(perlib_summary))) {
@@ -1223,15 +1196,15 @@ for (i in seq_len(nrow(perlib_summary))) {
       r$n_coherent_fam, " coherent marker famil",
       if (r$n_coherent_fam == 1) "y" else "ies", ". ",
       if (r$technical_confound && !r$partial_reliable) {
-        paste0("Within this single library, where batch cannot contribute, the leading component is detection rate. The raw marker count is therefore not evidence of biology: expression correlates with depth for almost every gene, so markers correlating with a depth axis is guaranteed. The partial count cannot settle it either, because DC1 and depth are near-collinear here and partialling one out of the other leaves too little signal to test. The honest reading is that this library offers no usable axis, which is also what a homogeneous population would produce, since with no biological variance to structure the embedding depth takes over.")
+        paste0("Within this library the leading component tracks detection rate. Expression correlates with depth for almost every gene, so the raw marker count is not evidence of biology. DC1 and depth are nearly collinear, so the partial count cannot settle it either. This library offers no usable axis. A homogeneous population with no biological variance would give the same result.")
       } else if (r$technical_confound) {
         paste0("The leading component tracks detection rate, so the raw marker count reflects depth rather than biology. ",
                if (r$n_directional_partial >= 3)
-                 "Some markers survive control for depth, so there may be biological structure underneath the technical gradient worth extracting."
+                 "Some markers survive control for depth, so biological structure may remain beneath the technical gradient."
                else
-                 "No markers survive control for depth, so there is no biological structure underneath the technical gradient.")
+                 "No markers survive control for depth, so no biological structure is detected beneath the technical gradient.")
       } else if (r$continuum_supported) {
-        "Within this single library the leading component is not technical, and markers vary monotonically along it after controlling for depth, which supports a maturation gradient inside this stage."
+        "The leading component is not technical, and markers vary monotonically along it after controlling for depth. This supports a gradient within this library."
       } else {
         "The leading component is not technical, but markers do not vary monotonically along it once depth is controlled, so there is no evidence of a gradient within this library."
       },
@@ -1262,13 +1235,10 @@ ggsave(p_perlib, file = paste0(results_dir, "/perlibrary_diffusion.png"),
 
 ## Marker expression in the Female library alone
 
-This is the cleanest test in the document. Inside the female transformer
-library, animal, collection date, batch and sex are all constant, so nothing
-here can be a batch effect and a correlation with detection rate is
-unambiguously technical. If oogonia and oocytes coexist in this sample, the
-oocyte and general germline programmes should move in opposite directions along
-its internal DC1, exactly as they do across the stage split, but with the
-confound removed.
+Inside the female transformer library, animal, collection date, batch and sex are
+constant, so structure there cannot be a batch effect. If oogonia and oocytes
+coexist in this sample, the oocyte and general germline programmes should move
+in opposite directions along its internal DC1.
 
 ```{r}
 female_batch     = library_meta$batch[library_meta$library == "Female"]
@@ -1307,7 +1277,7 @@ if (female_available) {
 }
 ```
 
-`r if (female_available) paste0("Strongest correlation between the internal DC1 and a technical covariate: ", round(fem_tech_max, 2), ". ", if (fem_technical) "**That is a technical gradient.** With batch held constant there is nothing else it could be, so the internal axis is structured by detection rate and no biological reading is available." else "No technical gradient, so the internal axis is not detection rate.") else ""`
+`r if (female_available) paste0("Strongest correlation between the internal DC1 and a technical covariate: ", round(fem_tech_max, 2), ". ", if (fem_technical) "**That is a technical gradient.** The internal axis tracks detection rate, so no biological reading is available." else "The internal axis is not strongly associated with detection rate.") else ""`
 
 ### Marker trends within the Female library
 
@@ -1332,7 +1302,7 @@ if (female_available) {
 }
 ```
 
-`r if (female_available) paste0("In this library, ", n_dir_f_raw, " markers correlate with DC1 and ", n_dir_f_partial, " still do after regressing out sum and detected. With the technical correlation at ", round(fem_tech_max, 2), ", DC1 and depth are far from collinear here, so the partial figure is well powered and can be read at face value.") else ""`
+`r if (female_available) paste0("In this library, ", n_dir_f_raw, " markers correlate with DC1 and ", n_dir_f_partial, " still do after regressing out sum and detected. ", if (fem_tech_max < 0.6) "DC1 is not strongly correlated with depth here, so the partial correlations can be read." else "DC1 is strongly correlated with depth here, so the partial correlations are underpowered.") else ""`
 
 ```{r}
 if (female_available) {
@@ -1397,7 +1367,7 @@ if (female_available) {
 
 `r if (!female_available) "" else if (!both_f) "One programme has no resolved genes within this library, so the direction test cannot be run here." else paste0("Within the Female library alone, the late oocyte programme has a median rho of ", round(late_f$median_rho, 2), " across ", late_f$n_genes, " genes (", late_f$n_significant, " significant) and the early germline programme ", round(early_f$median_rho, 2), " across ", early_f$n_genes, " genes (", early_f$n_significant, " significant). Wilcoxon p = ", signif(dir_p_f, 2), ".")`
 
-`r if (female_available && fem_opposite) "**The two programmes move in opposite directions within a single library.** Batch, animal, collection date and sex are all constant here, so this cannot be a library artifact. Oogonia and oocytes coexist in this sample and are ordered along the internal axis, which is direct evidence of a maturation gradient rather than only a difference between stages." else if (female_available && both_f) "**The two programmes do not move in opposite directions within this library.** Whatever the internal axis describes, it is not the early to late germ cell transition. The opposite-direction result in the combined analysis therefore reflects the difference between the stages rather than a gradient inside the transformer sample." else ""`
+`r if (female_available && fem_opposite) "**The two programmes move in opposite directions within a single library.** Batch, animal, collection date and sex are constant here, so this is not a library artifact. Cells with oocyte-like and germline-like expression coexist in this sample and are ordered along the internal axis. This supports a maturation gradient within the transformer sample in addition to the difference between stages." else if (female_available && both_f) paste0("**The two programmes do not move in opposite directions within this library.** The internal axis does not show an early to late transition.", if (opposite_directions) " The opposite-direction result in the combined analysis therefore reflects the difference between stages rather than a gradient within the transformer sample." else "") else ""`
 
 ```{r, fig.width=11, fig.height=8}
 if (female_available) {
@@ -1450,41 +1420,35 @@ if (female_available) {
 any_within_continuum = any(perlib_summary$continuum_supported)
 
 cat(paste0(
-  ncol(fem.sce), " female germ cells across ", length(fem_list), " libraries. ",
+  ncol(fem.sce), " cells across ", length(fem_list), " libraries. ",
   "**Combined:** DC1 is ", if (bimodal) "bimodal" else "unimodal",
   ", with stage explaining ", round(100 * stage_r2, 1),
   "% of its variance. The strongest correlation with a technical covariate is ",
-  round(max_pooled, 2), " pooled but only ", round(max_within, 2),
-  " within a mode, so the pooled association is the group difference rather ",
-  "than a gradient. ", n_coherent_families, " of ", n_testable,
+  round(max_pooled, 2), " pooled and ", round(max_within, 2),
+  " within a mode. ", n_coherent_families, " of ", n_testable,
   " testable marker famil",
   if (n_coherent_families == 1) "ies moves" else "ies move",
-  " coherently across the separation",
+  " coherently along DC1",
   if (opposite_directions)
-    ", and the oocyte and general germline programmes move in opposite directions along it, which a technical difference between libraries would not produce"
+    ", and the oocyte and general germline programmes move in opposite directions along it"
   else "",
   ". Verdict: ", combined_verdict, ". ",
   "**Per library:** ",
   if (any_within_continuum) {
     paste0(sum(perlib_summary$continuum_supported), " of ", nrow(perlib_summary),
-           " libraries support a maturation gradient internally, which cannot ",
-           "be a batch effect because batch is constant within a library.")
+           " libraries show a gradient internally. Batch is constant within a ",
+           "library, so these gradients are not batch effects.")
   } else {
-    paste0("no library supports a maturation gradient internally. Within a ",
-           "single collection, where batch cannot contribute, these cells do ",
-           "not resolve into an ordered progression, so the structure in the ",
-           "combined analysis is between the stages rather than within them.")
+    paste0("no library shows a gradient internally, so any structure in the ",
+           "combined analysis lies between the stages rather than within them.")
   },
   if (!female_available) "" else if (fem_opposite) {
     paste0(" In the Female library alone, the oocyte and general germline ",
-           "programmes move in opposite directions along the internal axis, ",
-           "so oogonia and oocytes coexist in that sample and are ordered ",
-           "within it. That result carries no confound at all, since batch, ",
-           "animal, collection date and sex are constant.")
+           "programmes move in opposite directions along the internal axis. ",
+           "Batch, animal, collection date and sex are constant in that library.")
   } else {
-    paste0(" In the Female library alone the two programmes do not separate, ",
-           "so the early to late transition seen in the combined analysis is ",
-           "between the stages rather than within the transformer sample.")
+    paste0(" In the Female library alone, the two programmes do not move in ",
+           "opposite directions.")
   }))
 ```
 
