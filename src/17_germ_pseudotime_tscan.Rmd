@@ -26,6 +26,9 @@ params:
     root_node: ""
     min_library_cells: 50
     fdr_cut: 0.01
+    lfc_thresh: 1
+    go_pval: 0.05
+    genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
 ---
 
 ```{r setup, include=FALSE}
@@ -100,6 +103,33 @@ gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
 lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
              "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
 ```
+
+```{r}
+gaf_file      = file.path(params$genome_dir,
+                          "GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf")
+go_names_file = file.path(params$genome_dir, "GOs_names.txt")
+have_go       = file.exists(gaf_file) && file.exists(go_names_file)
+```
+
+```{r, eval=have_go}
+gaf = read.delim(gaf_file, header = FALSE, comment = "!") %>%
+  dplyr::filter(!grepl("NOT", V4)) %>%
+  dplyr::select(V3, V5) %>%
+  dplyr::rename(GOID = "V5", Gene = "V3") %>%
+  dplyr::distinct()
+
+# terms too small are noise, terms too large are uninformative
+keep_go = gaf %>%
+  dplyr::count(GOID) %>%
+  dplyr::filter(n > 10, n < 200) %>%
+  dplyr::pull(GOID)
+gaf = gaf %>% dplyr::filter(GOID %in% keep_go)
+
+go_names = read.delim(go_names_file, header = FALSE)
+colnames(go_names) = c("GOID", "GOName")
+```
+
+`r if (!have_go) paste0("**GO enrichment is skipped throughout.** The GO files were not found under ", params$genome_dir, ".") else ""`
 
 # Cells
 
@@ -296,20 +326,25 @@ datatable(node_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ## Root
 
 ```{r}
-zp_genes = gene_description %>%
-  dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
-  dplyr::pull(Gene) %>%
-  intersect(rownames(combined))
+# ZP expression chooses the root only for the female lineage with no root_node set
+use_zp = lineage == "female" && !nzchar(params$root_node)
 
-zp_cell = if (length(zp_genes) > 0) {
-  colMeans(as.matrix(logcounts(combined)[zp_genes, , drop = FALSE]))
-} else {
-  rep(NA_real_, ncol(combined))
+if (use_zp) {
+  zp_genes = gene_description %>%
+    dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
+    dplyr::pull(Gene) %>%
+    intersect(rownames(combined))
+
+  if (length(zp_genes) == 0)
+    stop("no ZP genes resolved, so the female root cannot be chosen ",
+         "automatically. Set the root_node parameter.")
+
+  zp_by_node = data.frame(
+      node = merged$node,
+      zp   = colMeans(as.matrix(logcounts(combined)[zp_genes, , drop = FALSE]))) %>%
+    dplyr::group_by(node) %>%
+    dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop")
 }
-
-zp_by_node = data.frame(node = merged$node, zp = zp_cell) %>%
-  dplyr::group_by(node) %>%
-  dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop")
 
 root =
   if (nzchar(params$root_node)) {
@@ -317,9 +352,6 @@ root =
   } else if (lineage %in% c("male", "all")) {
     as.character(if (lineage == "male") params$male_root else params$all_root)
   } else {
-    if (length(zp_genes) == 0)
-      stop("no ZP genes resolved, so the female root cannot be chosen ",
-           "automatically. Set the root_node parameter.")
     as.character(zp_by_node$node[which.min(zp_by_node$mean_ZP)])
   }
 
@@ -329,11 +361,110 @@ if (!root %in% levels(merged$node))
 
 root_type = unique(lineage_key$cell_type[lineage_key$final_label == root])
 
-datatable(zp_by_node %>% mutate(mean_ZP = signif(mean_ZP, 3)),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+if (use_zp)
+  datatable(zp_by_node %>% mutate(mean_ZP = signif(mean_ZP, 3)),
+            rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
 `r paste0("The ordering is rooted at node **", root, "**", if (length(root_type) == 1) paste0(" (", root_type, ")") else "", ". ", if (nzchar(params$root_node)) "It was set by the root_node parameter." else if (lineage != "female") paste0("It was set by the ", lineage, "_root parameter.") else "It is the node with the lowest mean zona pellucida (ZP) expression, taken as the least oocyte-like.", " The root is an assumption: rooting the same tree elsewhere gives a different ordering.")`
+
+```{r, echo=FALSE, results="asis"}
+if (lineage == "female") {
+  cat("\n# Subcluster markers\n\n",
+      "Markers for each female subcluster, from `findMarkers` on uncorrected log ",
+      "counts, comparing each subcluster with the others (`direction = \"up\"`, ",
+      "`pval.type = \"some\"`). Library is not blocked: a subcluster drawn mostly ",
+      "from one library has no within-library comparison, so its markers include ",
+      "library differences. Genes are kept at FDR < 0.01 with a mean log fold ",
+      "change of at least ", params$lfc_thresh, " across the pairwise comparisons, ",
+      "and written to `subcluster_marker_genes.csv`.\n\n", sep = "")
+}
+```
+
+```{r, eval=lineage == "female"}
+# mean over every pairwise logFC; summary.logFC under pval.type = "some" comes
+# from whichever comparison supplied the p-value, so it is not a fixed contrast
+marker_effect = function(df) {
+  lf = grep("^logFC\\.", colnames(df), value = TRUE)
+  if (length(lf) == 0) return(rep(NA_real_, nrow(df)))
+  rowMeans(as.matrix(as.data.frame(df[, lf, drop = FALSE])), na.rm = TRUE)
+}
+
+marker_file     = paste0(Robject_out_dir, "/subcluster_markers.Rds")
+marker_sig_file = paste0(Robject_out_dir, "/subcluster_markers_signature.txt")
+marker_sig      = paste(obj_sig, paste(node_levels, collapse = ","),
+                        paste(as.integer(table(merged$node)), collapse = ","),
+                        sep = "|")
+
+if (file.exists(marker_file) && file.exists(marker_sig_file) &&
+    identical(readLines(marker_sig_file, warn = FALSE)[1], marker_sig)) {
+  sub_markers = readRDS(marker_file)
+} else {
+  sub_markers = findMarkers(combined, combined$node, test.type = "t",
+                            direction = "up", pval.type = "some")
+  saveRDS(sub_markers, file = marker_file)
+  writeLines(marker_sig, marker_sig_file)
+}
+
+sub_marker_tab = purrr::map_dfr(names(sub_markers), function(nd) {
+  df = sub_markers[[nd]]
+  data.frame(node      = nd,
+             Gene      = rownames(df),
+             p.value   = df$p.value,
+             FDR       = df$FDR,
+             meanLogFC = marker_effect(df),
+             stringsAsFactors = FALSE)
+}) %>%
+  dplyr::filter(FDR < 0.01, meanLogFC >= params$lfc_thresh) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::group_by(node) %>%
+  dplyr::arrange(desc(meanLogFC), FDR, .by_group = TRUE) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(node, Gene, WangGeneID, description, meanLogFC, p.value, FDR)
+
+write.csv(sub_marker_tab, file = paste0(results_dir, "/subcluster_marker_genes.csv"),
+          row.names = FALSE)
+
+marker_counts = data.frame(node = node_levels) %>%
+  dplyr::left_join(sub_marker_tab %>% dplyr::count(node, name = "n_markers"),
+                   by = "node") %>%
+  dplyr::mutate(n_markers = ifelse(is.na(n_markers), 0L, n_markers))
+
+datatable(marker_counts, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, eval=lineage == "female"}
+datatable(sub_marker_tab %>% mutate(across(c(meanLogFC, p.value, FDR), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+if (lineage == "female") {
+  cat("\n## GO enrichment of subcluster markers\n\n",
+      "GO enrichment of each subcluster's marker genes, against every gene in the ",
+      "data. Terms with p < ", params$go_pval, " are shown and written to ",
+      "`subcluster_marker_GO_pvalues.csv`.\n\n", sep = "")
+  if (!have_go) cat("Skipped: the GO files were not found.\n\n")
+  else if (nrow(sub_marker_tab) == 0) cat("Skipped: no subcluster has marker genes at this cutoff.\n\n")
+}
+```
+
+```{r, eval=lineage == "female" && have_go && exists("sub_marker_tab") && nrow(sub_marker_tab) > 0}
+marker_go = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = sub_marker_tab %>% dplyr::select(Gene, node) %>% dplyr::distinct(),
+  background_n     = nrow(combined),
+  group2_label     = "node",
+  ngroup2_label    = "nMarkerGenes",
+  overlaps_file    = paste0(results_dir, "/subcluster_marker_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/subcluster_marker_GO_pvalues.csv"),
+  pval_filter      = params$go_pval)
+
+datatable(marker_go %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
 
 # Trajectory
 
@@ -554,6 +685,33 @@ for (s in names(heatmaps)) {
                            gsub("[^A-Za-z0-9]+", "_", s), ".png"),
          width = 7, height = 5)
 }
+```
+
+## GO enrichment of pseudotime-associated genes
+
+GO enrichment for each path and direction, against every gene in the data. Terms
+with p < `r params$go_pval` are shown and written to
+`tscan_pseudotime_GO_pvalues.csv`.
+
+`r if (!have_go) "Skipped: the GO files were not found." else if (nrow(path_genes) == 0) "Skipped: there are no pseudotime-associated genes to test." else ""`
+
+```{r, eval=have_go && nrow(path_genes) > 0}
+path_go = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = path_genes %>%
+                       dplyr::transmute(Gene, set = paste0(Path, ".", Direction)) %>%
+                       dplyr::distinct(),
+  background_n     = nrow(combined),
+  group2_label     = "Path",
+  ngroup2_label    = "nPathGenes",
+  overlaps_file    = paste0(results_dir, "/tscan_pseudotime_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/tscan_pseudotime_GO_pvalues.csv"),
+  pval_filter      = params$go_pval)
+
+datatable(path_go %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
 ```
 
 # Export
