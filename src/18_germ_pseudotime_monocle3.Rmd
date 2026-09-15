@@ -24,7 +24,10 @@ params:
     min_library_cells: 50
     use_partition: FALSE
     graph_q: 0.01
+    lfc_thresh: 1
     cores: 4
+    go_pval: 0.05
+    genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
 ---
 
 ```{r setup, include=FALSE}
@@ -101,6 +104,33 @@ lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
 
 use_partition = isTRUE(as.logical(params$use_partition))
 ```
+
+```{r}
+gaf_file      = file.path(params$genome_dir,
+                          "GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf")
+go_names_file = file.path(params$genome_dir, "GOs_names.txt")
+have_go       = file.exists(gaf_file) && file.exists(go_names_file)
+```
+
+```{r, eval=have_go}
+gaf = read.delim(gaf_file, header = FALSE, comment = "!") %>%
+  dplyr::filter(!grepl("NOT", V4)) %>%
+  dplyr::select(V3, V5) %>%
+  dplyr::rename(GOID = "V5", Gene = "V3") %>%
+  dplyr::distinct()
+
+# terms too small are noise, terms too large are uninformative
+keep_go = gaf %>%
+  dplyr::count(GOID) %>%
+  dplyr::filter(n > 10, n < 200) %>%
+  dplyr::pull(GOID)
+gaf = gaf %>% dplyr::filter(GOID %in% keep_go)
+
+go_names = read.delim(go_names_file, header = FALSE)
+colnames(go_names) = c("GOID", "GOName")
+```
+
+`r if (!have_go) paste0("**GO enrichment is skipped.** The GO files were not found under ", params$genome_dir, ".") else ""`
 
 # Cells
 
@@ -180,7 +210,7 @@ that UMAP.
 
 `r if (use_partition) "use_partition is TRUE, so a separate graph is learned for each partition. Cells in partitions that do not contain the root get infinite pseudotime." else "use_partition is FALSE, so one graph is learned across all cells and every cell receives a pseudotime."`
 
-```{r}
+```{r, results="hide"}
 graph_file     = paste0(Robject_out_dir, "/cds_learned.Rds")
 graph_sig_file = paste0(Robject_out_dir, "/cds_learned_signature.txt")
 graph_sig      = paste(obj_sig, use_partition, sep = "|")
@@ -221,23 +251,28 @@ n_partitions = dplyr::n_distinct(cds@clusters[["UMAP"]]$partitions)
 
 ## Root
 
-```{r}
-zp_genes = gene_description %>%
-  dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
-  dplyr::pull(Gene) %>%
-  intersect(rownames(combined))
+```{r, results="hide"}
+# ZP expression chooses the root only for the female lineage with no root override
+use_zp = lineage == "female" && !nzchar(params$root_label) &&
+         !nzchar(params$root_monocle_cluster)
 
-zp_cell = if (length(zp_genes) > 0) {
-  colMeans(as.matrix(logcounts(combined)[zp_genes, colnames(cds), drop = FALSE]))
-} else {
-  rep(NA_real_, ncol(cds))
+if (use_zp) {
+  zp_genes = gene_description %>%
+    dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
+    dplyr::pull(Gene) %>%
+    intersect(rownames(combined))
+
+  if (length(zp_genes) == 0)
+    stop("no ZP genes resolved, so the female root cannot be chosen ",
+         "automatically. Set root_label or root_monocle_cluster.")
+
+  zp_by_cluster = data.frame(
+      monocle_cluster = colData(cds)$monocle_cluster,
+      zp = colMeans(as.matrix(logcounts(combined)[zp_genes, colnames(cds), drop = FALSE]))) %>%
+    dplyr::group_by(monocle_cluster) %>%
+    dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop") %>%
+    dplyr::arrange(as.integer(monocle_cluster))
 }
-
-zp_by_cluster = data.frame(monocle_cluster = colData(cds)$monocle_cluster,
-                           zp = zp_cell) %>%
-  dplyr::group_by(monocle_cluster) %>%
-  dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop") %>%
-  dplyr::arrange(as.integer(monocle_cluster))
 
 if (nzchar(params$root_label)) {
   root_desc  = paste0("final label ", params$root_label, ", set by the root_label parameter")
@@ -252,9 +287,6 @@ if (nzchar(params$root_label)) {
   root_desc  = paste0("final label ", root_value, ", set by the ", root_param, " parameter")
   root_cells = colnames(cds)[colData(cds)$final_label == root_value]
 } else {
-  if (length(zp_genes) == 0)
-    stop("no ZP genes resolved, so the female root cannot be chosen ",
-         "automatically. Set root_label or root_monocle_cluster.")
   low_zp     = as.character(zp_by_cluster$monocle_cluster[which.min(zp_by_cluster$mean_ZP)])
   root_desc  = paste0("monocle3 cluster ", low_zp,
                       ", the cluster with the lowest mean zona pellucida (ZP) expression")
@@ -275,7 +307,9 @@ cds = order_cells(cds, reduction_method = "UMAP", root_pr_nodes = root_pr_node)
 pt = pseudotime(cds)
 colData(cds)$monocle_pseudotime = pt
 n_infinite = sum(!is.finite(pt))
+```
 
+```{r, eval=use_zp}
 datatable(zp_by_cluster %>% mutate(mean_ZP = signif(mean_ZP, 3)),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
@@ -283,6 +317,212 @@ datatable(zp_by_cluster %>% mutate(mean_ZP = signif(mean_ZP, 3)),
 `r paste0("The ordering is rooted at principal graph vertex ", root_pr_node, ", the vertex most cells of ", root_desc, " project onto. The root is an assumption: rooting the same graph elsewhere gives a different ordering.")`
 
 `r if (n_infinite == 0) "Every cell has a finite pseudotime." else paste0("**", n_infinite, " cells have infinite pseudotime**, because they sit in partitions not connected to the root. They are excluded from the correlations and gene heatmap below.")`
+
+# Monocle3 cluster markers
+
+Markers for each cluster found by `cluster_cells`, from `findMarkers` on
+uncorrected log counts, comparing each cluster with the others
+(`direction = "up"`, `pval.type = "some"`). The test and cutoff match the
+subcluster markers in `17_germ_pseudotime_tscan.Rmd`. Library is not blocked, so
+markers for a cluster drawn mostly from one library include library
+differences. Genes are kept at FDR < 0.01 with a mean log fold change of at
+least `r params$lfc_thresh` across the pairwise comparisons, and written to
+`monocle3_cluster_marker_genes.csv`.
+
+`r if (n_monocle_clusters < 2) "cluster_cells found a single cluster, so there are no cluster markers to compute." else ""`
+
+```{r, eval=n_monocle_clusters > 1, fig.width=6, fig.height=5}
+plot_cells(cds, color_cells_by = "monocle_cluster", label_cell_groups = TRUE,
+           label_leaves = FALSE, label_branch_points = FALSE,
+           cell_size = 0.5, group_label_size = 3) +
+  ggtitle("monocle3 clusters")
+```
+
+```{r, eval=n_monocle_clusters > 1}
+# mean over every pairwise logFC; summary.logFC under pval.type = "some" comes
+# from whichever comparison supplied the p-value, so it is not a fixed contrast
+marker_effect = function(df) {
+  lf = grep("^logFC\\.", colnames(df), value = TRUE)
+  if (length(lf) == 0) return(rep(NA_real_, nrow(df)))
+  rowMeans(as.matrix(as.data.frame(df[, lf, drop = FALSE])), na.rm = TRUE)
+}
+
+# attached by barcode, never by position
+combined$monocle_cluster =
+  colData(cds)$monocle_cluster[match(colnames(combined), colnames(cds))]
+stopifnot(!anyNA(combined$monocle_cluster))
+
+cluster_levels = as.character(sort(as.integer(unique(combined$monocle_cluster))))
+
+mc_file     = paste0(Robject_out_dir, "/monocle3_cluster_markers.Rds")
+mc_sig_file = paste0(Robject_out_dir, "/monocle3_cluster_markers_signature.txt")
+mc_sig      = paste(graph_sig, "cluster_markers", sep = "|")
+
+if (file.exists(mc_file) && file.exists(mc_sig_file) &&
+    identical(readLines(mc_sig_file, warn = FALSE)[1], mc_sig)) {
+  mc_markers = readRDS(mc_file)
+} else {
+  mc_markers = findMarkers(combined,
+                           factor(combined$monocle_cluster, levels = cluster_levels),
+                           test.type = "t", direction = "up", pval.type = "some")
+  saveRDS(mc_markers, file = mc_file)
+  writeLines(mc_sig, mc_sig_file)
+}
+
+mc_marker_tab = purrr::map_dfr(names(mc_markers), function(cl) {
+  df = mc_markers[[cl]]
+  data.frame(monocle_cluster = cl,
+             Gene            = rownames(df),
+             p.value         = df$p.value,
+             FDR             = df$FDR,
+             meanLogFC       = marker_effect(df),
+             stringsAsFactors = FALSE)
+}) %>%
+  dplyr::filter(FDR < 0.01, meanLogFC >= params$lfc_thresh) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::group_by(monocle_cluster) %>%
+  dplyr::arrange(desc(meanLogFC), FDR, .by_group = TRUE) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(monocle_cluster, Gene, WangGeneID, description, meanLogFC, p.value, FDR)
+
+write.csv(mc_marker_tab,
+          file = paste0(results_dir, "/monocle3_cluster_marker_genes.csv"),
+          row.names = FALSE)
+
+# cells per library alongside the marker count, since an unblocked marker list
+# for a one-library cluster carries that library's differences
+mc_summary = as.data.frame(colData(cds)) %>%
+  dplyr::count(monocle_cluster, library, name = "n") %>%
+  tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
+  dplyr::left_join(mc_marker_tab %>% dplyr::count(monocle_cluster, name = "n_markers"),
+                   by = "monocle_cluster") %>%
+  dplyr::mutate(n_markers = ifelse(is.na(n_markers), 0L, n_markers)) %>%
+  dplyr::arrange(match(monocle_cluster, cluster_levels))
+
+write.csv(mc_summary, file = paste0(results_dir, "/monocle3_cluster_composition.csv"),
+          row.names = FALSE)
+
+datatable(mc_summary, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, eval=n_monocle_clusters > 1}
+datatable(mc_marker_tab %>% mutate(across(c(meanLogFC, p.value, FDR), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+## GO enrichment of cluster markers
+
+GO enrichment of each cluster's marker genes, against every gene in the data.
+Terms with p < `r params$go_pval` are shown and written to
+`monocle3_cluster_marker_GO_pvalues.csv`.
+
+`r if (n_monocle_clusters < 2) "Skipped: there is a single cluster." else if (!have_go) "Skipped: the GO files were not found." else if (nrow(mc_marker_tab) == 0) "Skipped: no cluster has marker genes at this cutoff." else ""`
+
+```{r, eval=n_monocle_clusters > 1 && have_go && exists("mc_marker_tab") && nrow(mc_marker_tab) > 0}
+mc_go = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = mc_marker_tab %>%
+                       dplyr::select(Gene, monocle_cluster) %>%
+                       dplyr::distinct(),
+  background_n     = nrow(combined),
+  group2_label     = "monocle_cluster",
+  ngroup2_label    = "nMarkerGenes",
+  overlaps_file    = paste0(results_dir, "/monocle3_cluster_marker_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/monocle3_cluster_marker_GO_pvalues.csv"),
+  pval_filter      = params$go_pval)
+
+datatable(mc_go %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+## Correspondence with TSCAN nodes
+
+Each cell's monocle3 cluster against its node in `17_germ_pseudotime_tscan.Rmd`
+for the same lineage, matched by barcode. The table gives cell counts, with the
+TSCAN node holding most of each cluster's cells. The heatmap gives, for each
+monocle3 cluster, the percentage of its cells in each TSCAN node, labeled with
+the cell count. The adjusted Rand index compares the two partitions as a whole:
+1 means identical, and 0 means no better than chance.
+
+`r if (!file.exists(tscan_file)) paste0("Skipped: ", tscan_file, " is not present. Knit 17_germ_pseudotime_tscan.Rmd for this lineage first.") else ""`
+
+```{r, eval=file.exists(tscan_file)}
+tscan_nodes = read.csv(tscan_file, stringsAsFactors = FALSE) %>%
+  dplyr::select(barcode, tscan_node = node) %>%
+  dplyr::mutate(tscan_node = as.character(tscan_node))
+
+node_map = as.data.frame(colData(cds)) %>%
+  tibble::rownames_to_column("barcode") %>%
+  dplyr::select(barcode, monocle_cluster) %>%
+  dplyr::inner_join(tscan_nodes, by = "barcode")
+
+n_unmatched = ncol(cds) - nrow(node_map)
+
+mc_levels = as.character(sort(as.integer(unique(node_map$monocle_cluster))))
+
+# TSCAN nodes in cluster order, subclusters numerically within their cluster
+node_order = tibble::tibble(tscan_node = unique(node_map$tscan_node)) %>%
+  dplyr::mutate(parent_n = suppressWarnings(
+                  as.numeric(sub("^([0-9]+).*$", "\\1", tscan_node))),
+                sub_n = suppressWarnings(
+                  as.numeric(ifelse(grepl("^[0-9]+\\.[0-9]+$", tscan_node),
+                                    sub("^[0-9]+\\.", "", tscan_node), "0")))) %>%
+  dplyr::arrange(parent_n, sub_n, tscan_node) %>%
+  dplyr::pull(tscan_node)
+
+best_match = node_map %>%
+  dplyr::count(monocle_cluster, tscan_node) %>%
+  dplyr::group_by(monocle_cluster) %>%
+  dplyr::mutate(pct = 100 * n / sum(n)) %>%
+  dplyr::slice_max(n, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(monocle_cluster, best_tscan_node = tscan_node,
+                pct_in_best = pct)
+
+map_counts = node_map %>%
+  dplyr::count(monocle_cluster, tscan_node) %>%
+  dplyr::mutate(tscan_node = factor(tscan_node, levels = node_order)) %>%
+  dplyr::arrange(tscan_node) %>%
+  tidyr::pivot_wider(names_from = tscan_node, values_from = n, values_fill = 0) %>%
+  dplyr::left_join(best_match, by = "monocle_cluster") %>%
+  dplyr::mutate(pct_in_best = round(pct_in_best, 1)) %>%
+  dplyr::arrange(match(monocle_cluster, mc_levels))
+
+write.csv(map_counts, file = paste0(results_dir, "/monocle3_clusters_vs_tscan_nodes.csv"),
+          row.names = FALSE)
+
+ari_tscan = mclust::adjustedRandIndex(node_map$monocle_cluster, node_map$tscan_node)
+
+datatable(map_counts, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, eval=file.exists(tscan_file), fig.width=8, fig.height=5}
+map_pct = node_map %>%
+  dplyr::count(monocle_cluster, tscan_node) %>%
+  dplyr::group_by(monocle_cluster) %>%
+  dplyr::mutate(pct = 100 * n / sum(n)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(monocle_cluster = factor(monocle_cluster, levels = rev(mc_levels)),
+                tscan_node      = factor(tscan_node, levels = node_order))
+
+p_map = ggplot(map_pct, aes(x = tscan_node, y = monocle_cluster, fill = pct)) +
+  geom_tile() +
+  geom_text(aes(label = n, colour = pct > 50), size = 2.5) +
+  scale_fill_viridis_c(name = "% of monocle3\ncluster", limits = c(0, 100)) +
+  scale_colour_manual(values = c(`TRUE` = "black", `FALSE` = "white"), guide = "none") +
+  xlab("TSCAN node") + ylab("monocle3 cluster") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid = element_blank())
+
+p_map
+ggsave(p_map, file = paste0(results_dir, "/monocle3_clusters_vs_tscan_nodes.png"),
+       width = 8, height = 5)
+```
+
+`r if (file.exists(tscan_file)) paste0("Adjusted Rand index between monocle3 clusters and TSCAN nodes: ", signif(ari_tscan, 3), ", over ", format(nrow(node_map), big.mark = ","), " cells.", if (n_unmatched > 0) paste0(" ", n_unmatched, " cells in this document have no TSCAN node, because the two runs kept different cells.") else "") else ""`
 
 # Trajectory
 
@@ -345,7 +585,7 @@ stage_r2 = if (dplyr::n_distinct(pt_df$stage) > 1)
 spatial autocorrelation over the principal graph (Moran's I). Genes at
 q < `r params$graph_q` are written to `monocle3_graph_genes.csv`.
 
-```{r}
+```{r, results="hide"}
 gt_file     = paste0(Robject_out_dir, "/graph_test.Rds")
 gt_sig_file = paste0(Robject_out_dir, "/graph_test_signature.txt")
 
@@ -368,12 +608,40 @@ graph_genes = gt %>%
 
 write.csv(graph_genes, file = paste0(results_dir, "/monocle3_graph_genes.csv"),
           row.names = FALSE)
+```
 
+```{r}
 datatable(graph_genes %>% mutate(across(c(morans_I, p_value, q_value), ~signif(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
 `r paste0(format(nrow(graph_genes), big.mark = ","), " genes at q < ", params$graph_q, ".")`
+
+## Direction along pseudotime
+
+Moran's I says a gene varies along the graph but not in which direction. Each
+gene's direction is the sign of its Spearman correlation with pseudotime, over
+cells with a finite pseudotime. The direction and correlation are added to
+`monocle3_graph_genes.csv`.
+
+```{r, eval=nrow(graph_genes) > 0}
+pt_cells = colnames(combined)[is.finite(pt[colnames(combined)])]
+expr     = as.matrix(logcounts(combined)[graph_genes$Gene, pt_cells, drop = FALSE])
+
+graph_genes$rho_pseudotime = suppressWarnings(
+  as.numeric(cor(t(expr), pt[pt_cells], method = "spearman")))
+graph_genes$direction = dplyr::case_when(
+  is.na(graph_genes$rho_pseudotime) ~ NA_character_,
+  graph_genes$rho_pseudotime > 0    ~ "increasing",
+  TRUE                              ~ "decreasing")
+rm(expr)
+
+write.csv(graph_genes, file = paste0(results_dir, "/monocle3_graph_genes.csv"),
+          row.names = FALSE)
+
+datatable(graph_genes %>% dplyr::count(direction, name = "n_genes"),
+          rownames = FALSE, options = list(dom = "t"))
+```
 
 ## Heatmap
 
@@ -400,6 +668,34 @@ if (nrow(graph_genes) > 0) {
   print(hp)
   ggsave(hp, file = paste0(results_dir, "/monocle3_heatmap.png"), width = 7, height = 6)
 }
+```
+
+## GO enrichment of pseudotime-associated genes
+
+GO enrichment of the increasing and decreasing graph genes, against every gene in
+the data. Terms with p < `r params$go_pval` are shown and written to
+`monocle3_graph_GO_pvalues.csv`.
+
+`r if (!have_go) "Skipped: the GO files were not found." else if (nrow(graph_genes) == 0) "Skipped: there are no pseudotime-associated genes to test." else ""`
+
+```{r, eval=have_go && nrow(graph_genes) > 0}
+graph_go = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = graph_genes %>%
+                       dplyr::filter(!is.na(direction)) %>%
+                       dplyr::select(Gene, direction) %>%
+                       dplyr::distinct(),
+  background_n     = nrow(combined),
+  group2_label     = "direction",
+  ngroup2_label    = "nDirectionGenes",
+  overlaps_file    = paste0(results_dir, "/monocle3_graph_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/monocle3_graph_GO_pvalues.csv"),
+  pval_filter      = params$go_pval)
+
+datatable(graph_go %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          filter = "top", rownames = FALSE)
 ```
 
 # Comparison with TSCAN
