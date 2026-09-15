@@ -16,9 +16,12 @@ params:
     lineage: "female"
     female_clusters: "5"
     male_clusters: "12_transformer,15,16,17,18"
-    male_root: "12_transformer"
     all_clusters: "5,12_transformer,15,16,17,18"
-    all_root: "12_transformer"
+    female_root_rule: "min:Oocyte"
+    male_root_rule: "max:Primordial germ cells"
+    all_root_rule: "max:Primordial germ cells"
+    min_detect_pct: 5
+    marker_file: canonical_markers_S1_only_2026-08-14.csv
     split_by_subcluster: "5"
     sub_k: 0
     sub_k_range: "5,10,15,20,25,30,40,50"
@@ -325,35 +328,74 @@ datatable(node_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 
 ## Root
 
+Every node is scored on the germ cell marker sets from the collaborators' S1
+sheet: the mean log expression across each set's genes, and the mean percent of
+cells detecting each gene. Unless `root_node` is set, the root is chosen by this
+lineage's root rule, which names a set and whether the root is the node with its
+highest (`max`) or lowest (`min`) mean expression. The scores are written to
+`root_marker_set_scores.csv`.
+
 ```{r}
-# ZP expression chooses the root only for the female lineage with no root_node set
-use_zp = lineage == "female" && !nzchar(params$root_node)
+germ_sets = c("Primordial germ cells", "Migrating germ cells",
+              "Spermatogonial stem cells", "Spermatocytes", "Oocyte")
 
-if (use_zp) {
-  zp_genes = gene_description %>%
-    dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
-    dplyr::pull(Gene) %>%
-    intersect(rownames(combined))
+set_genes = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
+                     stringsAsFactors = FALSE) %>%
+  dplyr::mutate(loc_id = trimws(loc_id)) %>%
+  dplyr::filter(CellTypeMarkerSet %in% germ_sets) %>%
+  dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id)
 
-  if (length(zp_genes) == 0)
-    stop("no ZP genes resolved, so the female root cannot be chosen ",
-         "automatically. Set the root_node parameter.")
+set_scores = score_marker_sets(combined, merged$node, set_genes) %>%
+  dplyr::rename(node = group)
 
-  zp_by_node = data.frame(
-      node = merged$node,
-      zp   = colMeans(as.matrix(logcounts(combined)[zp_genes, , drop = FALSE]))) %>%
-    dplyr::group_by(node) %>%
-    dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop")
+set_table = set_scores %>%
+  dplyr::mutate(set          = factor(set, levels = germ_sets),
+                node         = factor(node, levels = node_levels),
+                mean_logexpr = signif(mean_logexpr, 3),
+                pct_detected = round(pct_detected, 1)) %>%
+  dplyr::arrange(set, node) %>%
+  tidyr::pivot_wider(id_cols = c(node, n_cells), names_from = set,
+                     values_from = c(mean_logexpr, pct_detected),
+                     names_glue = "{set}: {.value}") %>%
+  dplyr::arrange(node)
+
+write.csv(set_table, file = paste0(results_dir, "/root_marker_set_scores.csv"),
+          row.names = FALSE)
+
+root_rule = switch(lineage,
+                   female = params$female_root_rule,
+                   male   = params$male_root_rule,
+                   all    = params$all_root_rule)
+rule_dir  = NA_character_
+rule_set  = NA_character_
+root_pct  = NA_real_
+weak_root = FALSE
+n_tied    = 1L
+
+if (nzchar(params$root_node)) {
+  root = as.character(params$root_node)
+} else {
+  rule_parts = regmatches(root_rule, regexec("^(max|min):(.+)$", root_rule))[[1]]
+  if (length(rule_parts) != 3)
+    stop(lineage, "_root_rule '", root_rule, "' must look like max:<set> or min:<set>")
+  rule_dir = rule_parts[2]
+  rule_set = trimws(rule_parts[3])
+  if (!rule_set %in% germ_sets)
+    stop("root rule set '", rule_set, "' is not one of: ",
+         paste(germ_sets, collapse = ", "))
+
+  cand = set_scores %>% dplyr::filter(set == rule_set, !is.na(mean_logexpr))
+  if (nrow(cand) == 0)
+    stop("no genes from the ", rule_set, " set are in the data, so the root ",
+         "rule cannot be applied. Set root_node.")
+
+  pick      = if (rule_dir == "max") which.max(cand$mean_logexpr) else which.min(cand$mean_logexpr)
+  root      = as.character(cand$node[pick])
+  root_pct  = cand$pct_detected[pick]
+  weak_root = rule_dir == "max" && root_pct < params$min_detect_pct
+  # which.max and which.min take the first of any tie, so report ties
+  n_tied    = sum(cand$mean_logexpr == cand$mean_logexpr[pick])
 }
-
-root =
-  if (nzchar(params$root_node)) {
-    as.character(params$root_node)
-  } else if (lineage %in% c("male", "all")) {
-    as.character(if (lineage == "male") params$male_root else params$all_root)
-  } else {
-    as.character(zp_by_node$node[which.min(zp_by_node$mean_ZP)])
-  }
 
 if (!root %in% levels(merged$node))
   stop("root '", root, "' is not a node. Nodes: ",
@@ -361,19 +403,31 @@ if (!root %in% levels(merged$node))
 
 root_type = unique(lineage_key$cell_type[lineage_key$final_label == root])
 
-if (use_zp)
-  datatable(zp_by_node %>% mutate(mean_ZP = signif(mean_ZP, 3)),
-            rownames = FALSE, options = list(dom = "t", paging = FALSE))
+datatable(set_table, rownames = FALSE,
+          options = list(dom = "t", paging = FALSE, scrollX = TRUE))
 ```
 
-`r paste0("The ordering is rooted at node **", root, "**", if (length(root_type) == 1) paste0(" (", root_type, ")") else "", ". ", if (nzchar(params$root_node)) "It was set by the root_node parameter." else if (lineage != "female") paste0("It was set by the ", lineage, "_root parameter.") else "It is the node with the lowest mean zona pellucida (ZP) expression, taken as the least oocyte-like.", " The root is an assumption: rooting the same tree elsewhere gives a different ordering.")`
+`r paste0("The ordering is rooted at node **", root, "**", if (length(root_type) == 1) paste0(" (", root_type, ")") else "", if (nzchar(params$root_node)) ", set by the root_node parameter." else paste0(", the node with the ", if (rule_dir == "max") "highest" else "lowest", " mean expression of the ", rule_set, " set (", lineage, "_root_rule = ", root_rule, ")."), " The root is an assumption: rooting the same tree elsewhere gives a different ordering.")`
+
+`r if (!is.na(rule_set)) paste0("The ", rule_set, " set chose the root, so its genes rise or fall along pseudotime partly by construction. Do not read their trend as a result.") else ""`
+
+`r if (weak_root) paste0("**The ", rule_set, " genes are barely detected in any node.** The root node detects them in ", round(root_pct, 1), "% of cells on average, below the ", params$min_detect_pct, "% threshold, so the choice rests on noise rather than expression.") else ""`
+
+`r if (n_tied > 1) paste0("**", n_tied, " nodes tie for the ", if (rule_dir == "max") "highest" else "lowest", " ", rule_set, " score.** The root is the first of them in node order, not a distinct choice.") else ""`
 
 ```{r, echo=FALSE, results="asis"}
-if (lineage == "female") {
-  cat("\n# Subcluster markers\n\n",
-      "Markers for each female subcluster, from `findMarkers` on uncorrected log ",
-      "counts, comparing each subcluster with the others (`direction = \"up\"`, ",
-      "`pval.type = \"some\"`). Library is not blocked: a subcluster drawn mostly ",
+do_markers = lineage %in% c("female", "male", "all")
+
+if (do_markers) {
+  cat("\n# Node markers\n\n",
+      "Markers for each trajectory node",
+      switch(lineage,
+             female = ", meaning each cluster 5 subcluster,",
+             male   = ", meaning each male germ cluster,",
+             all    = ", meaning each cluster 5 subcluster and each other germ cluster,"),
+      " from `findMarkers` on uncorrected log counts, comparing each node with ",
+      "every other node in this lineage (`direction = \"up\"`, ",
+      "`pval.type = \"some\"`). Library is not blocked: a node drawn mostly ",
       "from one library has no within-library comparison, so its markers include ",
       "library differences. Genes are kept at FDR < 0.01 with a mean log fold ",
       "change of at least ", params$lfc_thresh, " across the pairwise comparisons, ",
@@ -381,7 +435,7 @@ if (lineage == "female") {
 }
 ```
 
-```{r, eval=lineage == "female"}
+```{r, eval=do_markers}
 # mean over every pairwise logFC; summary.logFC under pval.type = "some" comes
 # from whichever comparison supplied the p-value, so it is not a fixed contrast
 marker_effect = function(df) {
@@ -433,23 +487,23 @@ marker_counts = data.frame(node = node_levels) %>%
 datatable(marker_counts, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-```{r, eval=lineage == "female"}
+```{r, eval=do_markers}
 datatable(sub_marker_tab %>% mutate(across(c(meanLogFC, p.value, FDR), ~signif(., 3))),
           filter = "top", rownames = FALSE)
 ```
 
 ```{r, echo=FALSE, results="asis"}
-if (lineage == "female") {
-  cat("\n## GO enrichment of subcluster markers\n\n",
-      "GO enrichment of each subcluster's marker genes, against every gene in the ",
+if (do_markers) {
+  cat("\n## GO enrichment of node markers\n\n",
+      "GO enrichment of each node's marker genes, against every gene in the ",
       "data. Terms with p < ", params$go_pval, " are shown and written to ",
       "`subcluster_marker_GO_pvalues.csv`.\n\n", sep = "")
   if (!have_go) cat("Skipped: the GO files were not found.\n\n")
-  else if (nrow(sub_marker_tab) == 0) cat("Skipped: no subcluster has marker genes at this cutoff.\n\n")
+  else if (nrow(sub_marker_tab) == 0) cat("Skipped: no node has marker genes at this cutoff.\n\n")
 }
 ```
 
-```{r, eval=lineage == "female" && have_go && exists("sub_marker_tab") && nrow(sub_marker_tab) > 0}
+```{r, eval=do_markers && have_go && exists("sub_marker_tab") && nrow(sub_marker_tab) > 0}
 marker_go = run_go_enrichment(
   gaf              = gaf,
   gene_description = gene_description,
