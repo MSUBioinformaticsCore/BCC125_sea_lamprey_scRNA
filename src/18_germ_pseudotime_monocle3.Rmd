@@ -16,9 +16,12 @@ params:
     lineage: "female"
     female_clusters: "5"
     male_clusters: "12_transformer,15,16,17,18"
-    male_root: "12_transformer"
     all_clusters: "5,12_transformer,15,16,17,18"
-    all_root: "12_transformer"
+    female_root_rule: "min:Oocyte"
+    male_root_rule: "max:Primordial germ cells"
+    all_root_rule: "max:Primordial germ cells"
+    min_detect_pct: 5
+    marker_file: canonical_markers_S1_only_2026-08-14.csv
     root_label: ""
     root_monocle_cluster: ""
     min_library_cells: 50
@@ -251,28 +254,53 @@ n_partitions = dplyr::n_distinct(cds@clusters[["UMAP"]]$partitions)
 
 ## Root
 
+Every monocle3 cluster is scored on the germ cell marker sets from the
+collaborators' S1 sheet: the mean log expression across each set's genes, and
+the mean percent of cells detecting each gene. Unless `root_label` or
+`root_monocle_cluster` is set, the root cells are the cluster chosen by this
+lineage's root rule, which names a set and whether the root is the cluster with
+its highest (`max`) or lowest (`min`) mean expression. The scores are written to
+`root_marker_set_scores.csv`.
+
 ```{r, results="hide"}
-# ZP expression chooses the root only for the female lineage with no root override
-use_zp = lineage == "female" && !nzchar(params$root_label) &&
-         !nzchar(params$root_monocle_cluster)
+germ_sets = c("Primordial germ cells", "Migrating germ cells",
+              "Spermatogonial stem cells", "Spermatocytes", "Oocyte")
 
-if (use_zp) {
-  zp_genes = gene_description %>%
-    dplyr::filter(grepl("^ZP[0-9]", WangGeneID)) %>%
-    dplyr::pull(Gene) %>%
-    intersect(rownames(combined))
+set_genes = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
+                     stringsAsFactors = FALSE) %>%
+  dplyr::mutate(loc_id = trimws(loc_id)) %>%
+  dplyr::filter(CellTypeMarkerSet %in% germ_sets) %>%
+  dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id)
 
-  if (length(zp_genes) == 0)
-    stop("no ZP genes resolved, so the female root cannot be chosen ",
-         "automatically. Set root_label or root_monocle_cluster.")
+set_scores = score_marker_sets(combined[, colnames(cds)],
+                               colData(cds)$monocle_cluster, set_genes) %>%
+  dplyr::rename(monocle_cluster = group)
 
-  zp_by_cluster = data.frame(
-      monocle_cluster = colData(cds)$monocle_cluster,
-      zp = colMeans(as.matrix(logcounts(combined)[zp_genes, colnames(cds), drop = FALSE]))) %>%
-    dplyr::group_by(monocle_cluster) %>%
-    dplyr::summarise(n_cells = dplyr::n(), mean_ZP = mean(zp), .groups = "drop") %>%
-    dplyr::arrange(as.integer(monocle_cluster))
-}
+mc_root_levels = as.character(sort(as.integer(unique(colData(cds)$monocle_cluster))))
+
+set_table = set_scores %>%
+  dplyr::mutate(set             = factor(set, levels = germ_sets),
+                monocle_cluster = factor(monocle_cluster, levels = mc_root_levels),
+                mean_logexpr    = signif(mean_logexpr, 3),
+                pct_detected    = round(pct_detected, 1)) %>%
+  dplyr::arrange(set, monocle_cluster) %>%
+  tidyr::pivot_wider(id_cols = c(monocle_cluster, n_cells), names_from = set,
+                     values_from = c(mean_logexpr, pct_detected),
+                     names_glue = "{set}: {.value}") %>%
+  dplyr::arrange(monocle_cluster)
+
+write.csv(set_table, file = paste0(results_dir, "/root_marker_set_scores.csv"),
+          row.names = FALSE)
+
+root_rule = switch(lineage,
+                   female = params$female_root_rule,
+                   male   = params$male_root_rule,
+                   all    = params$all_root_rule)
+rule_dir  = NA_character_
+rule_set  = NA_character_
+root_pct  = NA_real_
+weak_root = FALSE
+n_tied    = 1L
 
 if (nzchar(params$root_label)) {
   root_desc  = paste0("final label ", params$root_label, ", set by the root_label parameter")
@@ -281,16 +309,33 @@ if (nzchar(params$root_label)) {
   root_desc  = paste0("monocle3 cluster ", params$root_monocle_cluster,
                       ", set by the root_monocle_cluster parameter")
   root_cells = colnames(cds)[colData(cds)$monocle_cluster == params$root_monocle_cluster]
-} else if (lineage %in% c("male", "all")) {
-  root_param = if (lineage == "male") "male_root" else "all_root"
-  root_value = as.character(params[[root_param]])
-  root_desc  = paste0("final label ", root_value, ", set by the ", root_param, " parameter")
-  root_cells = colnames(cds)[colData(cds)$final_label == root_value]
 } else {
-  low_zp     = as.character(zp_by_cluster$monocle_cluster[which.min(zp_by_cluster$mean_ZP)])
-  root_desc  = paste0("monocle3 cluster ", low_zp,
-                      ", the cluster with the lowest mean zona pellucida (ZP) expression")
-  root_cells = colnames(cds)[colData(cds)$monocle_cluster == low_zp]
+  rule_parts = regmatches(root_rule, regexec("^(max|min):(.+)$", root_rule))[[1]]
+  if (length(rule_parts) != 3)
+    stop(lineage, "_root_rule '", root_rule, "' must look like max:<set> or min:<set>")
+  rule_dir = rule_parts[2]
+  rule_set = trimws(rule_parts[3])
+  if (!rule_set %in% germ_sets)
+    stop("root rule set '", rule_set, "' is not one of: ",
+         paste(germ_sets, collapse = ", "))
+
+  cand = set_scores %>% dplyr::filter(set == rule_set, !is.na(mean_logexpr))
+  if (nrow(cand) == 0)
+    stop("no genes from the ", rule_set, " set are in the data, so the root ",
+         "rule cannot be applied. Set root_label or root_monocle_cluster.")
+
+  pick         = if (rule_dir == "max") which.max(cand$mean_logexpr) else which.min(cand$mean_logexpr)
+  root_cluster = as.character(cand$monocle_cluster[pick])
+  root_pct     = cand$pct_detected[pick]
+  weak_root    = rule_dir == "max" && root_pct < params$min_detect_pct
+  # which.max and which.min take the first of any tie, so report ties
+  n_tied       = sum(cand$mean_logexpr == cand$mean_logexpr[pick])
+
+  root_desc  = paste0("monocle3 cluster ", root_cluster, ", the cluster with the ",
+                      if (rule_dir == "max") "highest" else "lowest",
+                      " mean expression of the ", rule_set, " set (", lineage,
+                      "_root_rule = ", root_rule, ")")
+  root_cells = colnames(cds)[colData(cds)$monocle_cluster == root_cluster]
 }
 
 if (length(root_cells) == 0)
@@ -309,12 +354,18 @@ colData(cds)$monocle_pseudotime = pt
 n_infinite = sum(!is.finite(pt))
 ```
 
-```{r, eval=use_zp}
-datatable(zp_by_cluster %>% mutate(mean_ZP = signif(mean_ZP, 3)),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```{r}
+datatable(set_table, rownames = FALSE,
+          options = list(dom = "t", paging = FALSE, scrollX = TRUE))
 ```
 
 `r paste0("The ordering is rooted at principal graph vertex ", root_pr_node, ", the vertex most cells of ", root_desc, " project onto. The root is an assumption: rooting the same graph elsewhere gives a different ordering.")`
+
+`r if (!is.na(rule_set)) paste0("The ", rule_set, " set chose the root, so its genes rise or fall along pseudotime partly by construction. Do not read their trend as a result.") else ""`
+
+`r if (weak_root) paste0("**The ", rule_set, " genes are barely detected in any cluster.** The root cluster detects them in ", round(root_pct, 1), "% of cells on average, below the ", params$min_detect_pct, "% threshold, so the choice rests on noise rather than expression.") else ""`
+
+`r if (n_tied > 1) paste0("**", n_tied, " clusters tie for the ", if (rule_dir == "max") "highest" else "lowest", " ", rule_set, " score.** The root is the first of them in cluster order, not a distinct choice.") else ""`
 
 `r if (n_infinite == 0) "Every cell has a finite pseudotime." else paste0("**", n_infinite, " cells have infinite pseudotime**, because they sit in partitions not connected to the root. They are excluded from the correlations and gene heatmap below.")`
 

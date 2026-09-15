@@ -920,6 +920,47 @@ build_lineage_sce <- function(all.sce, cells, min_library_cells = 50,
 }
 
 
+# score_marker_sets -------------------------------------------------------
+#' @name score_marker_sets
+#' @description Per-group expression of named marker sets, used to choose and
+#'   report a trajectory root in 17_germ_pseudotime_tscan.Rmd and
+#'   18_germ_pseudotime_monocle3.Rmd.
+#' @param sce SCE with logcounts
+#' @param groups vector aligned to colnames(sce): the node or cluster of each cell
+#' @param marker_sets data frame with columns set and gene (row ids of sce)
+#' @return one row per group and set: n_genes (found in sce), n_cells,
+#'   mean_logexpr (mean over cells of the per-cell mean across the set's genes),
+#'   pct_detected (mean over the set's genes of the percent of cells with
+#'   logcounts > 0)
+
+score_marker_sets <- function(sce, groups, marker_sets) {
+  stopifnot(length(groups) == ncol(sce),
+            all(c("set", "gene") %in% colnames(marker_sets)))
+  groups <- as.character(groups)
+  lc     <- SingleCellExperiment::logcounts(sce)
+
+  dplyr::bind_rows(lapply(unique(marker_sets$set), function(s) {
+    g <- intersect(unique(marker_sets$gene[marker_sets$set == s]), rownames(sce))
+    dplyr::bind_rows(lapply(unique(groups), function(gr) {
+      idx <- which(groups == gr)
+      if (length(g) == 0) {
+        return(data.frame(group = gr, set = s, n_genes = 0L, n_cells = length(idx),
+                          mean_logexpr = NA_real_, pct_detected = NA_real_,
+                          stringsAsFactors = FALSE))
+      }
+      m <- as.matrix(lc[g, idx, drop = FALSE])
+      data.frame(group        = gr,
+                 set          = s,
+                 n_genes      = length(g),
+                 n_cells      = length(idx),
+                 mean_logexpr = mean(colMeans(m)),
+                 pct_detected = 100 * mean(rowMeans(m > 0)),
+                 stringsAsFactors = FALSE)
+    }))
+  }))
+}
+
+
 # run_pairwise_de ---------------------------------------------------------
 #' @name run_pairwise_de
 #' @description Subsets cells by cluster label, runs findMarkers, writes CSVs.
