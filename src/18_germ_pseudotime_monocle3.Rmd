@@ -578,16 +578,40 @@ ggsave(p_map, file = paste0(results_dir, "/monocle3_clusters_vs_tscan_nodes.png"
 # Trajectory
 
 ```{r, fig.width=13, fig.height=4.5}
-colour_label = if (lineage == "female") "monocle_cluster" else "final_label"
+# Female cells are all cluster 5, so their final label says nothing. They are
+# labeled by the subclusters 17 made instead, matched by barcode.
+female_subclusters = lineage == "female" && file.exists(tscan_file)
+
+if (female_subclusters) {
+  sub_nodes = read.csv(tscan_file, stringsAsFactors = FALSE) %>%
+    dplyr::select(barcode, node)
+  lab = as.character(sub_nodes$node[match(colnames(cds), sub_nodes$barcode)])
+  colData(cds)$traj_label = ifelse(is.na(lab), "no subcluster", lab)
+  traj_label_name = "subcluster (from 17)"
+} else if (lineage == "female") {
+  colData(cds)$traj_label = colData(cds)$monocle_cluster
+  traj_label_name = "monocle3 cluster"
+} else {
+  colData(cds)$traj_label = colData(cds)$final_label
+  traj_label_name = "final label"
+}
+
+# cluster order, subclusters numerically within their cluster
+lv = unique(colData(cds)$traj_label)
+lv = lv[order(suppressWarnings(as.numeric(sub("^([0-9]+).*$", "\\1", lv))),
+              suppressWarnings(as.numeric(ifelse(grepl("^[0-9]+\\.[0-9]+$", lv),
+                                                 sub("^[0-9]+\\.", "", lv), "0"))),
+              lv)]
+colData(cds)$traj_label = factor(colData(cds)$traj_label, levels = lv)
 
 p_pt = plot_cells(cds, color_cells_by = "pseudotime", label_cell_groups = FALSE,
                   label_leaves = FALSE, label_branch_points = FALSE,
                   label_roots = TRUE, cell_size = 0.5) +
   ggtitle("Pseudotime")
-p_cl = plot_cells(cds, color_cells_by = colour_label, label_cell_groups = TRUE,
+p_cl = plot_cells(cds, color_cells_by = "traj_label", label_cell_groups = TRUE,
                   label_leaves = FALSE, label_branch_points = FALSE,
                   cell_size = 0.5, group_label_size = 3) +
-  ggtitle(colour_label)
+  ggtitle(traj_label_name)
 p_lib = plot_cells(cds, color_cells_by = "library", label_cell_groups = FALSE,
                    label_leaves = FALSE, label_branch_points = FALSE,
                    cell_size = 0.5) +
@@ -599,14 +623,16 @@ ggsave(p_pt | p_cl | p_lib, file = paste0(results_dir, "/monocle3_trajectory_uma
        width = 13, height = 4.5)
 ```
 
+`r if (lineage == "female" && !female_subclusters) paste0("**Subclusters are not shown.** ", tscan_file, " is not present, so the female cells are labeled by monocle3 cluster instead. Knit 17_germ_pseudotime_tscan.Rmd for the female lineage first.") else ""`
+
 ```{r, fig.width=12, fig.height=4}
 pt_df = as.data.frame(colData(cds)) %>%
   tibble::rownames_to_column("barcode") %>%
   dplyr::filter(is.finite(monocle_pseudotime))
 
-p_box_lab = ggplot(pt_df, aes(x = final_label, y = monocle_pseudotime)) +
+p_box_lab = ggplot(pt_df, aes(x = traj_label, y = monocle_pseudotime)) +
   geom_boxplot(outlier.size = .3) +
-  xlab("final label") + ylab("pseudotime")
+  xlab(traj_label_name) + ylab("pseudotime")
 p_box_lib = ggplot(pt_df, aes(x = library, y = monocle_pseudotime, fill = library)) +
   geom_boxplot(outlier.size = .3) +
   scale_fill_manual(values = lib_cols) +
