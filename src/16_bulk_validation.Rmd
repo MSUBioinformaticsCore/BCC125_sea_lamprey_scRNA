@@ -14,7 +14,7 @@ params:
     lab: Weiming Li
     results_date: "20260813"
     genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
-    nfcore_dir: ""
+    nfcore_dir: /mnt/research/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results/yasmin_nfcore
     marker_file: canonical_markers_S1_only_2026-08-14.csv
     top_n_list: "100,250,500"
     n_boot: 2000
@@ -50,24 +50,25 @@ agreement with staining or previous bulk RNA-seq studies."
 **What agreement shows.** Whether the larva-to-transformer expression changes we
 report reproduce in animals collected, dissected, prepared and sequenced by a
 different group at a different time. Our July-to-November technical batch does
-not exist in Yasmin's data, so a pattern driven by that batch has no reason to
+not exist in Yasmin's data. A pattern driven by that batch has no reason to
 appear there.
 
 **What it does not show.** That the changes are developmental. Yasmin's series
-has its own collection structure and may carry its own confounds. Agreement shows
-the pattern is not specific to our batch. That is what the reviewer asks for,
-and the claim goes no further.
+has its own collection structure and may carry its own confounds. Agreement
+shows the pattern is not specific to our batch. That is what the reviewer asks
+for. The claim goes no further.
 
 **Bulk is a mixture.** A gene changing in bulk can reflect a shift in which cell
 types are present rather than a change within any cell type. Pseudobulk shares
-this property, so the comparison is like for like. The composition section tests
-how much of the agreement it explains.
+that property. The two sides are on the same footing. The composition section
+measures how much of the agreement composition accounts for.
 
-**The larval endpoint is the weakest match.** Our larvae are 112 mm. Every
-larval-stage animal in Yasmin's series is smaller, the largest being 99 mm, and
-their 74–99 mm animals are already classed as past the point where ovarian
-differentiation completes. The transformer endpoints match on both axes; the
-larval endpoint is a size extrapolation on both.
+**The larval endpoint is matched by stage rather than by size.** Our larvae are
+112 mm and sex-labile by our own staging. Every larval-stage animal in Yasmin's
+series is smaller, the largest being 99 mm. Their 74–99 mm animals are already
+classed as past the point where ovarian differentiation completes. The two series
+draw the larval boundary at different sizes. The transformer endpoints match on
+stage and on size.
 
 ```{r}
 object_dir  = paste0(params$project_dir, "/results/", params$results_date,
@@ -82,14 +83,14 @@ data_dir    = paste0(params$project_dir, "/data")
 ```
 
 ```{r}
-# The Yasmin reads were quantified with nf-core/rnaseq. Point nfcore_dir at that
-# run's output directory: either the top level, which contains star_salmon/, or
-# star_salmon/ itself. Both are accepted.
+# The Yasmin reads were quantified with nf-core/rnaseq against
+# GCF_010993605.1_kPetMar1.pri. Point nfcore_dir at that run's output directory.
+# Either the top level or star_salmon/ itself is accepted.
 #
-# Preference order is deliberate. length-scaled counts are the right input for
-# edgeR without offsets, because they carry the transcript-length correction
-# that makes gene-level Salmon estimates comparable across samples. Plain
-# gene_counts is used only if the length-scaled file is absent, and is rounded.
+# Length-scaled counts come first in the candidate list. They carry the
+# transcript-length correction that makes gene-level Salmon estimates comparable
+# across samples, and they are the right edgeR input without offsets. Plain
+# gene_counts is the fallback.
 nfcore_candidates = c(
   "star_salmon/salmon.merged.gene_counts_length_scaled.tsv",
   "salmon/salmon.merged.gene_counts_length_scaled.tsv",
@@ -111,11 +112,11 @@ have_bulk    = !is.na(count_path)
 length_scaled = have_bulk && grepl("length_scaled", count_path)
 ```
 
-`r if (!have_bulk && !nzchar(nfcore_dir)) "**The nfcore_dir parameter is not set**, so everything below is skipped. Set it to the nf-core/rnaseq output directory for the Yasmin data, either the run's top level or its star_salmon subdirectory." else ""`
+`r if (!have_bulk && !nzchar(nfcore_dir)) "**The nfcore_dir parameter is not set.** Everything below is skipped. Set it to the nf-core/rnaseq output directory for the Yasmin data, either the run's top level or its star_salmon subdirectory." else ""`
 
-`r if (!have_bulk && nzchar(nfcore_dir)) paste0("**No gene count matrix was found under ", nfcore_dir, "**, so everything below is skipped. Looked for: ", paste(nfcore_candidates, collapse = ", "), ". Found instead: ", paste(head(list.files(nfcore_dir), 20), collapse = ", "), ".") else ""`
+`r if (!have_bulk && nzchar(nfcore_dir)) paste0("**No gene count matrix was found under ", nfcore_dir, ".** Everything below is skipped. Looked for: ", paste(nfcore_candidates, collapse = ", "), ". Found instead: ", paste(head(list.files(nfcore_dir), 20), collapse = ", "), ".") else ""`
 
-`r if (have_bulk) paste0("Counts read from ", basename(count_path), if (length_scaled) ". This is the length-scaled matrix, the appropriate edgeR input without offsets." else ". **This is the unscaled gene_counts matrix**, so the transcript-length correction is absent; prefer salmon.merged.gene_counts_length_scaled.tsv if the run produced one.") else ""`
+`r if (have_bulk) paste0("Counts read from ", basename(count_path), if (length_scaled) ". The length-scaled matrix is the right edgeR input without offsets." else ". **This is the unscaled gene_counts matrix.** The transcript-length correction is absent. Use salmon.merged.gene_counts_length_scaled.tsv if the run produced one.") else ""`
 
 # The Yasmin series
 
@@ -139,9 +140,9 @@ rownames(yasmin_counts) = x$gene_id
 yasmin_counts = round(yasmin_counts)
 storage.mode(yasmin_counts) = "integer"
 
-# nf-core sample names come from whatever samplesheet was used, which may carry
-# run accessions or the paper's own names. Try each candidate column rather than
-# assuming, and say which one matched.
+# nf-core sample names come from whatever samplesheet the run used. They may be
+# run accessions or the paper's own names. Try each candidate column and report
+# which one matched.
 id_candidates = c("run", "sample_name", "library_name", "suppT1_id")
 id_candidates = intersect(id_candidates, colnames(sample_meta))
 
@@ -172,8 +173,8 @@ stopifnot(identical(sample_meta[[sample_id_col]], colnames(yasmin_counts)))
 
 ```{r, eval=have_bulk}
 # a numeric developmental position per animal, parsed from the recorded life
-# stage rather than from the group label, since the mid female group spans
-# stage 1 to post-metamorphosis
+# stage rather than from the group label. The mid female group spans stage 1 to
+# post-metamorphosis, so the label does not place an animal.
 stage_score = function(s) {
   s = tolower(s)
   dplyr::case_when(
@@ -202,13 +203,13 @@ datatable(series_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE
 
 ## Stage correspondence
 
-Our animals are 112 mm larvae described as sex-labile and 131 mm newly
-transformed transformers. The matches below follow the validation plan and use
-the per-animal records in Supplementary Table 1 rather than the group labels.
+Our animals are 112 mm sex-labile larvae and 131 mm newly transformed
+transformers. The matches below follow the validation plan. They use the
+per-animal records in Supplementary Table 1 rather than the group labels.
 
 ```{r, eval=have_bulk}
 # the two stage-matched female transformers, selected by recorded stage rather
-# than by group, since mid females span stage 1 to post-metamorphosis
+# than by group. Mid females span stage 1 to post-metamorphosis.
 tf_match_runs = sample_meta$run[
   sample_meta$group_textcounts == "MF mid females" &
   sample_meta$stage_score >= 7]
@@ -220,7 +221,7 @@ if (length(tf_match_runs) != 2)
 
 match_tab = tibble::tribble(
   ~ours,             ~yasmin,                                          ~basis,
-  "larvae, 112 mm",  "undifferentiated larvae, 57-66 mm",              "both pre-differentiation by description; ours is larger than any larval animal in their series",
+  "larvae, 112 mm",  "undifferentiated larvae, 57-66 mm",              "both pre-differentiation by description; ours are sex-labile by our staging; the two series set the larval size boundary differently",
   "TM, 131 mm",      "mid males, 114-133 mm, stage 5 to post-metamorphosis", "lab confirmed; lengths and stages agree",
   "TF, 131 mm",      paste0(paste(sample_meta$sample_name[
                                     match(tf_match_runs, sample_meta$run)],
@@ -233,8 +234,8 @@ datatable(match_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE)
 # Pseudobulk
 
 Raw counts are summed across all cells within each library, giving four samples.
-Corrected and per-cell normalized values are not used, because a bulk library
-measures summed raw counts.
+Corrected and per-cell normalized values are not used. A bulk library measures
+summed raw counts.
 
 ```{r, eval=have_bulk}
 pseudo_file = paste0(Robject_out_dir, "/pseudobulk.Rds")
@@ -281,7 +282,7 @@ if (length(shared) < 0.5 * nrow(pseudobulk))
        "Diagnose before continuing.")
 ```
 
-`r if (have_bulk) paste0("**", format(length(shared), big.mark = ","), " genes are shared** and everything below runs on that set. Genes are matched by identifier, with no ortholog assignment.") else ""`
+`r if (have_bulk) paste0("**", format(length(shared), big.mark = ","), " genes are shared.** Everything below runs on that set. Genes are matched by identifier. Both sides come from the same assembly, so no ortholog assignment is involved.") else ""`
 
 # Yasmin stage effects
 
@@ -297,8 +298,8 @@ tested = rownames(y)
 `r if (have_bulk) paste0(format(length(tested), big.mark = ","), " genes pass filterByExpr in the Yasmin series and carry through to the comparison.") else ""`
 
 ```{r, eval=have_bulk}
-# Four contrasts: an endpoint-matched two-group test and an ordered trend, on
-# each sex axis. The endpoint tests supply effect sizes for the correlation; the
+# Four contrasts: an endpoint-matched two-group test and an ordered trend on
+# each sex axis. The endpoint tests supply effect sizes for the correlation. The
 # trends supply per-gene significance for any gene named individually.
 run_two_group = function(dge, run_a, run_b, label) {
   sub = dge[, c(run_a, run_b)]
@@ -372,16 +373,16 @@ contrast_tab = data.frame(
 datatable(contrast_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-The endpoint contrasts have little power, the female one least at 2 against 2.
-The correlation below uses effect sizes only, and noise in the Yasmin estimates
-pulls agreement toward zero, so low power makes that test conservative. Per-gene
-significance comes from the trends.
+The endpoint contrasts have little power. The female one has the least, at 2
+against 2. The correlation below uses effect sizes alone. Noise in the Yasmin
+estimates pulls agreement toward zero, so low power makes that test
+conservative rather than invalid. Per-gene significance comes from the trends.
 
 # Our stage effect
 
-With two larval libraries against one transformer library per sex, this is not a
-formal test. The log fold change is used as an effect size and no p-values are
-reported from it.
+Two larval libraries against one transformer library per sex is not a formal
+test. The log fold change is used as an effect size. No p-values are reported
+from it.
 
 ```{r, eval=have_bulk}
 p = DGEList(counts = pseudobulk[shared, ][tested, ])
@@ -404,8 +405,8 @@ cmp = ours %>% dplyr::inner_join(yasmin_res, by = "Gene")
 
 top_ns = as.integer(trimws(strsplit(as.character(params$top_n_list), ",")[[1]]))
 
-# Spearman with a bootstrap CI: cor.test gives a p-value but no interval, and
-# the interval is the more informative quantity here
+# Spearman with a bootstrap CI. cor.test gives a p-value but no interval, and
+# the interval is the quantity worth reporting.
 spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
   ok = is.finite(x) & is.finite(y)
   x = x[ok]; y = y[ok]
@@ -419,9 +420,10 @@ spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
     hi = unname(quantile(bs, .975, na.rm = TRUE)), n = length(x))
 }
 
-# genome-wide, then restricted to our strongest stage genes. The contrast
-# between the two is the informative quantity: any two gonad datasets correlate
-# positively genome-wide because both are dominated by the same abundant genes.
+# genome-wide, then restricted to our strongest stage genes. Any two gonad
+# datasets correlate positively genome-wide. Both are dominated by the same
+# abundant genes. The difference between the two values is what carries
+# information.
 agreement_for = function(ours_col, yas_col, axis) {
   rows = list()
   gw = spearman_ci(cmp[[ours_col]], cmp[[yas_col]])
@@ -457,7 +459,7 @@ datatable(agreement %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (have_bulk) { a = agreement[agreement$axis == "male, endpoint", ]; gw = a$rho[a$set == "genome-wide"]; tp = a$rho[a$set == paste0("top ", top_ns[1])]; sg = a$pct_same_sign[a$set == paste0("top ", top_ns[1])]; paste0("On the male axis the genome-wide correlation is ", signif(gw, 3), " and the correlation across our top ", top_ns[1], " stage genes is ", signif(tp, 3), ", with ", signif(sg, 3), "% sign agreement. Report both. Any two gonad datasets correlate positively genome-wide, so the difference between the two values carries the information.") } else ""`
+`r if (have_bulk) { a = agreement[agreement$axis == "male, endpoint", ]; gw = a$rho[a$set == "genome-wide"]; tp = a$rho[a$set == paste0("top ", top_ns[1])]; sg = a$pct_same_sign[a$set == paste0("top ", top_ns[1])]; paste0("On the male axis the genome-wide correlation is ", signif(gw, 3), ". Across our top ", top_ns[1], " stage genes it is ", signif(tp, 3), ", with ", signif(sg, 3), "% sign agreement. Both values belong in the write-up. Any two gonad datasets correlate positively genome-wide, so the difference between them is what carries information.") } else ""`
 
 ```{r, eval=have_bulk, fig.width=11, fig.height=5.5}
 scatter_for = function(ours_col, yas_col, title, n_label = 15) {
@@ -492,9 +494,9 @@ ggsave(p_male + p_fem, file = paste0(results_dir, "/bulk_agreement_scatter.png")
 
 A bulk change can arise because a cell type became more abundant rather than
 because any cell changed. If agreement is concentrated in cell type marker
-genes, the shared signal is largely compositional: both datasets see the same
-shift in which cell types are present. If it holds for non-markers too,
-expression is changing within cell types in both.
+genes, the shared signal is largely compositional. Both datasets would be seeing
+the same shift in which cell types are present. If agreement holds among
+non-markers too, expression is changing within cell types in both datasets.
 
 Either outcome supports the reviewer's point. The result decides how the claim
 is worded.
@@ -523,9 +525,9 @@ if (have_markers) {
 }
 ```
 
-`r if (have_bulk && exists("have_markers") && !have_markers) paste0("**Composition check skipped**, the marker file ", params$marker_file, " was not found in the data directory.") else ""`
+`r if (have_bulk && exists("have_markers") && !have_markers) paste0("**The composition check is skipped.** The marker file ", params$marker_file, " was not found in the data directory.") else ""`
 
-`r if (have_bulk && exists("comp_tab")) { mk = comp_tab$rho[comp_tab$gene_set == "cell type markers"]; ot = comp_tab$rho[comp_tab$gene_set == "all other genes"]; if (is.finite(mk) && is.finite(ot) && mk - ot > 0.1) "Agreement is stronger among marker genes than among other genes, so part of the shared signal is compositional. Describe it as a shift in gonad composition and expression together." else "Agreement is not concentrated in marker genes, so it is not mainly compositional. Expression appears to change within cell types in both datasets." } else ""`
+`r if (have_bulk && exists("comp_tab")) { mk = comp_tab$rho[comp_tab$gene_set == "cell type markers"]; ot = comp_tab$rho[comp_tab$gene_set == "all other genes"]; if (is.finite(mk) && is.finite(ot) && mk - ot > 0.1) "Agreement is stronger among marker genes than among other genes. Part of the shared signal is compositional. Describe it as a shift in gonad composition together with a shift in expression." else "Agreement is not concentrated in marker genes. The shared signal is not mainly compositional. Expression appears to change within cell types in both datasets." } else ""`
 
 # Export
 
@@ -576,8 +578,8 @@ The female result rests on two stage-matched animals. It supports the male axis
 rather than replicating it independently.
 
 The larval endpoint is matched by stage description rather than by size. Our
-larvae are larger than every larval animal in the comparison series, and
-settling that is a question for the lab's staging practice.
+larvae are sex-labile by our own staging and larger than every larval animal in
+the comparison series. The two series set the larval boundary at different sizes.
 
 # Session info
 
