@@ -20,6 +20,7 @@ params:
     n_boot: 2000
     n_perm_labels: 200
     n_rand_sets: 2000
+    min_pseudobulk_count: 10
 ---
 
 ```{r setup, include=FALSE}
@@ -413,19 +414,110 @@ Two larval libraries against one transformer library per sex is not a formal
 test. The log fold change is used as an effect size. No p-values are reported
 from it.
 
+Nothing on the Yasmin side requires a gene to be measurable here. Their
+`filterByExpr` runs on their 28 samples, and the shared set is an intersection of
+identifiers. A gene with three counts in one of our libraries and none in the
+others produces a large fold change on almost no evidence, and it will sit near
+the top of a list ranked by absolute fold change. `min_pseudobulk_count` marks
+the genes that carry enough counts here to be worth ranking. Both the marked and
+unmarked sets are carried through the comparison, so the effect of the filter is
+visible rather than assumed.
+
 ```{r, eval=have_bulk}
-p = DGEList(counts = pseudobulk[shared, ][tested, ])
+pb = pseudobulk[shared, ][tested, ]
+
+p = DGEList(counts = pb)
 p = calcNormFactors(p)
 plog = cpm(p, log = TRUE, prior.count = 1)
 
 larva_mean = rowMeans(plog[, c("Undifferentiated.1", "Undifferentiated.2")])
 
+min_pb = as.integer(params$min_pseudobulk_count)
+
 ours = data.frame(
-  Gene       = rownames(plog),
-  ours_male  = plog[, "Male"]   - larva_mean,
-  ours_female = plog[, "Female"] - larva_mean,
+  Gene          = rownames(plog),
+  ours_male     = plog[, "Male"]   - larva_mean,
+  ours_female   = plog[, "Female"] - larva_mean,
+  max_count     = apply(pb, 1, max),
+  well_measured = apply(pb, 1, max) >= min_pb,
   stringsAsFactors = FALSE)
 ```
+
+`r if (have_bulk) paste0(format(sum(ours$well_measured), big.mark = ","), " of ", format(nrow(ours), big.mark = ","), " genes reach ", min_pb, " counts in at least one of our four libraries.") else ""`
+
+# Diagnostics
+
+Two checks that decide how the comparison should be read. Neither depends on
+Yasmin.
+
+## Do the two larval libraries agree with each other?
+
+UND1 and UND2 are the only replication in our data. The larva-to-transformer
+difference has to be larger than the difference between two libraries of the
+same stage, or there is no effect for any external dataset to reproduce.
+
+The ratio of the two spreads has a known value when there is no stage effect at
+all. With independent library noise of size sigma, the larval difference has
+spread sigma times root two, and a transformer library against the mean of two
+larval libraries has spread sigma times root one and a half. The ratio is
+therefore root three quarters, or 0.866, under the null. Read the observed ratio
+against that number rather than against 1.
+
+```{r, eval=have_bulk}
+und_diff = plog[, "Undifferentiated.1"] - plog[, "Undifferentiated.2"]
+null_ratio = sqrt(0.75)
+
+rep_tab = data.frame(
+  quantity = c("UND1 against UND2, Spearman on log-CPM",
+               "SD of the UND1 minus UND2 difference",
+               "SD of our male stage effect",
+               "SD of our female stage effect",
+               "male effect SD divided by larval difference SD",
+               "female effect SD divided by larval difference SD",
+               "the same ratio when there is no stage effect"),
+  value = c(
+    suppressWarnings(cor(plog[, "Undifferentiated.1"],
+                         plog[, "Undifferentiated.2"], method = "spearman")),
+    sd(und_diff),
+    sd(ours$ours_male),
+    sd(ours$ours_female),
+    sd(ours$ours_male)   / sd(und_diff),
+    sd(ours$ours_female) / sd(und_diff),
+    null_ratio))
+
+datatable(rep_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", ordering = FALSE,
+                                           paging = FALSE))
+```
+
+`r if (have_bulk) { r_m = sd(ours$ours_male) / sd(und_diff); excess = r_m / null_ratio; if (excess < 1.25) paste0("**The stage effect is barely larger than library noise.** The male ratio is ", signif(r_m, 3), " against ", signif(null_ratio, 3), " expected with no stage effect at all, an excess of ", signif(excess, 3), " fold. Library-level variation accounts for most of what is being called a stage effect, and a failure to reproduce in Yasmin would follow from that alone.") else paste0("The male ratio is ", signif(r_m, 3), " against ", signif(null_ratio, 3), " expected with no stage effect, an excess of ", signif(excess, 3), " fold. The stage effect is larger than library noise.") } else ""`
+
+## What is in the top genes?
+
+```{r, eval=have_bulk}
+top_probe = as.integer(trimws(strsplit(as.character(params$top_n_list),
+                                       ",")[[1]]))[1]
+
+top_counts = dplyr::bind_rows(lapply(c("ours_male", "ours_female"),
+  function(cl) {
+    idx = order(abs(ours[[cl]]), decreasing = TRUE)[seq_len(top_probe)]
+    data.frame(
+      set = paste0("top ", top_probe, ", ", sub("ours_", "", cl)),
+      median_max_count = median(ours$max_count[idx]),
+      pct_below_cutoff = 100 * mean(!ours$well_measured[idx]))
+  }))
+
+top_counts = dplyr::bind_rows(
+  top_counts,
+  data.frame(set = "all genes",
+             median_max_count = median(ours$max_count),
+             pct_below_cutoff = 100 * mean(!ours$well_measured)))
+
+datatable(top_counts %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (have_bulk) { pc = top_counts$pct_below_cutoff[1]; if (pc > 25) paste0("**", signif(pc, 3), "% of the top male genes fall below the count cutoff.** The unfiltered ranking is largely a low-count list, and the filtered results below are the ones to read.") else paste0(signif(pc, 3), "% of the top male genes fall below the count cutoff, so the unfiltered ranking is not dominated by low-count genes.") } else ""`
 
 # The comparison
 
@@ -460,17 +552,25 @@ spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
 # is the honest null for the top-gene sets, so both binomial tests are reported.
 # Both are one-sided, since the claim is that the datasets agree. Disagreement
 # shows up as a p-value near 1 rather than as a small one.
-agreement_for = function(ours_col, yas_col, axis) {
-  rows = list()
-  gw = spearman_ci(cmp[[ours_col]], cmp[[yas_col]])
+# rank_on picks which dataset selects the genes. "ours" is the original
+# direction. "yasmin" ranks on their side, where the contrast is replicated and
+# thousands of genes reach FDR 0.05, and asks only whether our four libraries
+# follow. keep restricts to the genes that carry enough counts here to rank.
+agreement_for = function(ours_col, yas_col, axis, keep, pool,
+                         rank_on = "ours") {
+  d    = cmp[keep, , drop = FALSE]
+  rank_vec = if (rank_on == "ours") d[[ours_col]] else d[[yas_col]]
 
-  gw_agree = sign(cmp[[ours_col]]) == sign(cmp[[yas_col]])
+  rows = list()
+  gw = spearman_ci(d[[ours_col]], d[[yas_col]])
+
+  gw_agree = sign(d[[ours_col]]) == sign(d[[yas_col]])
   gw_agree = gw_agree[is.finite(gw_agree)]
   bg_rate  = mean(gw_agree)
 
   rows[[1]] = data.frame(
-    axis = axis, set = "genome-wide", n = gw[["n"]],
-    rho = gw[["rho"]], lo = gw[["lo"]], hi = gw[["hi"]],
+    axis = axis, pool = pool, ranked_on = rank_on, set = "genome-wide",
+    n = gw[["n"]], rho = gw[["rho"]], lo = gw[["lo"]], hi = gw[["hi"]],
     pct_same_sign = 100 * bg_rate,
     binom_p_vs_50 = binom.test(sum(gw_agree), length(gw_agree), p = 0.5,
                                alternative = "greater")$p.value,
@@ -479,15 +579,15 @@ agreement_for = function(ours_col, yas_col, axis) {
   # binom.test needs a probability strictly inside (0, 1)
   bg_p = min(max(bg_rate, 1e-6), 1 - 1e-6)
 
-  ord = order(abs(cmp[[ours_col]]), decreasing = TRUE)
+  ord = order(abs(rank_vec), decreasing = TRUE)
   for (n in top_ns) {
-    idx = ord[seq_len(min(n, nrow(cmp)))]
-    s = spearman_ci(cmp[[ours_col]][idx], cmp[[yas_col]][idx])
-    agree = sign(cmp[[ours_col]][idx]) == sign(cmp[[yas_col]][idx])
+    idx = ord[seq_len(min(n, nrow(d)))]
+    s = spearman_ci(d[[ours_col]][idx], d[[yas_col]][idx])
+    agree = sign(d[[ours_col]][idx]) == sign(d[[yas_col]][idx])
     agree = agree[is.finite(agree)]
     rows[[length(rows) + 1]] = data.frame(
-      axis = axis, set = paste0("top ", n), n = length(idx),
-      rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]],
+      axis = axis, pool = pool, ranked_on = rank_on, set = paste0("top ", n),
+      n = length(idx), rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]],
       pct_same_sign = 100 * mean(agree),
       binom_p_vs_50 = binom.test(sum(agree), length(agree), p = 0.5,
                                  alternative = "greater")$p.value,
@@ -497,20 +597,38 @@ agreement_for = function(ours_col, yas_col, axis) {
   dplyr::bind_rows(rows)
 }
 
-agreement = dplyr::bind_rows(
-  agreement_for("ours_male",   "male_end_logFC", "male, endpoint"),
-  agreement_for("ours_male",   "male_trend_logFC", "male, trend"),
-  agreement_for("ours_female", "fem_end_logFC",  "female, endpoint"),
-  agreement_for("ours_female", "fem_trend_logFC", "female, trend"))
+axis_cols = list(
+  "male, endpoint"   = c(ours = "ours_male",   yas = "male_end_logFC"),
+  "male, trend"      = c(ours = "ours_male",   yas = "male_trend_logFC"),
+  "female, endpoint" = c(ours = "ours_female", yas = "fem_end_logFC"),
+  "female, trend"    = c(ours = "ours_female", yas = "fem_trend_logFC"))
+
+gene_pools = list("all genes"     = rep(TRUE, nrow(cmp)),
+                  "well measured" = cmp$well_measured)
+
+grid = expand.grid(axis = names(axis_cols), pool = names(gene_pools),
+                   rank_on = c("ours", "yasmin"), stringsAsFactors = FALSE)
+
+agreement = dplyr::bind_rows(Map(function(ax, pl, ro) {
+  cols = axis_cols[[ax]]
+  agreement_for(cols[["ours"]], cols[["yas"]], ax, gene_pools[[pl]], pl, ro)
+}, grid$axis, grid$pool, grid$rank_on))
 
 write.csv(agreement, file = paste0(results_dir, "/bulk_agreement.csv"),
           row.names = FALSE)
 
 datatable(agreement %>% mutate(across(where(is.numeric), ~signif(., 3))),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+          rownames = FALSE, filter = "top",
+          options = list(pageLength = 20))
 ```
 
-`r if (have_bulk) { a = agreement[agreement$axis == "male, endpoint", ]; gw = a$rho[a$set == "genome-wide"]; tp = a$rho[a$set == paste0("top ", top_ns[1])]; sg = a$pct_same_sign[a$set == paste0("top ", top_ns[1])]; paste0("On the male axis the genome-wide correlation is ", signif(gw, 3), ". Across our top ", top_ns[1], " stage genes it is ", signif(tp, 3), ", with ", signif(sg, 3), "% sign agreement. Both values belong in the write-up. The genome-wide value is the floor that the top-gene value is read against. The permutation below turns that reading into a p-value.") } else ""`
+The table now carries every combination of contrast, gene pool and ranking side.
+`ranked_on = "ours"` is the original comparison. `ranked_on = "yasmin"` is the
+reciprocal one: their contrast picks the genes and our four libraries only have
+to follow. The reciprocal direction is the better powered of the two, since the
+selection happens on the replicated side.
+
+`r if (have_bulk) { say = function(ax) { a = agreement[agreement$axis == ax & agreement$pool == "well measured", ]; ao = a[a$ranked_on == "ours", ]; ay = a[a$ranked_on == "yasmin", ]; paste0(ax, ": floor ", signif(ao$rho[ao$set == "genome-wide"], 3), ", our top ", top_ns[1], " ", signif(ao$rho[ao$set == paste0("top ", top_ns[1])], 3), ", their top ", top_ns[1], " ", signif(ay$rho[ay$set == paste0("top ", top_ns[1])], 3)) }; paste0("Spearman rho among well measured genes, for each contrast. ", paste(vapply(names(axis_cols), say, character(1)), collapse = ". "), ". The genome-wide value is the floor the top-gene values are read against, and the permutation below turns that reading into a p-value.") } else ""`
 
 ## Reading the p-values
 
@@ -536,10 +654,12 @@ both p-values are optimistic. Neither should be quoted without the permutation
 beside it.
 
 **`p_perm`**, in the permutation section below. The fraction of random
-relabelings of the same 28 animals that agree with our genes at least as well as
-Yasmin's real stage contrast does. It assumes nothing about independence between
-genes, and it holds the gene-selection effect fixed. This is the number for the
-response letter.
+relabelings of the same 28 animals that agree at least as well as Yasmin's real
+stage contrast does. It assumes nothing about independence between genes, and it
+holds the gene-selection effect fixed. This is the number for the response
+letter. Read the `ranked_on = "yasmin"` rows first: their contrast is replicated
+and ours is not, so a list picked on their side is the better powered test of
+whether the two datasets describe the same transition.
 
 **`p_rand`**, in the composition section. Where the marker-gene correlation falls
 among correlations from random gene sets of the same size. It tests whether
@@ -569,33 +689,68 @@ drawn from the same animals.
 
 Labels are drawn from the whole series rather than shuffled within the contrast.
 Shuffling within it has too few distinct splits to resolve anything: 2 against 6
-gives 28 arrangements and 2 against 2 gives 6, so the smallest p-value
-reachable on the female axis would be 0.17.
+gives 28 arrangements and 2 against 2 gives 6, so the smallest p-value reachable
+on the female endpoint would be 0.17.
+
+All four contrasts get a null, on the same terms. For the endpoints a random set
+of animals is split into groups of the observed sizes. For the trends a random
+set of the same size receives the observed score vector. The two trends carry
+more animals than the endpoints do, so they are the better powered half of this
+table on both sex axes.
 
 ```{r, eval=have_bulk}
 n_perm_labels = as.integer(params$n_perm_labels)
 
-perm_null = function(dge, pool_runs, n_a, n_b, ours_col, top_n, n_perm,
-                     seed = 1) {
-  ours_vec = cmp[[ours_col]]
-  idx_top  = order(abs(ours_vec), decreasing = TRUE)[seq_len(min(top_n,
-                                                                 nrow(cmp)))]
+# One set of refits serves every summary. The fit does not depend on the gene
+# pool or on which side ranks the genes, so each permutation is scored for all
+# four combinations rather than refitted four times.
+#
+# When Yasmin ranks the genes, the null re-selects inside each permutation from
+# the permuted contrast. Reusing the real contrast's gene list would carry the
+# real labels into the null.
+perm_combos = expand.grid(pool = names(gene_pools),
+                          rank_on = c("ours", "yasmin"),
+                          stringsAsFactors = FALSE)
+
+# fit_one draws a random contrast of the requested shape and returns its log
+# fold changes. Both contrast shapes get a null, so the trends are tested on the
+# same terms as the endpoints.
+fit_two_group = function(dge, pool_runs, n_a, n_b) {
+  pick = sample(pool_runs, n_a + n_b)
+  try(run_two_group(dge, pick[seq_len(n_a)], pick[n_a + seq_len(n_b)], "perm"),
+      silent = TRUE)
+}
+
+fit_trend = function(dge, pool_runs, score_vec) {
+  pick = sample(pool_runs, length(score_vec))
+  try(run_trend(dge, pick, score_vec, "perm"), silent = TRUE)
+}
+
+perm_null = function(fit_one, ours_col, top_n, n_perm, seed = 1) {
   set.seed(seed)
   res = vector("list", n_perm)
   for (i in seq_len(n_perm)) {
-    pick = sample(pool_runs, n_a + n_b)
-    tab  = try(run_two_group(dge, pick[seq_len(n_a)], pick[n_a + seq_len(n_b)],
-                             "perm"), silent = TRUE)
+    tab = fit_one()
     if (inherits(tab, "try-error")) next
-    lfc   = tab$perm_logFC[match(cmp$Gene, tab$Gene)]
-    agree = sign(ours_vec[idx_top]) == sign(lfc[idx_top])
-    res[[i]] = data.frame(
-      rho_gw   = suppressWarnings(cor(ours_vec, lfc, method = "spearman",
-                                      use = "complete.obs")),
-      rho_top  = suppressWarnings(cor(ours_vec[idx_top], lfc[idx_top],
-                                      method = "spearman",
-                                      use = "complete.obs")),
-      pct_sign = 100 * mean(agree, na.rm = TRUE))
+    lfc_all = tab$perm_logFC[match(cmp$Gene, tab$Gene)]
+
+    res[[i]] = dplyr::bind_rows(lapply(seq_len(nrow(perm_combos)), function(k) {
+      keep = gene_pools[[perm_combos$pool[k]]]
+      ov   = cmp[[ours_col]][keep]
+      lv   = lfc_all[keep]
+      idx  = if (perm_combos$rank_on[k] == "ours")
+               order(abs(ov), decreasing = TRUE)[seq_len(min(top_n, length(ov)))]
+             else
+               order(abs(lv), decreasing = TRUE)[seq_len(min(top_n, length(lv)))]
+      agree = sign(ov[idx]) == sign(lv[idx])
+      data.frame(
+        pool = perm_combos$pool[k], rank_on = perm_combos$rank_on[k],
+        rho_gw   = suppressWarnings(cor(ov, lv, method = "spearman",
+                                        use = "complete.obs")),
+        rho_top  = suppressWarnings(cor(ov[idx], lv[idx], method = "spearman",
+                                        use = "complete.obs")),
+        pct_sign = 100 * mean(agree, na.rm = TRUE))
+    }))
   }
   dplyr::bind_rows(res)
 }
@@ -605,22 +760,35 @@ perm_file = paste0(Robject_out_dir, "/label_permutation_null.Rds")
 perm_sig  = list(n_perm  = n_perm_labels,
                  top_n   = top_ns[1],
                  n_genes = nrow(cmp),
+                 n_well  = sum(cmp$well_measured),
+                 min_pb  = min_pb,
+                 combos  = perm_combos,
                  runs    = sort(sample_meta$run),
                  sizes   = c(length(runs_ud), length(runs_mm),
-                             length(tf_match_runs)))
+                             length(tf_match_runs), length(male_runs),
+                             length(fem_runs)),
+                 shapes  = c("endpoints", "trends"))
 
 cached = if (file.exists(perm_file)) readRDS(perm_file) else NULL
 
 if (!is.null(cached) && identical(cached$signature, perm_sig)) {
   perm_res = cached$perm_res
 } else {
+  all_runs = sample_meta$run
   perm_res = list(
-    "male, endpoint"   = perm_null(y, sample_meta$run, length(runs_ud),
-                                   length(runs_mm), "ours_male", top_ns[1],
-                                   n_perm_labels, seed = 1),
-    "female, endpoint" = perm_null(y, sample_meta$run, length(runs_ud),
-                                   length(tf_match_runs), "ours_female",
-                                   top_ns[1], n_perm_labels, seed = 2))
+    "male, endpoint" = perm_null(
+      function() fit_two_group(y, all_runs, length(runs_ud), length(runs_mm)),
+      "ours_male", top_ns[1], n_perm_labels, seed = 1),
+    "female, endpoint" = perm_null(
+      function() fit_two_group(y, all_runs, length(runs_ud),
+                               length(tf_match_runs)),
+      "ours_female", top_ns[1], n_perm_labels, seed = 2),
+    "male, trend" = perm_null(
+      function() fit_trend(y, all_runs, male_score),
+      "ours_male", top_ns[1], n_perm_labels, seed = 3),
+    "female, trend" = perm_null(
+      function() fit_trend(y, all_runs, fem_score),
+      "ours_female", top_ns[1], n_perm_labels, seed = 4))
   saveRDS(list(signature = perm_sig, perm_res = perm_res), file = perm_file)
 }
 ```
@@ -633,57 +801,78 @@ emp_p = function(null_vals, obs) {
 }
 
 perm_tab = dplyr::bind_rows(lapply(names(perm_res), function(ax) {
-  nd  = perm_res[[ax]]
-  obs = agreement[agreement$axis == ax, ]
-  o   = c(obs$rho[obs$set == "genome-wide"],
-          obs$rho[obs$set == paste0("top ", top_ns[1])],
-          obs$pct_same_sign[obs$set == paste0("top ", top_ns[1])])
-  nl  = list(nd$rho_gw, nd$rho_top, nd$pct_sign)
+  nd = perm_res[[ax]]
+  dplyr::bind_rows(lapply(split(nd, list(nd$pool, nd$rank_on), drop = TRUE),
+    function(g) {
+      pl  = g$pool[1]
+      ro  = g$rank_on[1]
+      obs = agreement[agreement$axis == ax & agreement$pool == pl &
+                        agreement$ranked_on == ro, ]
+      o   = c(obs$rho[obs$set == "genome-wide"],
+              obs$rho[obs$set == paste0("top ", top_ns[1])],
+              obs$pct_same_sign[obs$set == paste0("top ", top_ns[1])])
+      nl  = list(g$rho_gw, g$rho_top, g$pct_sign)
 
-  data.frame(
-    axis        = ax,
-    statistic   = c("rho, genome-wide", paste0("rho, top ", top_ns[1]),
-                    paste0("% same sign, top ", top_ns[1])),
-    observed    = o,
-    null_median = vapply(nl, median, numeric(1), na.rm = TRUE),
-    null_95th   = vapply(nl, function(v) unname(quantile(v, .95, na.rm = TRUE)),
-                         numeric(1)),
-    p_perm      = mapply(emp_p, nl, o),
-    n_perm      = vapply(nl, function(v) sum(is.finite(v)), integer(1)))
+      out = data.frame(
+        axis        = ax,
+        pool        = pl,
+        ranked_on   = ro,
+        statistic   = c("rho, genome-wide", paste0("rho, top ", top_ns[1]),
+                        paste0("% same sign, top ", top_ns[1])),
+        observed    = o,
+        null_median = vapply(nl, median, numeric(1), na.rm = TRUE),
+        null_95th   = vapply(nl,
+                             function(v) unname(quantile(v, .95, na.rm = TRUE)),
+                             numeric(1)),
+        p_perm      = mapply(emp_p, nl, o),
+        n_perm      = vapply(nl, function(v) sum(is.finite(v)), integer(1)))
+
+      # the genome-wide row does not depend on which side ranks the genes
+      if (ro == "yasmin") out = out[out$statistic != "rho, genome-wide", ]
+      out
+    }))
 }))
 
 write.csv(perm_tab, file = paste0(results_dir, "/bulk_permutation_null.csv"),
           row.names = FALSE)
 
 datatable(perm_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+          rownames = FALSE, filter = "top", options = list(pageLength = 20))
 ```
 
 `r if (have_bulk) paste0("The smallest p-value reachable with ", n_perm_labels, " permutations is ", signif(1 / (1 + n_perm_labels), 2), ". A statistic at that value is reported as a floor rather than as its true p-value.") else ""`
 
-```{r, eval=have_bulk, fig.width=10, fig.height=4}
-perm_long = dplyr::bind_rows(lapply(names(perm_res), function(ax)
-  data.frame(axis = ax, rho_top = perm_res[[ax]]$rho_top)))
-
-obs_long = dplyr::bind_rows(lapply(names(perm_res), function(ax) {
-  obs = agreement[agreement$axis == ax, ]
-  data.frame(axis = ax, observed = obs$rho[obs$set == paste0("top ", top_ns[1])])
+```{r, eval=have_bulk, fig.width=12, fig.height=7}
+# the well measured pool only, since the unfiltered ranking is the one under
+# suspicion
+perm_long = dplyr::bind_rows(lapply(names(perm_res), function(ax) {
+  nd = perm_res[[ax]][perm_res[[ax]]$pool == "well measured", ]
+  data.frame(axis = ax, ranked_on = nd$rank_on, rho_top = nd$rho_top)
 }))
+
+obs_long = dplyr::bind_rows(lapply(names(perm_res), function(ax)
+  dplyr::bind_rows(lapply(c("ours", "yasmin"), function(ro) {
+    obs = agreement[agreement$axis == ax & agreement$pool == "well measured" &
+                      agreement$ranked_on == ro, ]
+    data.frame(axis = ax, ranked_on = ro,
+               observed = obs$rho[obs$set == paste0("top ", top_ns[1])])
+  }))))
 
 p_perm = ggplot(perm_long, aes(x = rho_top)) +
   geom_histogram(bins = 40, fill = "grey75", colour = NA) +
   geom_vline(data = obs_long, aes(xintercept = observed),
              colour = "#c1272d", linewidth = .7) +
-  facet_wrap(~axis, scales = "free_y") +
-  labs(x = paste0("Spearman rho across our top ", top_ns[1], " stage genes"),
+  facet_grid(ranked_on ~ axis, scales = "free_y") +
+  labs(x = paste0("Spearman rho across the top ", top_ns[1], " genes"),
        y = "permutations",
-       title = "Observed agreement against random contrasts of the same shape") +
+       title = "Observed agreement against random contrasts of the same shape",
+       subtitle = "well measured genes; rows give the side that ranked the genes") +
   theme_bw()
 
 p_perm
 
 ggsave(p_perm, file = paste0(results_dir, "/bulk_permutation_null.png"),
-       width = 10, height = 4, dpi = 300)
+       width = 12, height = 7, dpi = 300)
 ```
 
 ```{r, eval=have_bulk, fig.width=11, fig.height=5.5}
@@ -737,27 +926,26 @@ random draw. The control for both is a size-matched null: gene sets of the same
 size drawn at random, giving the range of correlations any set that size
 produces.
 
+This section uses the well measured genes. Low-count genes are noise on our side
+whichever set they fall into, and markers are highly expressed, so leaving them
+in would load the non-marker set with genes that cannot agree with anything.
+
 ```{r, eval=have_bulk}
 marker_path = paste0(data_dir, "/", params$marker_file)
 have_markers = file.exists(marker_path)
-
-axis_defs = list(
-  "male, endpoint"   = c(ours = "ours_male",   yas = "male_end_logFC"),
-  "male, trend"      = c(ours = "ours_male",   yas = "male_trend_logFC"),
-  "female, endpoint" = c(ours = "ours_female", yas = "fem_end_logFC"),
-  "female, trend"    = c(ours = "ours_female", yas = "fem_trend_logFC"))
 
 if (have_markers) {
   km = read.csv(marker_path, stringsAsFactors = FALSE)
   marker_genes = unique(c(km$loc_id, km$symbol))
   marker_genes = marker_genes[!is.na(marker_genes) & nzchar(marker_genes)]
 
-  cmp$is_marker = cmp$Gene %in% marker_genes
+  cmp_wm = cmp[cmp$well_measured, , drop = FALSE]
+  cmp_wm$is_marker = cmp_wm$Gene %in% marker_genes
 
-  comp_tab = dplyr::bind_rows(lapply(names(axis_defs), function(ax) {
-    cols = axis_defs[[ax]]
+  comp_tab = dplyr::bind_rows(lapply(names(axis_cols), function(ax) {
+    cols = axis_cols[[ax]]
     dplyr::bind_rows(lapply(c(TRUE, FALSE), function(m) {
-      d = cmp[cmp$is_marker == m, ]
+      d = cmp_wm[cmp_wm$is_marker == m, ]
       s = spearman_ci(d[[cols[["ours"]]]], d[[cols[["yas"]]]])
       data.frame(axis = ax,
                  gene_set = if (m) "cell type markers" else "all other genes",
@@ -776,12 +964,12 @@ if (have_markers) {
 if (have_markers) {
   n_rand = as.integer(params$n_rand_sets)
 
-  rand_tab = dplyr::bind_rows(lapply(names(axis_defs), function(ax) {
-    cols = axis_defs[[ax]]
-    x  = cmp[[cols[["ours"]]]]
-    yv = cmp[[cols[["yas"]]]]
+  rand_tab = dplyr::bind_rows(lapply(names(axis_cols), function(ax) {
+    cols = axis_cols[[ax]]
+    x  = cmp_wm[[cols[["ours"]]]]
+    yv = cmp_wm[[cols[["yas"]]]]
     ok = is.finite(x) & is.finite(yv)
-    x  = x[ok]; yv = yv[ok]; mk = cmp$is_marker[ok]
+    x  = x[ok]; yv = yv[ok]; mk = cmp_wm$is_marker[ok]
 
     obs = suppressWarnings(cor(x[mk], yv[mk], method = "spearman"))
     set.seed(1)
@@ -826,43 +1014,54 @@ datatable(head(out %>% mutate(across(where(is.numeric), ~signif(., 3))), 100),
 # Summary
 
 ```{r, eval=have_bulk}
+# the headline numbers come from the well measured pool. Both ranking
+# directions are shown, since they answer different questions.
 top_set = paste0("top ", top_ns[1])
 
-row_for = function(ax, set) agreement[agreement$axis == ax &
-                                        agreement$set == set, ]
-male_row = row_for("male, endpoint", top_set)
-male_gw  = row_for("male, endpoint", "genome-wide")
-fem_row  = row_for("female, endpoint", top_set)
-fem_gw   = row_for("female, endpoint", "genome-wide")
+row_for = function(ax, set, ro = "ours")
+  agreement[agreement$axis == ax & agreement$pool == "well measured" &
+              agreement$ranked_on == ro & agreement$set == set, ]
 
-perm_for = function(ax, stat) perm_tab$p_perm[perm_tab$axis == ax &
-                                                perm_tab$statistic == stat]
+perm_for = function(ax, stat, ro = "ours")
+  perm_tab$p_perm[perm_tab$axis == ax & perm_tab$pool == "well measured" &
+                    perm_tab$ranked_on == ro & perm_tab$statistic == stat]
 
-summary_tbl = data.frame(
-  question = c("shared genes tested",
-               "male axis, rho on top genes",
-               "male axis, rho genome-wide (the floor)",
-               "male axis, % same sign on top genes",
-               "male axis, % same sign genome-wide (the null)",
-               "male axis, permutation p for rho on top genes",
-               "female axis, rho on top genes",
-               "female axis, rho genome-wide (the floor)",
-               "female axis, % same sign on top genes",
-               "female axis, % same sign genome-wide (the null)",
-               "female axis, permutation p for rho on top genes",
-               "female animals at the matched endpoint"),
-  answer = c(format(nrow(cmp), big.mark = ","),
-             signif(male_row$rho, 3),
-             signif(male_gw$rho, 3),
-             paste0(signif(male_row$pct_same_sign, 3), "%"),
-             paste0(signif(male_gw$pct_same_sign, 3), "%"),
-             signif(perm_for("male, endpoint", paste0("rho, ", top_set)), 3),
-             signif(fem_row$rho, 3),
-             signif(fem_gw$rho, 3),
-             paste0(signif(fem_row$pct_same_sign, 3), "%"),
-             paste0(signif(fem_gw$pct_same_sign, 3), "%"),
-             signif(perm_for("female, endpoint", paste0("rho, ", top_set)), 3),
-             as.character(length(tf_match_runs))))
+axis_block = function(ax, label) {
+  ours_row = row_for(ax, top_set, "ours")
+  yas_row  = row_for(ax, top_set, "yasmin")
+  gw_row   = row_for(ax, "genome-wide", "ours")
+  data.frame(
+    question = paste0(label, c(", rho genome-wide (the floor)",
+                               ", rho on our top genes",
+                               ", permutation p, our ranking",
+                               ", rho on Yasmin's top genes",
+                               ", permutation p, their ranking",
+                               ", % same sign on their top genes")),
+    answer = c(signif(gw_row$rho, 3),
+               signif(ours_row$rho, 3),
+               signif(perm_for(ax, paste0("rho, ", top_set), "ours"), 3),
+               signif(yas_row$rho, 3),
+               signif(perm_for(ax, paste0("rho, ", top_set), "yasmin"), 3),
+               paste0(signif(yas_row$pct_same_sign, 3), "%")))
+}
+
+summary_tbl = dplyr::bind_rows(
+  data.frame(question = c("shared genes tested",
+                          paste0("genes at or above ", min_pb, " counts here")),
+             answer = c(format(nrow(cmp), big.mark = ","),
+                        format(sum(cmp$well_measured), big.mark = ","))),
+  axis_block("male, endpoint",   "male endpoint"),
+  axis_block("male, trend",      "male trend"),
+  axis_block("female, endpoint", "female endpoint"),
+  axis_block("female, trend",    "female trend"),
+  data.frame(question = c("animals in the male endpoint",
+                          "animals in the male trend",
+                          "animals in the female endpoint",
+                          "animals in the female trend"),
+             answer = as.character(c(length(runs_ud) + length(runs_mm),
+                                     length(male_runs),
+                                     length(runs_ud) + length(tf_match_runs),
+                                     length(fem_runs)))))
 
 datatable(summary_tbl, rownames = FALSE,
           options = list(dom = "t", ordering = FALSE, paging = FALSE))
@@ -873,8 +1072,11 @@ datatable(summary_tbl, rownames = FALSE,
 Agreement shows the pattern reproduces in a series without our July-to-November
 batch. It does not separate stage from batch within our data.
 
-The female result rests on two stage-matched animals. It supports the male axis
-rather than replicating it independently.
+The female *endpoint* rests on two stage-matched animals, which is thin for
+naming individual genes. The female trend carries ten animals and detects more
+genes than the male endpoint does, so the female axis as a whole is not the
+weaker of the two. Read each contrast on its own size rather than treating one
+sex as primary.
 
 The larval endpoint is matched by stage description rather than by size. Our
 larvae are sex-labile by our own staging and larger than every larval animal in
