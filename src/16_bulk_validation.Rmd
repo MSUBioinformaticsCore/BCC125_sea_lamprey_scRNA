@@ -40,8 +40,7 @@ library(DT)
 source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
-Independent evidence for the stage-associated patterns, following
-`revision_yasmin_validation_plan.md`. Answers the reviewer's request for
+Independent evidence for the stage-associated patterns. Answers the reviewer's request for
 "independent evidence supporting the stage-associated patterns, such as
 agreement with staining or previous bulk RNA-seq studies."
 
