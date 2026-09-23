@@ -140,36 +140,64 @@ rownames(yasmin_counts) = x$gene_id
 yasmin_counts = round(yasmin_counts)
 storage.mode(yasmin_counts) = "integer"
 
-# nf-core sample names come from whatever samplesheet the run used. They may be
-# run accessions or the paper's own names. Try each candidate column and report
-# which one matched.
+# nf-core sample names come from the samplesheet the run used. They may be run
+# accessions, the paper's own animal names, or the two glued together, as in
+# SRR15275627_F_JUV. Read the column names in all three forms and take the
+# form and sample sheet column that resolve the most samples.
+raw_ids = colnames(yasmin_counts)
+has_acc = grepl("^[DES]RR[0-9]+", raw_ids)
+
+id_forms = list(
+  "as given"      = raw_ids,
+  "run accession" = ifelse(has_acc, sub("^([DES]RR[0-9]+).*$", "\\1", raw_ids),
+                           NA_character_),
+  "name after the accession" =
+                    ifelse(grepl("^[DES]RR[0-9]+_", raw_ids),
+                           sub("^[DES]RR[0-9]+_", "", raw_ids), NA_character_))
+
 id_candidates = c("run", "sample_name", "library_name", "suppT1_id")
 id_candidates = intersect(id_candidates, colnames(sample_meta))
 
-n_matched = vapply(id_candidates, function(cl)
-  sum(colnames(yasmin_counts) %in% sample_meta[[cl]]), integer(1))
-sample_id_col = names(which.max(n_matched))
+match_grid = expand.grid(form = names(id_forms), column = id_candidates,
+                         stringsAsFactors = FALSE)
+match_grid$n_matched = mapply(function(f, cl)
+  sum(id_forms[[f]] %in% sample_meta[[cl]], na.rm = TRUE),
+  match_grid$form, match_grid$column)
 
-if (max(n_matched) < ncol(yasmin_counts))
+best          = match_grid[which.max(match_grid$n_matched), ]
+sample_ids    = id_forms[[best$form]]
+sample_id_col = best$column
+
+if (best$n_matched < ncol(yasmin_counts))
   stop("could not match all ", ncol(yasmin_counts), " count columns to the ",
-       "sample sheet. Best column was '", sample_id_col, "' matching ",
-       max(n_matched), ". Unmatched: ",
-       paste(setdiff(colnames(yasmin_counts), sample_meta[[sample_id_col]]),
+       "sample sheet. The best pairing was the '", best$form, "' form of the ",
+       "column names against sample sheet column '", sample_id_col,
+       "', matching ", best$n_matched, ". Unmatched: ",
+       paste(raw_ids[!(sample_ids %in% sample_meta[[sample_id_col]])],
              collapse = ", "),
        ". Add the nf-core sample names to ",
-       "data/yasmin_PRJNA749754_sample_groups.csv as a new column, or rename ",
-       "the count columns to run accessions.")
+       "data/yasmin_PRJNA749754_sample_groups.csv as a new column.")
 
-absent = setdiff(sample_meta[[sample_id_col]], colnames(yasmin_counts))
+absent = setdiff(sample_meta[[sample_id_col]], sample_ids)
 if (length(absent) > 0)
   stop(length(absent), " sample(s) in the sample sheet are missing from the ",
        "count matrix: ", paste(absent, collapse = ", "),
        ". The nf-core run is incomplete, or its samplesheet omitted them.")
 
-sample_meta = sample_meta[match(colnames(yasmin_counts),
-                                sample_meta[[sample_id_col]]), ]
-stopifnot(identical(sample_meta[[sample_id_col]], colnames(yasmin_counts)))
+sample_meta = sample_meta[match(sample_ids, sample_meta[[sample_id_col]]), ]
+stopifnot(identical(sample_meta[[sample_id_col]], sample_ids))
+
+# Everything downstream selects columns with sample_meta$run, so put the count
+# matrix on run accessions whatever form the nf-core names took.
+stopifnot(!anyDuplicated(sample_meta$run))
+colnames(yasmin_counts) = sample_meta$run
+
+id_note = paste0("Count columns were matched to the sample sheet by their ",
+                 best$form, ", against the `", sample_id_col, "` column. All ",
+                 ncol(yasmin_counts), " samples resolved.")
 ```
+
+`r if (have_bulk) id_note else ""`
 
 ```{r, eval=have_bulk}
 # a numeric developmental position per animal, parsed from the recorded life
