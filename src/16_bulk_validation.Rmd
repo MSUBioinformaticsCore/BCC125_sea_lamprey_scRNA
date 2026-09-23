@@ -231,7 +231,7 @@ datatable(series_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE
 ## Stage correspondence
 
 Our animals are 112 mm sex-labile larvae and 131 mm newly transformed
-transformers. The matches below follow the validation plan. They use the
+transformers. The matches below use the
 per-animal records in Supplementary Table 1 rather than the group labels.
 
 ```{r, eval=have_bulk}
