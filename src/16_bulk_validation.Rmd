@@ -434,30 +434,57 @@ have_disjoint = length(mid_only) >= 2
 if (have_disjoint)
   axis_dis = run_two_group(y, runs_ud, mid_only, "axis_dis")
 
+# Each row is one correlation between two per-gene log fold change vectors. The
+# first vector is the same in both rows. Naming both sides in the table, rather
+# than naming only the second, keeps the row readable on its own.
+within_label = paste0("late mid females (n=", length(mf_late),
+                      ") vs early mid females (n=", length(mf_early), ")")
+
+mk_row = function(s, dev_label, dev_runs) data.frame(
+  `within-group axis`  = within_label,
+  `developmental axis` = dev_label,
+  `shared animals`     = length(intersect(dev_runs, c(mf_early, mf_late))),
+  rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]], genes = s[["n"]],
+  check.names = FALSE)
+
 homog_rows = list()
-s_all = spearman_ci(within_mf$within_mf_logFC, axis_all$axis_all_logFC)
-if (have_disjoint) {
-  s_dis = spearman_ci(within_mf$within_mf_logFC, axis_dis$axis_dis_logFC)
-  homog_rows[[1]] = data.frame(
-    reference = paste0("larvae vs the mid females left out of the within-group ",
-                       "test (n=", length(mid_only), "), no shared animals"),
-    rho = s_dis[["rho"]], lo = s_dis[["lo"]], hi = s_dis[["hi"]],
-    n = s_dis[["n"]])
-}
-homog_rows[[length(homog_rows) + 1]] = data.frame(
-  reference = paste0("larvae vs all mid females (n=", length(runs_mf),
-                     "), shares animals with the within-group test"),
-  rho = s_all[["rho"]], lo = s_all[["lo"]], hi = s_all[["hi"]], n = s_all[["n"]])
+if (have_disjoint)
+  homog_rows[[1]] = mk_row(
+    spearman_ci(within_mf$within_mf_logFC, axis_dis$axis_dis_logFC),
+    paste0("larvae (n=", length(runs_ud), ") vs the other mid females (n=",
+           length(mid_only), ")"),
+    mid_only)
+
+homog_rows[[length(homog_rows) + 1]] = mk_row(
+  spearman_ci(within_mf$within_mf_logFC, axis_all$axis_all_logFC),
+  paste0("larvae (n=", length(runs_ud), ") vs all mid females (n=",
+         length(runs_mf), ")"),
+  runs_mf)
 
 homog_tab = dplyr::bind_rows(homog_rows)
 
 datatable(mf_pca_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+Each row below is a single Spearman correlation between two per-gene log fold
+change vectors, over every tested gene. The **within-group axis** is the same in
+both rows: how each gene differs between the latest and earliest animals inside
+the mid female group. The **developmental axis** is larvae against mid females,
+computed two ways. A clearly positive rho means those are the same axis, so the
+six animals are spread along the larva-to-mid-female progression. A rho near
+zero means they differ along something else.
+
+The first row shares no animals between the two vectors. The second is better
+powered and reuses four, which creates some correlation on its own, so the two
+rows agreeing is part of the evidence.
+
+```{r, eval=have_bulk}
 datatable(homog_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (have_bulk) { h = homog_tab[1, ]; paste0("The within-group axis correlates with the developmental axis at rho = ", signif(h$rho, 3), " (95% interval ", signif(h$lo, 3), " to ", signif(h$hi, 3), ", ", format(h$n, big.mark = ","), " genes). ", if (h$lo > 0.1) "The six animals are spread along the same axis that separates larvae from mid females, so ordering them within the group would be defensible." else if (h$hi < 0.1) "Whatever separates the animals inside the group is not the axis that separates larvae from mid females. Treat them as one group." else "The interval spans the point where this would be decided, so the question is open on these data.") } else ""`
+`r if (have_bulk) { h = homog_tab[1, ]; paste0("The within-group axis correlates with the developmental axis at rho = ", signif(h$rho, 3), " (95% interval ", signif(h$lo, 3), " to ", signif(h$hi, 3), ", ", format(h$genes, big.mark = ","), " genes). ", if (h$lo > 0.1) "The six animals are spread along the same axis that separates larvae from mid females, so ordering them within the group would be defensible." else if (h$hi < 0.1) "Whatever separates the animals inside the group is not the axis that separates larvae from mid females. Treat them as one group." else "The interval spans the point where this would be decided, so the question is open on these data.") } else ""`
 
 **What this does and does not settle.** A positive correlation means the within-group
 differences lie along the developmental progression, which is what would justify
@@ -488,8 +515,25 @@ male_score = c(rep(0, length(runs_ud)), rep(1, length(runs_pm)),
                rep(2, length(runs_em)), rep(3, length(runs_mm)))
 male_trend = run_trend(y, male_runs, male_score, "male_trend")
 
-# female endpoint uses the two stage-matched mid females, not the whole group
-fem_end = run_two_group(y, runs_ud, tf_match_runs, "fem_end")
+# Three female endpoints, reported side by side.
+#
+# fem_end is the pre-specified one: the two mid females staged like our TF, at
+# 129 and 130 mm against TF at 131 mm. It matches the animal.
+#
+# fem_end6 uses the whole mid female group. The homogeneity section above tests
+# the assumption behind the restriction, that an animal's metamorphic stage
+# predicts its gonad. Where it does not, the restriction costs four animals for
+# nothing and this is the better powered version of the same contrast.
+#
+# fem_end_ef is the counterpart the lab proposed. Both early females are
+# larval-stage animals at 81 and 95 mm, so this is larva against larva: the
+# onset of ovarian differentiation without metamorphosis. It is a different
+# transition from ours rather than a weaker match to it, which makes it a
+# control. Agreement here would place our female signal in the gonad rather
+# than in metamorphosis of the animal.
+fem_end     = run_two_group(y, runs_ud, tf_match_runs, "fem_end")
+fem_end6    = run_two_group(y, runs_ud, runs_mf, "fem_end6")
+fem_end_ef  = run_two_group(y, runs_ud, runs_ef, "fem_end_ef")
 
 # Group-level scores, matching the male trend. An earlier version spread the six
 # mid females over 2.17 to 3.0 by recorded metamorphic stage. Yasmin group them
@@ -501,22 +545,31 @@ fem_score = c(rep(0, length(runs_ud)), rep(1, length(runs_ef)),
 fem_trend = run_trend(y, fem_runs, fem_score, "fem_trend")
 
 yasmin_res = Reduce(function(a, b) dplyr::full_join(a, b, by = "Gene"),
-                    list(male_end, male_trend, fem_end, fem_trend))
+                    list(male_end, male_trend, fem_end, fem_end6, fem_end_ef,
+                         fem_trend))
 ```
 
 ```{r, eval=have_bulk}
 contrast_tab = data.frame(
-  contrast = c("male endpoint", "male trend", "female endpoint", "female trend"),
+  contrast = c("male endpoint", "male trend",
+               "female endpoint, stage-matched", "female endpoint, all mid females",
+               "female, early females", "female trend"),
   design   = c(paste0("UD (n=", length(runs_ud), ") vs mid males (n=",
                       length(runs_mm), ")"),
                paste0("UD, PM, EM, MM ordered (n=", length(male_runs), ")"),
                paste0("UD (n=", length(runs_ud), ") vs stage-matched mid females (n=",
                       length(tf_match_runs), ")"),
+               paste0("UD (n=", length(runs_ud), ") vs all mid females (n=",
+                      length(runs_mf), ")"),
+               paste0("UD (n=", length(runs_ud), ") vs early females (n=",
+                      length(runs_ef), "), larva against larva"),
                paste0("UD, EF, MF ordered (n=", length(fem_runs), ")")),
-  n_FDR_05 = c(sum(yasmin_res$male_end_FDR   < 0.05, na.rm = TRUE),
-               sum(yasmin_res$male_trend_FDR < 0.05, na.rm = TRUE),
-               sum(yasmin_res$fem_end_FDR    < 0.05, na.rm = TRUE),
-               sum(yasmin_res$fem_trend_FDR  < 0.05, na.rm = TRUE)))
+  n_FDR_05 = c(sum(yasmin_res$male_end_FDR    < 0.05, na.rm = TRUE),
+               sum(yasmin_res$male_trend_FDR  < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_end_FDR     < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_end6_FDR    < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_end_ef_FDR  < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_trend_FDR   < 0.05, na.rm = TRUE)))
 
 datatable(contrast_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
@@ -701,10 +754,12 @@ agreement_for = function(ours_col, yas_col, axis, keep, pool,
 }
 
 axis_cols = list(
-  "male, endpoint"   = c(ours = "ours_male",   yas = "male_end_logFC"),
-  "male, trend"      = c(ours = "ours_male",   yas = "male_trend_logFC"),
-  "female, endpoint" = c(ours = "ours_female", yas = "fem_end_logFC"),
-  "female, trend"    = c(ours = "ours_female", yas = "fem_trend_logFC"))
+  "male, endpoint"        = c(ours = "ours_male",   yas = "male_end_logFC"),
+  "male, trend"           = c(ours = "ours_male",   yas = "male_trend_logFC"),
+  "female, endpoint"      = c(ours = "ours_female", yas = "fem_end_logFC"),
+  "female, endpoint all"  = c(ours = "ours_female", yas = "fem_end6_logFC"),
+  "female, early females" = c(ours = "ours_female", yas = "fem_end_ef_logFC"),
+  "female, trend"         = c(ours = "ours_female", yas = "fem_trend_logFC"))
 
 gene_pools = list("all genes"     = rep(TRUE, nrow(cmp)),
                   "well measured" = cmp$well_measured)
@@ -869,7 +924,8 @@ perm_sig  = list(n_perm  = n_perm_labels,
                  scores  = list(male = male_score, female = fem_score),
                  runs    = sort(sample_meta$run),
                  sizes   = c(length(runs_ud), length(runs_mm),
-                             length(tf_match_runs), length(male_runs),
+                             length(tf_match_runs), length(runs_mf),
+                             length(runs_ef), length(male_runs),
                              length(fem_runs)),
                  shapes  = c("endpoints", "trends"))
 
@@ -887,6 +943,12 @@ if (!is.null(cached) && identical(cached$signature, perm_sig)) {
       function() fit_two_group(y, all_runs, length(runs_ud),
                                length(tf_match_runs)),
       "ours_female", top_ns[1], n_perm_labels, seed = 2),
+    "female, endpoint all" = perm_null(
+      function() fit_two_group(y, all_runs, length(runs_ud), length(runs_mf)),
+      "ours_female", top_ns[1], n_perm_labels, seed = 5),
+    "female, early females" = perm_null(
+      function() fit_two_group(y, all_runs, length(runs_ud), length(runs_ef)),
+      "ours_female", top_ns[1], n_perm_labels, seed = 6),
     "male, trend" = perm_null(
       function() fit_trend(y, all_runs, male_score),
       "ours_male", top_ns[1], n_perm_labels, seed = 3),
@@ -946,7 +1008,7 @@ datatable(perm_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 `r if (have_bulk) paste0("The smallest p-value reachable with ", n_perm_labels, " permutations is ", signif(1 / (1 + n_perm_labels), 2), ". A statistic at that value is reported as a floor rather than as its true p-value.") else ""`
 
-```{r, eval=have_bulk, fig.width=12, fig.height=7}
+```{r, eval=have_bulk, fig.width=15, fig.height=7}
 # the well measured pool only, since the unfiltered ranking is the one under
 # suspicion
 perm_long = dplyr::bind_rows(lapply(names(perm_res), function(ax) {
@@ -976,10 +1038,10 @@ p_perm = ggplot(perm_long, aes(x = rho_top)) +
 p_perm
 
 ggsave(p_perm, file = paste0(results_dir, "/bulk_permutation_null.png"),
-       width = 12, height = 7, dpi = 300)
+       width = 15, height = 7, dpi = 300)
 ```
 
-```{r, eval=have_bulk, fig.width=11, fig.height=5.5}
+```{r, eval=have_bulk, fig.width=11, fig.height=11}
 scatter_for = function(ours_col, yas_col, title, n_label = 15) {
   d = cmp %>%
     dplyr::select(Gene, ours = dplyr::all_of(ours_col),
@@ -999,13 +1061,16 @@ scatter_for = function(ours_col, yas_col, title, n_label = 15) {
     theme_bw()
 }
 
-p_male = scatter_for("ours_male", "male_end_logFC", "Male axis, endpoint-matched")
-p_fem  = scatter_for("ours_female", "fem_end_logFC", "Female axis, endpoint-matched")
+p_male  = scatter_for("ours_male",   "male_end_logFC",   "Male, endpoint-matched")
+p_fem   = scatter_for("ours_female", "fem_end_logFC",    "Female, stage-matched mid females")
+p_fem6  = scatter_for("ours_female", "fem_end6_logFC",   "Female, all mid females")
+p_femef = scatter_for("ours_female", "fem_end_ef_logFC", "Female, early females (larva vs larva)")
 
-p_male + p_fem
+p_scatter = (p_male + p_fem) / (p_fem6 + p_femef)
+p_scatter
 
-ggsave(p_male + p_fem, file = paste0(results_dir, "/bulk_agreement_scatter.png"),
-       width = 11, height = 5.5, dpi = 300)
+ggsave(p_scatter, file = paste0(results_dir, "/bulk_agreement_scatter.png"),
+       width = 11, height = 11, dpi = 300)
 ```
 
 # Composition
@@ -1154,21 +1219,27 @@ summary_tbl = dplyr::bind_rows(
                           paste0("genes at or above ", min_pb, " counts here")),
              answer = c(format(nrow(cmp), big.mark = ","),
                         format(sum(cmp$well_measured), big.mark = ","))),
-  axis_block("male, endpoint",   "male endpoint"),
-  axis_block("male, trend",      "male trend"),
-  axis_block("female, endpoint", "female endpoint"),
-  axis_block("female, trend",    "female trend"),
+  axis_block("male, endpoint",        "male endpoint"),
+  axis_block("male, trend",           "male trend"),
+  axis_block("female, endpoint",      "female endpoint, stage-matched"),
+  axis_block("female, endpoint all",  "female endpoint, all mid females"),
+  axis_block("female, early females", "female, early females"),
+  axis_block("female, trend",         "female trend"),
   data.frame(question = c("animals in the male endpoint",
                           "animals in the male trend",
-                          "animals in the female endpoint",
+                          "animals in the female endpoint, stage-matched",
+                          "animals in the female endpoint, all mid females",
+                          "animals in the early female contrast",
                           "animals in the female trend"),
              answer = as.character(c(length(runs_ud) + length(runs_mm),
                                      length(male_runs),
                                      length(runs_ud) + length(tf_match_runs),
+                                     length(runs_ud) + length(runs_mf),
+                                     length(runs_ud) + length(runs_ef),
                                      length(fem_runs)))))
 
 datatable(summary_tbl, rownames = FALSE,
-          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+          options = list(dom = "tp", ordering = FALSE, pageLength = 22))
 ```
 
 ## What this does not answer
