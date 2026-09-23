@@ -458,6 +458,8 @@ spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
 #
 # Sign agreement is scored genome-wide for the same reason. That rate, not 50%,
 # is the honest null for the top-gene sets, so both binomial tests are reported.
+# Both are one-sided, since the claim is that the datasets agree. Disagreement
+# shows up as a p-value near 1 rather than as a small one.
 agreement_for = function(ours_col, yas_col, axis) {
   rows = list()
   gw = spearman_ci(cmp[[ours_col]], cmp[[yas_col]])
@@ -470,8 +472,8 @@ agreement_for = function(ours_col, yas_col, axis) {
     axis = axis, set = "genome-wide", n = gw[["n"]],
     rho = gw[["rho"]], lo = gw[["lo"]], hi = gw[["hi"]],
     pct_same_sign = 100 * bg_rate,
-    binom_p_vs_50 = binom.test(sum(gw_agree), length(gw_agree),
-                               p = 0.5)$p.value,
+    binom_p_vs_50 = binom.test(sum(gw_agree), length(gw_agree), p = 0.5,
+                               alternative = "greater")$p.value,
     binom_p_vs_bg = NA_real_)
 
   # binom.test needs a probability strictly inside (0, 1)
@@ -487,8 +489,10 @@ agreement_for = function(ours_col, yas_col, axis) {
       axis = axis, set = paste0("top ", n), n = length(idx),
       rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]],
       pct_same_sign = 100 * mean(agree),
-      binom_p_vs_50 = binom.test(sum(agree), length(agree), p = 0.5)$p.value,
-      binom_p_vs_bg = binom.test(sum(agree), length(agree), p = bg_p)$p.value)
+      binom_p_vs_50 = binom.test(sum(agree), length(agree), p = 0.5,
+                                 alternative = "greater")$p.value,
+      binom_p_vs_bg = binom.test(sum(agree), length(agree), p = bg_p,
+                                 alternative = "greater")$p.value)
   }
   dplyr::bind_rows(rows)
 }
@@ -507,6 +511,43 @@ datatable(agreement %>% mutate(across(where(is.numeric), ~signif(., 3))),
 ```
 
 `r if (have_bulk) { a = agreement[agreement$axis == "male, endpoint", ]; gw = a$rho[a$set == "genome-wide"]; tp = a$rho[a$set == paste0("top ", top_ns[1])]; sg = a$pct_same_sign[a$set == paste0("top ", top_ns[1])]; paste0("On the male axis the genome-wide correlation is ", signif(gw, 3), ". Across our top ", top_ns[1], " stage genes it is ", signif(tp, 3), ", with ", signif(sg, 3), "% sign agreement. Both values belong in the write-up. The genome-wide value is the floor that the top-gene value is read against. The permutation below turns that reading into a p-value.") } else ""`
+
+## Reading the p-values
+
+Four p-values appear in this document. They test different nulls and they are
+not interchangeable.
+
+**`binom_p_vs_50`**, in the table above. Among the top genes, how many move the
+same direction in both datasets, tested against a coin flip. This is the weakest
+of the four. Fifty percent is the right null only if the two series share no
+global direction, and the genome-wide sign agreement rate in the same table
+shows whether they do. Where that rate is well above 50%, a small
+`binom_p_vs_50` means little.
+
+**`binom_p_vs_bg`**, in the table above. The same count, tested against the
+genome-wide agreement rate instead of against 50%. It asks whether our top
+stage genes agree more than genes in general do, which is the question the
+comparison is actually for. On the genome-wide row it is `NA`, since that row
+supplies the null.
+
+Both binomial tests treat genes as independent trials. Co-regulated genes move
+together, so the effective number of trials is smaller than the gene count and
+both p-values are optimistic. Neither should be quoted without the permutation
+beside it.
+
+**`p_perm`**, in the permutation section below. The fraction of random
+relabelings of the same 28 animals that agree with our genes at least as well as
+Yasmin's real stage contrast does. It assumes nothing about independence between
+genes, and it holds the gene-selection effect fixed. This is the number for the
+response letter.
+
+**`p_rand`**, in the composition section. Where the marker-gene correlation falls
+among correlations from random gene sets of the same size. It tests whether
+markers carry more of the agreement than an arbitrary set of that size, not
+whether agreement exists.
+
+All four are one-sided, in the direction of agreement. Disagreement between the
+datasets appears as a p-value near 1 rather than as a small one.
 
 ## A label permutation null
 
