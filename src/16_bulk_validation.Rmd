@@ -328,9 +328,8 @@ tested = rownames(y)
 `r if (have_bulk) paste0(format(length(tested), big.mark = ","), " genes pass filterByExpr in the Yasmin series and carry through to the comparison.") else ""`
 
 ```{r, eval=have_bulk}
-# Four contrasts: an endpoint-matched two-group test and an ordered trend on
-# each sex axis. The endpoint tests supply effect sizes for the correlation. The
-# trends supply per-gene significance for any gene named individually.
+# Two contrast shapes serve the whole document: a two-group test and an ordered
+# trend. Both return log fold changes, p-values and FDR per gene.
 run_two_group = function(dge, run_a, run_b, label) {
   sub = dge[, c(run_a, run_b)]
   grp = factor(c(rep("early", length(run_a)), rep("late", length(run_b))),
@@ -357,6 +356,21 @@ run_trend = function(dge, runs, score, label) {
     dplyr::rename_with(~paste0(label, "_", .x), -Gene)
 }
 
+# Spearman with a bootstrap CI. cor.test gives a p-value but no interval, and
+# the interval is the quantity worth reporting.
+spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
+  ok = is.finite(x) & is.finite(y)
+  x = x[ok]; y = y[ok]
+  r = suppressWarnings(cor(x, y, method = "spearman"))
+  set.seed(seed)
+  bs = replicate(n_boot, {
+    i = sample(length(x), replace = TRUE)
+    suppressWarnings(cor(x[i], y[i], method = "spearman"))
+  })
+  c(rho = r, lo = unname(quantile(bs, .025, na.rm = TRUE)),
+    hi = unname(quantile(bs, .975, na.rm = TRUE)), n = length(x))
+}
+
 g = sample_meta$group_textcounts
 runs_ud = sample_meta$run[g == "UD undifferentiated larvae"]
 runs_pm = sample_meta$run[g == "PM prospective males"]
@@ -364,6 +378,107 @@ runs_em = sample_meta$run[g == "EM early males"]
 runs_mm = sample_meta$run[g == "MM mid males"]
 runs_ef = sample_meta$run[g == "EF early females"]
 runs_mf = sample_meta$run[g == "MF mid females"]
+```
+
+## Homogeneity of the mid female group
+
+Yasmin group the mid females by oocyte state, meiotic prophase arrest, rather
+than by metamorphic stage. Their recorded life stages nonetheless span stage 1
+to post-metamorphosis. Whether that spread means anything for the gonad
+transcriptome decides two things: whether the female trend should order the
+animals within the group, and whether the female endpoint has to be restricted
+to the two animals matched to our transformer.
+
+If the six gonads are equivalent, ordering them adds somatic progression to a
+gonad contrast, and restricting the endpoint to two of them costs four animals
+for nothing.
+
+```{r, eval=have_bulk}
+mf_stage  = sample_meta$stage_score[match(runs_mf, sample_meta$run)]
+mf_logcpm = cpm(y[, runs_mf], log = TRUE, prior.count = 1)
+
+# PCA on the most variable genes within the group
+gene_var = apply(mf_logcpm, 1, var)
+top_var  = head(order(gene_var, decreasing = TRUE), 2000)
+mf_pca   = prcomp(t(mf_logcpm[top_var, ]), scale. = TRUE)
+pc_var   = 100 * mf_pca$sdev^2 / sum(mf_pca$sdev^2)
+
+mf_pca_tab = data.frame(
+  component      = paste0("PC", 1:3),
+  pct_variance   = pc_var[1:3],
+  rho_with_stage = vapply(1:3, function(k)
+    suppressWarnings(cor(mf_pca$x[, k], mf_stage, method = "spearman")),
+    numeric(1)))
+
+# the direct test: earliest against latest inside the group
+mf_early = runs_mf[mf_stage <= min(mf_stage)]
+mf_late  = runs_mf[mf_stage >= 7]
+
+# Does the axis inside the group point the same way as the developmental axis?
+#
+# within_mf is the latest animals in the group against the earliest. The
+# reference is larvae against mid females, which is a developmental difference
+# by construction. If the two agree gene by gene, the six animals are spread
+# along one progression and ordering them is justified. If they do not, the
+# within-group variation is some other axis and the group should stay a group.
+#
+# The first reference uses only the mid females left out of within_mf, so the
+# two statistics share no animals. The second uses all six and is better
+# powered, at the cost of sharing animals with within_mf, which induces some
+# correlation on its own.
+within_mf = run_two_group(y, mf_early, mf_late, "within_mf")
+mid_only  = setdiff(runs_mf, c(mf_early, mf_late))
+
+axis_all = run_two_group(y, runs_ud, runs_mf, "axis_all")
+have_disjoint = length(mid_only) >= 2
+if (have_disjoint)
+  axis_dis = run_two_group(y, runs_ud, mid_only, "axis_dis")
+
+homog_rows = list()
+s_all = spearman_ci(within_mf$within_mf_logFC, axis_all$axis_all_logFC)
+if (have_disjoint) {
+  s_dis = spearman_ci(within_mf$within_mf_logFC, axis_dis$axis_dis_logFC)
+  homog_rows[[1]] = data.frame(
+    reference = paste0("larvae vs the mid females left out of the within-group ",
+                       "test (n=", length(mid_only), "), no shared animals"),
+    rho = s_dis[["rho"]], lo = s_dis[["lo"]], hi = s_dis[["hi"]],
+    n = s_dis[["n"]])
+}
+homog_rows[[length(homog_rows) + 1]] = data.frame(
+  reference = paste0("larvae vs all mid females (n=", length(runs_mf),
+                     "), shares animals with the within-group test"),
+  rho = s_all[["rho"]], lo = s_all[["lo"]], hi = s_all[["hi"]], n = s_all[["n"]])
+
+homog_tab = dplyr::bind_rows(homog_rows)
+
+datatable(mf_pca_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+datatable(homog_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (have_bulk) { h = homog_tab[1, ]; paste0("The within-group axis correlates with the developmental axis at rho = ", signif(h$rho, 3), " (95% interval ", signif(h$lo, 3), " to ", signif(h$hi, 3), ", ", format(h$n, big.mark = ","), " genes). ", if (h$lo > 0.1) "The six animals are spread along the same axis that separates larvae from mid females, so ordering them within the group would be defensible." else if (h$hi < 0.1) "Whatever separates the animals inside the group is not the axis that separates larvae from mid females. Treat them as one group." else "The interval spans the point where this would be decided, so the question is open on these data.") } else ""`
+
+**What this does and does not settle.** A positive correlation means the within-group
+differences lie along the developmental progression, which is what would justify
+ordering the animals. A correlation near zero means they differ along some other
+axis, such as somatic metamorphosis or individual variation, and grouping them is
+right. The correlation cannot tell you which other axis it is.
+
+The within-group fit is 2 against 2 with two residual degrees of freedom, so its
+log fold changes are noisy. Noise attenuates the correlation toward zero, which
+makes a positive result meaningful and a null result weak. Treat a null as
+failure to find structure rather than as evidence of its absence.
+
+Read the magnitude, not only whether the interval clears zero. The interval comes
+from bootstrapping thousands of genes, so it is narrow enough that a correlation
+far too small to matter will still exclude zero. The verdict above uses 0.1 as
+the dividing line, which is a judgment rather than a standard.
+
+```{r, eval=have_bulk}
+# Four contrasts: an endpoint-matched two-group test and an ordered trend on
+# each sex axis. The endpoint tests supply effect sizes for the correlation. The
+# trends supply per-gene significance for any gene named individually.
 
 # male endpoint and male ordered trend over the four ordered male-axis groups
 male_end = run_two_group(y, runs_ud, runs_mm, "male_end")
@@ -376,10 +491,13 @@ male_trend = run_trend(y, male_runs, male_score, "male_trend")
 # female endpoint uses the two stage-matched mid females, not the whole group
 fem_end = run_two_group(y, runs_ud, tf_match_runs, "fem_end")
 
+# Group-level scores, matching the male trend. An earlier version spread the six
+# mid females over 2.17 to 3.0 by recorded metamorphic stage. Yasmin group them
+# by oocyte state rather than by metamorphosis, so that ordering asserted a
+# developmental axis inside a group defined as being at one point on it.
 fem_runs  = c(runs_ud, runs_ef, runs_mf)
 fem_score = c(rep(0, length(runs_ud)), rep(1, length(runs_ef)),
-              2 + rank(sample_meta$stage_score[match(runs_mf, sample_meta$run)],
-                       ties.method = "min") / length(runs_mf))
+              rep(2, length(runs_mf)))
 fem_trend = run_trend(y, fem_runs, fem_score, "fem_trend")
 
 yasmin_res = Reduce(function(a, b) dplyr::full_join(a, b, by = "Gene"),
@@ -525,21 +643,6 @@ datatable(top_counts %>% mutate(across(where(is.numeric), ~signif(., 3))),
 cmp = ours %>% dplyr::inner_join(yasmin_res, by = "Gene")
 
 top_ns = as.integer(trimws(strsplit(as.character(params$top_n_list), ",")[[1]]))
-
-# Spearman with a bootstrap CI. cor.test gives a p-value but no interval, and
-# the interval is the quantity worth reporting.
-spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
-  ok = is.finite(x) & is.finite(y)
-  x = x[ok]; y = y[ok]
-  r = suppressWarnings(cor(x, y, method = "spearman"))
-  set.seed(seed)
-  bs = replicate(n_boot, {
-    i = sample(length(x), replace = TRUE)
-    suppressWarnings(cor(x[i], y[i], method = "spearman"))
-  })
-  c(rho = r, lo = unname(quantile(bs, .025, na.rm = TRUE)),
-    hi = unname(quantile(bs, .975, na.rm = TRUE)), n = length(x))
-}
 
 # genome-wide, then restricted to our strongest stage genes. The genome-wide
 # value is a floor rather than a result. Two gonad series compared on fold
@@ -763,6 +866,7 @@ perm_sig  = list(n_perm  = n_perm_labels,
                  n_well  = sum(cmp$well_measured),
                  min_pb  = min_pb,
                  combos  = perm_combos,
+                 scores  = list(male = male_score, female = fem_score),
                  runs    = sort(sample_meta$run),
                  sizes   = c(length(runs_ud), length(runs_mm),
                              length(tf_match_runs), length(male_runs),
