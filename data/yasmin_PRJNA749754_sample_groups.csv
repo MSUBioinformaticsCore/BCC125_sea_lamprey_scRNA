@@ -1,0 +1,29 @@
+run,sample_name,sra_sex,sra_dev_stage,library_name,group_textcounts,group_suppT1labels,suppT1_id,suppT1_length_mm,suppT1_date,suppT1_life_stage,suppT1_link_basis
+SRR15275642,FLV_81G,female,larvae,F191,EF early females,EF early females,F_E1,81,Apr-18,Larval stage,"name encodes 81 mm, matches exactly"
+SRR15275633,FLV_95,female,larvae,F167,EF early females,EF early females,F_E2,95,Apr-18,Larval stage,"name encodes 95 mm, matches exactly"
+SRR15275646,M_M1a,male,metamorphosing stage 1,17-4,EM early males,EM early males,M_E1,132,Jul-17,Metamorphosing stage 1,"male stage 1; pairs with PM_4b, which the table appears to mislabel"
+SRR15275645,M_M1b,male,metamorphosing stage 1,17-3,EM early males,EM early males,PM_4b,118,Jul-17,Larval stage/Metamorphosing stage 1,male stage 1; PM_4b is listed under prospective males but staged stage 1
+SRR15275644,M_M3,male,metamorphosing stage 3,17-26,EM early males,EM early males,M_E2,129,Aug-17,Metamorphosing stage 3,"male stage 3, unique"
+SRR15275643,M_M4,male,metamorphosing stage 4,17-30,EM early males,EM early males,M_E3,114,Aug-17,Metamorphosing stage 4,"male stage 4, unique"
+SRR15275652,F_UMJa,female,upstream migrant,F21,LF late females,LF late females,F_L1,510,Jun-18,Late upstream migrant,female upstream migrant; a/b order not determined
+SRR15275651,F_UMJb,female,upstream migrant,F24,LF late females,LF late females,F_L2,550,Jun-18,Late upstream migrant,female upstream migrant; a/b order not determined
+SRR15275635,M_UMA,male,upstream migrant,Gb2-3,LM late males,LM late males,M_L1,385,Apr-18,Early upstream migrant,male upstream migrant; A/J order not determined
+SRR15275634,M_UMJ,male,upstream migrant,M19,LM late males,LM late males,M_L2,400,Jun-18,Late upstream migrant,male upstream migrant; A/J order not determined
+SRR15275627,F_JUV,female,post metamorphosing,17-75,MF mid females,MF mid females,F_M6,130,Oct-17,Post-metamorphosis,"female post-metamorphosis, unique"
+SRR15275632,F_M1a,female,metamorphosing stage 1,M21,MF mid females,MF mid females,F_M1,135,Aug-15,Metamorphosing stage 1,female stage 1; a/b order against F_M1/F_M2 not determined
+SRR15275631,F_M1b,female,metamorphosing stage 1,M18,MF mid females,MF mid females,F_M2,130,Aug-15,Metamorphosing stage 1,female stage 1; a/b order against F_M1/F_M2 not determined
+SRR15275630,F_M3,female,metamorphosing stage 3,16-24,MF mid females,MF mid females,F_M3,128,Jul-16,Metamorphosing stage 3,"female stage 3, unique"
+SRR15275629,F_M4,female,metamorphosing stage 4,17-32,MF mid females,MF mid females,F_M4,120,Aug-17,Metamorphosing stage 4,"female stage 4, unique"
+SRR15275628,F_M7,female,metamorphosing stage 7,M48,MF mid females,MF mid females,F_M5,129,Nov-15,Metamorphosing stage 7,"female stage 7, unique"
+SRR15275637,M_JUVa,male,post metamorphosing,F4,MM mid males,MM mid males,M_M3,130,Dec-17,Post-metamorphosis,male post-metamorphosis; a/b order not determined
+SRR15275636,M_JUVb,male,post metamorphosing,16-127,MM mid males,MM mid males,M_M4,114,Dec-16,Post-metamorphosis,male post-metamorphosis; a/b order not determined
+SRR15275641,M_M5,male,metamorphosing stage 5,17-35,MM mid males,EM early males,M_E4,126,Aug-17,Metamorphosing stage 5,"male stage 5, unique"
+SRR15275640,M_M6,male,metamorphosing stage 6,17-48,MM mid males,EM early males,M_E5,123,Aug-17,Metamorphosing stage 6,"male stage 6, unique"
+SRR15275639,M_M7a,male,metamorphosing stage 7,M46,MM mid males,MM mid males,M_M1,122,Nov-15,Metamorphosing stage 7,male stage 7; a/b order not determined
+SRR15275638,M_M7b,male,metamorphosing stage 7,M49,MM mid males,MM mid males,M_M2,133,Nov-15,Metamorphosing stage 7,male stage 7; a/b order not determined
+SRR15275650,LV_70,male,larvae,70-80-4,PM prospective males,PM prospective males,PM_1,74,Apr-18,Larval stage,"male larva; name says 70 mm, table says 74 mm"
+SRR15275649,LV_75,male,larvae,F135,PM prospective males,PM prospective males,PM_2,75,Apr-18,Larval stage,"name encodes 75 mm, matches exactly"
+SRR15275648,LV_82G,male,larvae,F207,PM prospective males,PM prospective males,PM_3,82,Jul-18,Larval stage,"name encodes 82 mm, matches exactly"
+SRR15275647,LV_99G,male,larvae,F227,PM prospective males,PM prospective males,PM_4,99,Jul-18,Larval stage,"name encodes 99 mm, matches exactly"
+SRR15275654,LV_57G,missing,larvae,LV-6H,UD undifferentiated larvae,UD undifferentiated larvae,L_UD1,57,Jul-16,Larval stage,"name encodes 57 mm, matches L_UD1 exactly; sex undetermined in both"
+SRR15275653,LV_60A,missing,larvae,60-70-5,UD undifferentiated larvae,UD undifferentiated larvae,L_UD2,66,Apr-18,Larval stage,"only remaining sex-undetermined larva; name says 60 mm, table says 66 mm"
