@@ -41,6 +41,10 @@ PROJECT_DIR="/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125
 RESULTS_DATE="${RESULTS_DATE:-20260813}"
 NFCORE_DIR="${NFCORE_DIR:-/mnt/research/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results/yasmin_nfcore}"
 MARKER_FILE="${MARKER_FILE:-canonical_markers_S1_only_2026-08-14.csv}"
+# Which group assignment to use. group_suppT1labels follows Supplementary
+# Table 1 and the main text's description of mid males; group_textcounts
+# reproduces the group sizes printed in the text. They differ for two males.
+GROUP_COL="${GROUP_COL:-group_suppT1labels}"
 N_PERM="${N_PERM:-200}"
 N_BOOT="${N_BOOT:-2000}"
 N_RAND="${N_RAND:-2000}"
@@ -126,6 +130,7 @@ Rscript -e "
                          results_date         = '${RESULTS_DATE}',
                          nfcore_dir           = '${NFCORE_DIR}',
                          marker_file          = '${MARKER_FILE}',
+                         group_column         = '${GROUP_COL}',
                          n_perm_labels        = ${N_PERM},
                          n_boot               = ${N_BOOT},
                          n_rand_sets          = ${N_RAND},
