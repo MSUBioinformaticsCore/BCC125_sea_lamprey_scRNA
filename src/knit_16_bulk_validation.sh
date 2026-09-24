@@ -105,6 +105,13 @@ MARKERS="${PROJECT_DIR}/data/${MARKER_FILE}"
 [[ -f "${MARKERS}" ]] || \
   echo "note: ${MARKERS} not found; the composition section will be skipped."
 
+GENOME_DIR="${GENOME_DIR:-/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus}"
+GAF="${GENOME_DIR}/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf"
+GONAMES="${GENOME_DIR}/GOs_names.txt"
+if [[ ! -f "${GAF}" || ! -f "${GONAMES}" ]]; then
+  echo "note: GO files not found under ${GENOME_DIR}; the GO section will be skipped."
+fi
+
 # fail before the knit rather than partway through
 Rscript -e "
   need = c('rmarkdown','tidyverse','SingleCellExperiment','edgeR','patchwork',
@@ -139,6 +146,7 @@ Rscript -e "
                          n_boot               = ${N_BOOT},
                          n_rand_sets          = ${N_RAND},
                          min_pseudobulk_count = ${MIN_PB},
+                         genome_dir           = '${GENOME_DIR}',
                          cores                = ${CORES}),
     envir         = new.env()
   )
