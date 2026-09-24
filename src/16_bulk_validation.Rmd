@@ -22,6 +22,7 @@ params:
     n_perm_labels: 200
     n_rand_sets: 2000
     min_pseudobulk_count: 10
+    cores: 1
 ---
 
 ```{r setup, include=FALSE}
@@ -250,25 +251,27 @@ transformers. The matches below use the
 per-animal records in Supplementary Table 1 rather than the group labels.
 
 ```{r, eval=have_bulk}
-# the two stage-matched female transformers, selected by recorded stage rather
-# than by group. Mid females span stage 1 to post-metamorphosis.
-tf_match_runs = sample_meta$run[
-  sample_meta$group_used == "MF mid females" &
-  sample_meta$stage_score >= 7]
+# The animals within each mid group that are staged like our transformers, kept
+# for the correspondence table. The endpoint contrasts use the whole group.
+stage_matched = function(lbl) sample_meta$sample_name[
+  sample_meta$group_used == lbl & sample_meta$stage_score >= 7]
 
-if (length(tf_match_runs) != 2)
-  stop("expected 2 stage-matched mid females at stage 7 or post-metamorphosis, ",
-       "found ", length(tf_match_runs),
-       ". Check suppT1_life_stage in the sample sheet.")
+len_range = function(lbl) {
+  L = sample_meta$suppT1_length_mm[sample_meta$group_used == lbl]
+  paste0(min(L), "-", max(L), " mm")
+}
 
 match_tab = tibble::tribble(
-  ~ours,             ~yasmin,                                          ~basis,
-  "larvae, 112 mm",  "undifferentiated larvae, 57-66 mm",              "both pre-differentiation by description; ours are sex-labile by our staging; the two series set the larval size boundary differently",
-  "TM, 131 mm",      "mid males, 114-133 mm, stage 5 to post-metamorphosis", "lab confirmed; lengths and stages agree",
-  "TF, 131 mm",      paste0(paste(sample_meta$sample_name[
-                                    match(tf_match_runs, sample_meta$run)],
-                                  collapse = ", "), ", 129-130 mm"),
-                                                                       "stage 7 and post-metamorphosis mid females; mirrors the male match")
+  ~ours,            ~yasmin,                                     ~basis,
+  "larvae, 112 mm", paste0("undifferentiated larvae, ",
+                           len_range("UD undifferentiated larvae")),
+  "both pre-differentiation by description; ours are sex-labile by our staging; the two series set the larval size boundary differently",
+  "TM, 131 mm",     paste0("all mid males, ", len_range("MM mid males")),
+  paste0("stage 7 and post-metamorphosis by the Supplementary Table 1 labels; closest staged: ",
+         paste(stage_matched("MM mid males"), collapse = ", ")),
+  "TF, 131 mm",     paste0("all mid females, ", len_range("MF mid females")),
+  paste0("group spans stage 1 to post-metamorphosis, used whole; closest staged: ",
+         paste(stage_matched("MF mid females"), collapse = ", ")))
 
 datatable(match_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
@@ -392,204 +395,93 @@ runs_ef = sample_meta$run[g == "EF early females"]
 runs_mf = sample_meta$run[g == "MF mid females"]
 ```
 
-## Homogeneity of the mid female group
-
-Yasmin group the mid females by oocyte state, meiotic prophase arrest, rather
-than by metamorphic stage. Their recorded life stages nonetheless span stage 1
-to post-metamorphosis. Whether that spread means anything for the gonad
-transcriptome decides two things: whether the female trend should order the
-animals within the group, and whether the female endpoint has to be restricted
-to the two animals matched to our transformer.
-
-If the six gonads are equivalent, ordering them adds somatic progression to a
-gonad contrast, and restricting the endpoint to two of them costs four animals
-for nothing.
-
 ```{r, eval=have_bulk}
-mf_stage  = sample_meta$stage_score[match(runs_mf, sample_meta$run)]
-mf_logcpm = cpm(y[, runs_mf], log = TRUE, prior.count = 1)
-
-# PCA on the most variable genes within the group
-gene_var = apply(mf_logcpm, 1, var)
-top_var  = head(order(gene_var, decreasing = TRUE), 2000)
-mf_pca   = prcomp(t(mf_logcpm[top_var, ]), scale. = TRUE)
-pc_var   = 100 * mf_pca$sdev^2 / sum(mf_pca$sdev^2)
-
-mf_pca_tab = data.frame(
-  component      = paste0("PC", 1:3),
-  pct_variance   = pc_var[1:3],
-  rho_with_stage = vapply(1:3, function(k)
-    suppressWarnings(cor(mf_pca$x[, k], mf_stage, method = "spearman")),
-    numeric(1)))
-
-# the direct test: earliest against latest inside the group
-mf_early = runs_mf[mf_stage <= min(mf_stage)]
-mf_late  = runs_mf[mf_stage >= 7]
-
-# Does the axis inside the group point the same way as the developmental axis?
+# Two endpoints and four trends.
 #
-# within_mf is the latest animals in the group against the earliest. The
-# reference is larvae against mid females, which is a developmental difference
-# by construction. If the two agree gene by gene, the six animals are spread
-# along one progression and ordering them is justified. If they do not, the
-# within-group variation is some other axis and the group should stay a group.
+# The endpoints are larvae against the whole mid group, one per sex, so the two
+# sexes are contrasted the same way and on the largest groups available.
 #
-# The first reference uses only the mid females left out of within_mf, so the
-# two statistics share no animals. The second uses all six and is better
-# powered, at the cost of sharing animals with within_mf, which induces some
-# correlation on its own.
-within_mf = run_two_group(y, mf_early, mf_late, "within_mf")
-mid_only  = setdiff(runs_mf, c(mf_early, mf_late))
+# The trends are scored two ways, both reported:
+#
+#   groups         - one integer per group, in developmental order
+#   groups + stage - the same integer plus a within-group offset from the
+#                    recorded metamorphic stage in Supplementary Table 1, scaled
+#                    to sit inside the gap to the next group so groups never
+#                    overlap
+#
+# The offset uses the finest developmental information the paper reports. It
+# changes nothing in the groups whose animals share a stage: undifferentiated
+# larvae, prospective males and early females are all recorded as larval, so
+# they stay flat. It orders early males (stages 1, 1, 3, 4, 5, 6), mid females
+# (1, 1, 3, 4, 7, 8) and, barely, mid males (7, 7, 8, 8).
+stage_offset = function(runs) {
+  st = sample_meta$stage_score[match(runs, sample_meta$run)]
+  (rank(st, ties.method = "min") - 1) / length(runs)
+}
 
-axis_all = run_two_group(y, runs_ud, runs_mf, "axis_all")
-have_disjoint = length(mid_only) >= 2
-if (have_disjoint)
-  axis_dis = run_two_group(y, runs_ud, mid_only, "axis_dis")
+make_score = function(group_runs, mode) {
+  unlist(lapply(seq_along(group_runs), function(i) {
+    runs = group_runs[[i]]
+    (i - 1) + if (mode == "stage") stage_offset(runs) else rep(0, length(runs))
+  }))
+}
 
-# Each row is one correlation between two per-gene log fold change vectors. The
-# first vector is the same in both rows. Naming both sides in the table, rather
-# than naming only the second, keeps the row readable on its own.
-within_label = paste0("late mid females (n=", length(mf_late),
-                      ") vs early mid females (n=", length(mf_early), ")")
-
-mk_row = function(s, dev_label, dev_runs) data.frame(
-  `within-group axis`  = within_label,
-  `developmental axis` = dev_label,
-  `shared animals`     = length(intersect(dev_runs, c(mf_early, mf_late))),
-  rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]], genes = s[["n"]],
-  check.names = FALSE)
-
-homog_rows = list()
-if (have_disjoint)
-  homog_rows[[1]] = mk_row(
-    spearman_ci(within_mf$within_mf_logFC, axis_dis$axis_dis_logFC),
-    paste0("larvae (n=", length(runs_ud), ") vs the other mid females (n=",
-           length(mid_only), ")"),
-    mid_only)
-
-homog_rows[[length(homog_rows) + 1]] = mk_row(
-  spearman_ci(within_mf$within_mf_logFC, axis_all$axis_all_logFC),
-  paste0("larvae (n=", length(runs_ud), ") vs all mid females (n=",
-         length(runs_mf), ")"),
-  runs_mf)
-
-homog_tab = dplyr::bind_rows(homog_rows)
-
-datatable(mf_pca_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
-Each row below is a single Spearman correlation between two per-gene log fold
-change vectors, over every tested gene. The **within-group axis** is the same in
-both rows: how each gene differs between the latest and earliest animals inside
-the mid female group. The **developmental axis** is larvae against mid females,
-computed two ways. A clearly positive rho means those are the same axis, so the
-six animals are spread along the larva-to-mid-female progression. A rho near
-zero means they differ along something else.
-
-The first row shares no animals between the two vectors. The second is better
-powered and reuses four, which creates some correlation on its own, so the two
-rows agreeing is part of the evidence.
-
-```{r, eval=have_bulk}
-datatable(homog_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
-          rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
-`r if (have_bulk) { h = homog_tab[1, ]; paste0("The within-group axis correlates with the developmental axis at rho = ", signif(h$rho, 3), " (95% interval ", signif(h$lo, 3), " to ", signif(h$hi, 3), ", ", format(h$genes, big.mark = ","), " genes). ", if (h$lo > 0.1) "The six animals are spread along the same axis that separates larvae from mid females, so ordering them within the group would be defensible." else if (h$hi < 0.1) "Whatever separates the animals inside the group is not the axis that separates larvae from mid females. Treat them as one group." else "The interval spans the point where this would be decided, so the question is open on these data.") } else ""`
-
-**What this does and does not settle.** A positive correlation means the within-group
-differences lie along the developmental progression, which is what would justify
-ordering the animals. A correlation near zero means they differ along some other
-axis, such as somatic metamorphosis or individual variation, and grouping them is
-right. The correlation cannot tell you which other axis it is.
-
-The within-group fit is 2 against 2 with two residual degrees of freedom, so its
-log fold changes are noisy. Noise attenuates the correlation toward zero, which
-makes a positive result meaningful and a null result weak. Treat a null as
-failure to find structure rather than as evidence of its absence.
-
-Read the magnitude, not only whether the interval clears zero. The interval comes
-from bootstrapping thousands of genes, so it is narrow enough that a correlation
-far too small to matter will still exclude zero. The verdict above uses 0.1 as
-the dividing line, which is a judgment rather than a standard.
-
-```{r, eval=have_bulk}
-# Four contrasts: an endpoint-matched two-group test and an ordered trend on
-# each sex axis. The endpoint tests supply effect sizes for the correlation. The
-# trends supply per-gene significance for any gene named individually.
-
-# male endpoint and male ordered trend over the four ordered male-axis groups
 male_end = run_two_group(y, runs_ud, runs_mm, "male_end")
+fem_end  = run_two_group(y, runs_ud, runs_mf, "fem_end")
 
-male_runs  = c(runs_ud, runs_pm, runs_em, runs_mm)
-male_score = c(rep(0, length(runs_ud)), rep(1, length(runs_pm)),
-               rep(2, length(runs_em)), rep(3, length(runs_mm)))
-male_trend = run_trend(y, male_runs, male_score, "male_trend")
+male_groups = list(runs_ud, runs_pm, runs_em, runs_mm)
+male_runs   = unlist(male_groups)
+male_grp_score = make_score(male_groups, "group")
+male_stg_score = make_score(male_groups, "stage")
+male_trend_grp = run_trend(y, male_runs, male_grp_score, "male_trend_grp")
+male_trend_stg = run_trend(y, male_runs, male_stg_score, "male_trend_stg")
 
-# Three female endpoints, reported side by side.
-#
-# fem_end is the pre-specified one: the two mid females staged like our TF, at
-# 129 and 130 mm against TF at 131 mm. It matches the animal.
-#
-# fem_end6 uses the whole mid female group. The homogeneity section above tests
-# the assumption behind the restriction, that an animal's metamorphic stage
-# predicts its gonad. Where it does not, the restriction costs four animals for
-# nothing and this is the better powered version of the same contrast.
-#
-# fem_end_ef is the counterpart the lab proposed. Both early females are
-# larval-stage animals at 81 and 95 mm, so this is larva against larva: the
-# onset of ovarian differentiation without metamorphosis. It is a different
-# transition from ours rather than a weaker match to it, which makes it a
-# control. Agreement here would place our female signal in the gonad rather
-# than in metamorphosis of the animal.
-fem_end     = run_two_group(y, runs_ud, tf_match_runs, "fem_end")
-fem_end6    = run_two_group(y, runs_ud, runs_mf, "fem_end6")
-fem_end_ef  = run_two_group(y, runs_ud, runs_ef, "fem_end_ef")
-
-# Group-level scores, matching the male trend. An earlier version spread the six
-# mid females over 2.17 to 3.0 by recorded metamorphic stage. Yasmin group them
-# by oocyte state rather than by metamorphosis, so that ordering asserted a
-# developmental axis inside a group defined as being at one point on it.
-fem_runs  = c(runs_ud, runs_ef, runs_mf)
-fem_score = c(rep(0, length(runs_ud)), rep(1, length(runs_ef)),
-              rep(2, length(runs_mf)))
-fem_trend = run_trend(y, fem_runs, fem_score, "fem_trend")
+fem_groups = list(runs_ud, runs_ef, runs_mf)
+fem_runs   = unlist(fem_groups)
+fem_grp_score = make_score(fem_groups, "group")
+fem_stg_score = make_score(fem_groups, "stage")
+fem_trend_grp = run_trend(y, fem_runs, fem_grp_score, "fem_trend_grp")
+fem_trend_stg = run_trend(y, fem_runs, fem_stg_score, "fem_trend_stg")
 
 yasmin_res = Reduce(function(a, b) dplyr::full_join(a, b, by = "Gene"),
-                    list(male_end, male_trend, fem_end, fem_end6, fem_end_ef,
-                         fem_trend))
+                    list(male_end, fem_end, male_trend_grp, male_trend_stg,
+                         fem_trend_grp, fem_trend_stg))
 ```
 
 ```{r, eval=have_bulk}
 contrast_tab = data.frame(
-  contrast = c("male endpoint", "male trend",
-               "female endpoint, stage-matched", "female endpoint, all mid females",
-               "female, early females", "female trend"),
-  design   = c(paste0("UD (n=", length(runs_ud), ") vs mid males (n=",
+  contrast = c("male endpoint", "female endpoint",
+               "male trend, groups", "male trend, groups + stage",
+               "female trend, groups", "female trend, groups + stage"),
+  design   = c(paste0("UD (n=", length(runs_ud), ") vs all mid males (n=",
                       length(runs_mm), ")"),
-               paste0("UD, PM, EM, MM ordered (n=", length(male_runs), ")"),
-               paste0("UD (n=", length(runs_ud), ") vs stage-matched mid females (n=",
-                      length(tf_match_runs), ")"),
                paste0("UD (n=", length(runs_ud), ") vs all mid females (n=",
                       length(runs_mf), ")"),
-               paste0("UD (n=", length(runs_ud), ") vs early females (n=",
-                      length(runs_ef), "), larva against larva"),
-               paste0("UD, EF, MF ordered (n=", length(fem_runs), ")")),
-  n_FDR_05 = c(sum(yasmin_res$male_end_FDR    < 0.05, na.rm = TRUE),
-               sum(yasmin_res$male_trend_FDR  < 0.05, na.rm = TRUE),
-               sum(yasmin_res$fem_end_FDR     < 0.05, na.rm = TRUE),
-               sum(yasmin_res$fem_end6_FDR    < 0.05, na.rm = TRUE),
-               sum(yasmin_res$fem_end_ef_FDR  < 0.05, na.rm = TRUE),
-               sum(yasmin_res$fem_trend_FDR   < 0.05, na.rm = TRUE)))
+               paste0("UD, PM, EM, MM ordered (n=", length(male_runs), ")"),
+               paste0("UD, PM, EM, MM ordered, animals ranked by stage within ",
+                      "group (n=", length(male_runs), ")"),
+               paste0("UD, EF, MF ordered (n=", length(fem_runs), ")"),
+               paste0("UD, EF, MF ordered, animals ranked by stage within ",
+                      "group (n=", length(fem_runs), ")")),
+  n_FDR_05 = c(sum(yasmin_res$male_end_FDR       < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_end_FDR        < 0.05, na.rm = TRUE),
+               sum(yasmin_res$male_trend_grp_FDR < 0.05, na.rm = TRUE),
+               sum(yasmin_res$male_trend_stg_FDR < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_trend_grp_FDR  < 0.05, na.rm = TRUE),
+               sum(yasmin_res$fem_trend_stg_FDR  < 0.05, na.rm = TRUE)))
 
 datatable(contrast_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-The endpoint contrasts have little power. The female one has the least, at 2
-against 2. The correlation below uses effect sizes alone. Noise in the Yasmin
-estimates pulls agreement toward zero, so low power makes that test
+The endpoints are the smaller designs, and both rest on the two undifferentiated
+larvae as the early side. The correlation below uses effect sizes alone. Noise in
+the Yasmin estimates pulls agreement toward zero, so low power makes that test
 conservative rather than invalid. Per-gene significance comes from the trends.
+
+Each trend is reported twice, scored by group alone and by group with the
+animals ranked by recorded metamorphic stage inside it. The two answer the same
+question with different assumptions about what the group labels leave out, and
+agreement between them is worth as much as either on its own.
 
 # Our stage effect
 
@@ -709,17 +601,18 @@ cmp = ours %>% dplyr::inner_join(yasmin_res, by = "Gene")
 
 top_ns = as.integer(trimws(strsplit(as.character(params$top_n_list), ",")[[1]]))
 
-# genome-wide, then restricted to our strongest stage genes. The genome-wide
-# value is a floor rather than a result. Two gonad series compared on fold
-# changes agree before any shared stage regulation is involved: both transitions
-# move cell composition the same way, library-size normalization pushes the rest
-# of the transcriptome down in both, and genes at the detection floor in the
-# larval samples can only move up. The top-gene value is read against that floor.
+# genome-wide, then restricted to our strongest stage genes.
 #
-# Sign agreement is scored genome-wide for the same reason. That rate, not 50%,
-# is the honest null for the top-gene sets, so both binomial tests are reported.
-# Both are one-sided, since the claim is that the datasets agree. Disagreement
-# shows up as a p-value near 1 rather than as a small one.
+# Relabelled contrasts drawn from the same 28 animals give a genome-wide
+# correlation centred at zero, so the genome-wide value is a result in its own
+# right rather than a baseline. What the two numbers compare is concentration:
+# whether agreement is stronger among the genes we nominate than among genes in
+# general. That is a statement about specificity.
+#
+# Sign agreement is scored genome-wide for the same purpose, and binom_p_vs_bg
+# tests the top-gene rate against it. Read that as the same specificity question
+# rather than as a null. Both binomial tests are one-sided, since the claim is
+# that the datasets agree; disagreement shows up as a p-value near 1.
 # rank_on picks which dataset selects the genes. "ours" is the original
 # direction. "yasmin" ranks on their side, where the contrast is replicated and
 # thousands of genes reach FDR 0.05, and asks only whether our four libraries
@@ -766,12 +659,12 @@ agreement_for = function(ours_col, yas_col, axis, keep, pool,
 }
 
 axis_cols = list(
-  "male, endpoint"        = c(ours = "ours_male",   yas = "male_end_logFC"),
-  "male, trend"           = c(ours = "ours_male",   yas = "male_trend_logFC"),
-  "female, endpoint"      = c(ours = "ours_female", yas = "fem_end_logFC"),
-  "female, endpoint all"  = c(ours = "ours_female", yas = "fem_end6_logFC"),
-  "female, early females" = c(ours = "ours_female", yas = "fem_end_ef_logFC"),
-  "female, trend"         = c(ours = "ours_female", yas = "fem_trend_logFC"))
+  "male, endpoint"               = c(ours = "ours_male",   yas = "male_end_logFC"),
+  "female, endpoint"             = c(ours = "ours_female", yas = "fem_end_logFC"),
+  "male, trend groups"           = c(ours = "ours_male",   yas = "male_trend_grp_logFC"),
+  "male, trend groups + stage"   = c(ours = "ours_male",   yas = "male_trend_stg_logFC"),
+  "female, trend groups"         = c(ours = "ours_female", yas = "fem_trend_grp_logFC"),
+  "female, trend groups + stage" = c(ours = "ours_female", yas = "fem_trend_stg_logFC"))
 
 gene_pools = list("all genes"     = rep(TRUE, nrow(cmp)),
                   "well measured" = cmp$well_measured)
@@ -798,7 +691,7 @@ reciprocal one: their contrast picks the genes and our four libraries only have
 to follow. The reciprocal direction is the better powered of the two, since the
 selection happens on the replicated side.
 
-`r if (have_bulk) { say = function(ax) { a = agreement[agreement$axis == ax & agreement$pool == "well measured", ]; ao = a[a$ranked_on == "ours", ]; ay = a[a$ranked_on == "yasmin", ]; paste0(ax, ": floor ", signif(ao$rho[ao$set == "genome-wide"], 3), ", our top ", top_ns[1], " ", signif(ao$rho[ao$set == paste0("top ", top_ns[1])], 3), ", their top ", top_ns[1], " ", signif(ay$rho[ay$set == paste0("top ", top_ns[1])], 3)) }; paste0("Spearman rho among well measured genes, for each contrast. ", paste(vapply(names(axis_cols), say, character(1)), collapse = ". "), ". The genome-wide value is the floor the top-gene values are read against, and the permutation below turns that reading into a p-value.") } else ""`
+`r if (have_bulk) { say = function(ax) { a = agreement[agreement$axis == ax & agreement$pool == "well measured", ]; ao = a[a$ranked_on == "ours", ]; ay = a[a$ranked_on == "yasmin", ]; paste0(ax, ": genome-wide ", signif(ao$rho[ao$set == "genome-wide"], 3), ", our top ", top_ns[1], " ", signif(ao$rho[ao$set == paste0("top ", top_ns[1])], 3), ", their top ", top_ns[1], " ", signif(ay$rho[ay$set == paste0("top ", top_ns[1])], 3)) }; paste0("Spearman rho among well measured genes, for each contrast. ", paste(vapply(names(axis_cols), say, character(1)), collapse = ". "), ". The gap between the genome-wide value and the top-gene values says whether agreement concentrates in the genes each side nominates. The permutation below says whether any of it exceeds chance.") } else ""`
 
 ## Reading the p-values
 
@@ -813,17 +706,20 @@ shows whether they do. Where that rate is well above 50%, a small
 `binom_p_vs_50` means little.
 
 **`binom_p_vs_bg`**, in the table above. The same count, tested against the
-genome-wide agreement rate instead of against 50%. It asks whether our top
-stage genes agree more than genes in general do, which is the question the
-comparison is actually for. On the genome-wide row it is `NA`, since that row
-supplies the null.
+genome-wide agreement rate instead of against 50%. It asks whether our top stage
+genes agree more than genes in general do. Read it as a question about
+concentration rather than about existence: the permutation centres genome-wide
+agreement at zero, so the genome-wide rate is not a baseline that has to be
+cleared before anything counts. On the genome-wide row it is `NA`, since that row
+is the comparator.
 
 Both binomial tests treat genes as independent trials. Co-regulated genes move
 together, so the effective number of trials is smaller than the gene count and
 both p-values are optimistic. Neither should be quoted without the permutation
 beside it.
 
-**`p_perm`**, in the permutation section below. The fraction of random
+**`p_perm`**, in the permutation section below, and the only one of the four
+that tests whether agreement exists at all. It is the fraction of random
 relabelings of the same 28 animals that agree at least as well as Yasmin's real
 stage contrast does. It assumes nothing about independence between genes, and it
 holds the gene-selection effect fixed. This is the number for the response
@@ -870,6 +766,7 @@ table on both sex axes.
 
 ```{r, eval=have_bulk}
 n_perm_labels = as.integer(params$n_perm_labels)
+perm_cores    = max(1L, as.integer(params$cores))
 
 # One set of refits serves every summary. The fit does not depend on the gene
 # pool or on which side ranks the genes, so each permutation is scored for all
@@ -882,47 +779,67 @@ perm_combos = expand.grid(pool = names(gene_pools),
                           rank_on = c("ours", "yasmin"),
                           stringsAsFactors = FALSE)
 
-# fit_one draws a random contrast of the requested shape and returns its log
-# fold changes. Both contrast shapes get a null, so the trends are tested on the
-# same terms as the endpoints.
-fit_two_group = function(dge, pool_runs, n_a, n_b) {
-  pick = sample(pool_runs, n_a + n_b)
-  try(run_two_group(dge, pick[seq_len(n_a)], pick[n_a + seq_len(n_b)], "perm"),
-      silent = TRUE)
-}
+# The draws are generated here, in one stream, rather than inside the workers,
+# so the result does not depend on how many cores are used. The stream is the
+# same one the earlier serial version consumed — one sample() call per
+# permutation, in order — so a cache written by that version stays valid.
+all_runs = sample_meta$run
 
-fit_trend = function(dge, pool_runs, score_vec) {
-  pick = sample(pool_runs, length(score_vec))
-  try(run_trend(dge, pick, score_vec, "perm"), silent = TRUE)
-}
-
-perm_null = function(fit_one, ours_col, top_n, n_perm, seed = 1) {
+draw_runs = function(n_draw, n_perm, seed) {
   set.seed(seed)
-  res = vector("list", n_perm)
-  for (i in seq_len(n_perm)) {
-    tab = fit_one()
-    if (inherits(tab, "try-error")) next
-    lfc_all = tab$perm_logFC[match(cmp$Gene, tab$Gene)]
+  replicate(n_perm, sample(all_runs, n_draw), simplify = FALSE)
+}
 
-    res[[i]] = dplyr::bind_rows(lapply(seq_len(nrow(perm_combos)), function(k) {
-      keep = gene_pools[[perm_combos$pool[k]]]
-      ov   = cmp[[ours_col]][keep]
-      lv   = lfc_all[keep]
-      idx  = if (perm_combos$rank_on[k] == "ours")
-               order(abs(ov), decreasing = TRUE)[seq_len(min(top_n, length(ov)))]
-             else
-               order(abs(lv), decreasing = TRUE)[seq_len(min(top_n, length(lv)))]
-      agree = sign(ov[idx]) == sign(lv[idx])
-      data.frame(
-        pool = perm_combos$pool[k], rank_on = perm_combos$rank_on[k],
-        rho_gw   = suppressWarnings(cor(ov, lv, method = "spearman",
-                                        use = "complete.obs")),
-        rho_top  = suppressWarnings(cor(ov[idx], lv[idx], method = "spearman",
-                                        use = "complete.obs")),
-        pct_sign = 100 * mean(agree, na.rm = TRUE))
-    }))
+# scoring for one permutation: every pool and ranking side from the one fit
+score_draw = function(lfc_all, ours_col, top_n) {
+  dplyr::bind_rows(lapply(seq_len(nrow(perm_combos)), function(k) {
+    keep = gene_pools[[perm_combos$pool[k]]]
+    ov   = cmp[[ours_col]][keep]
+    lv   = lfc_all[keep]
+    idx  = if (perm_combos$rank_on[k] == "ours")
+             order(abs(ov), decreasing = TRUE)[seq_len(min(top_n, length(ov)))]
+           else
+             order(abs(lv), decreasing = TRUE)[seq_len(min(top_n, length(lv)))]
+    agree = sign(ov[idx]) == sign(lv[idx])
+    data.frame(
+      pool = perm_combos$pool[k], rank_on = perm_combos$rank_on[k],
+      rho_gw   = suppressWarnings(cor(ov, lv, method = "spearman",
+                                      use = "complete.obs")),
+      rho_top  = suppressWarnings(cor(ov[idx], lv[idx], method = "spearman",
+                                      use = "complete.obs")),
+      pct_sign = 100 * mean(agree, na.rm = TRUE))
+  }))
+}
+
+# The fits are independent, so they fan out across cores. mclapply forks, which
+# is why the job script pins the BLAS threads to one: eight R processes each
+# spawning threads would oversubscribe the node.
+perm_null = function(draws, fit_draw, ours_col, top_n, cores = 1) {
+  work = function(d) {
+    tab = try(fit_draw(d), silent = TRUE)
+    if (inherits(tab, "try-error")) return(NULL)
+    score_draw(tab$perm_logFC[match(cmp$Gene, tab$Gene)], ours_col, top_n)
   }
-  dplyr::bind_rows(res)
+  res = if (cores > 1) parallel::mclapply(draws, work, mc.cores = cores)
+        else lapply(draws, work)
+  failed = vapply(res, function(x) is.null(x) || inherits(x, "try-error"),
+                  logical(1))
+  if (any(failed)) message(sum(failed), " of ", length(draws),
+                           " permutations failed to fit and are dropped")
+  dplyr::bind_rows(res[!failed])
+}
+
+two_group_perm = function(n_a, n_b, ours_col, seed) {
+  perm_null(draw_runs(n_a + n_b, n_perm_labels, seed),
+            function(d) run_two_group(y, d[seq_len(n_a)],
+                                      d[n_a + seq_len(n_b)], "perm"),
+            ours_col, top_ns[1], perm_cores)
+}
+
+trend_perm = function(score_vec, ours_col, seed) {
+  perm_null(draw_runs(length(score_vec), n_perm_labels, seed),
+            function(d) run_trend(y, d, score_vec, "perm"),
+            ours_col, top_ns[1], perm_cores)
 }
 
 # cached on a signature, since the permutation is the slow step in the document
@@ -933,11 +850,13 @@ perm_sig  = list(n_perm  = n_perm_labels,
                  n_well  = sum(cmp$well_measured),
                  min_pb  = min_pb,
                  combos  = perm_combos,
-                 scores  = list(male = male_score, female = fem_score),
+                 scores  = list(male_grp = male_grp_score,
+                                male_stg = male_stg_score,
+                                fem_grp  = fem_grp_score,
+                                fem_stg  = fem_stg_score),
                  runs    = sort(sample_meta$run),
                  sizes   = c(length(runs_ud), length(runs_mm),
-                             length(tf_match_runs), length(runs_mf),
-                             length(runs_ef), length(male_runs),
+                             length(runs_mf), length(male_runs),
                              length(fem_runs)),
                  shapes  = c("endpoints", "trends"))
 
@@ -946,27 +865,16 @@ cached = if (file.exists(perm_file)) readRDS(perm_file) else NULL
 if (!is.null(cached) && identical(cached$signature, perm_sig)) {
   perm_res = cached$perm_res
 } else {
-  all_runs = sample_meta$run
   perm_res = list(
-    "male, endpoint" = perm_null(
-      function() fit_two_group(y, all_runs, length(runs_ud), length(runs_mm)),
-      "ours_male", top_ns[1], n_perm_labels, seed = 1),
-    "female, endpoint" = perm_null(
-      function() fit_two_group(y, all_runs, length(runs_ud),
-                               length(tf_match_runs)),
-      "ours_female", top_ns[1], n_perm_labels, seed = 2),
-    "female, endpoint all" = perm_null(
-      function() fit_two_group(y, all_runs, length(runs_ud), length(runs_mf)),
-      "ours_female", top_ns[1], n_perm_labels, seed = 5),
-    "female, early females" = perm_null(
-      function() fit_two_group(y, all_runs, length(runs_ud), length(runs_ef)),
-      "ours_female", top_ns[1], n_perm_labels, seed = 6),
-    "male, trend" = perm_null(
-      function() fit_trend(y, all_runs, male_score),
-      "ours_male", top_ns[1], n_perm_labels, seed = 3),
-    "female, trend" = perm_null(
-      function() fit_trend(y, all_runs, fem_score),
-      "ours_female", top_ns[1], n_perm_labels, seed = 4))
+    "male, endpoint"   = two_group_perm(length(runs_ud), length(runs_mm),
+                                        "ours_male", 1),
+    "female, endpoint" = two_group_perm(length(runs_ud), length(runs_mf),
+                                        "ours_female", 2),
+    "male, trend groups"           = trend_perm(male_grp_score, "ours_male", 3),
+    "male, trend groups + stage"   = trend_perm(male_stg_score, "ours_male", 4),
+    "female, trend groups"         = trend_perm(fem_grp_score, "ours_female", 5),
+    "female, trend groups + stage" = trend_perm(fem_stg_score, "ours_female", 6))
+
   saveRDS(list(signature = perm_sig, perm_res = perm_res), file = perm_file)
 }
 ```
@@ -1073,12 +981,12 @@ scatter_for = function(ours_col, yas_col, title, n_label = 15) {
     theme_bw()
 }
 
-p_male  = scatter_for("ours_male",   "male_end_logFC",   "Male, endpoint-matched")
-p_fem   = scatter_for("ours_female", "fem_end_logFC",    "Female, stage-matched mid females")
-p_fem6  = scatter_for("ours_female", "fem_end6_logFC",   "Female, all mid females")
-p_femef = scatter_for("ours_female", "fem_end_ef_logFC", "Female, early females (larva vs larva)")
+p_male  = scatter_for("ours_male",   "male_end_logFC",       "Male endpoint")
+p_fem   = scatter_for("ours_female", "fem_end_logFC",        "Female endpoint")
+p_mtr   = scatter_for("ours_male",   "male_trend_stg_logFC", "Male trend, groups + stage")
+p_ftr   = scatter_for("ours_female", "fem_trend_stg_logFC",  "Female trend, groups + stage")
 
-p_scatter = (p_male + p_fem) / (p_fem6 + p_femef)
+p_scatter = (p_male + p_fem) / (p_mtr + p_ftr)
 p_scatter
 
 ggsave(p_scatter, file = paste0(results_dir, "/bulk_agreement_scatter.png"),
@@ -1181,9 +1089,26 @@ if (have_markers) {
 # Export
 
 ```{r, eval=have_bulk}
-out = cmp %>%
-  dplyr::select(Gene, ours_male, ours_female,
-                dplyr::starts_with("male_"), dplyr::starts_with("fem_"))
+# The Wang identifier, so the export can be read against the collaborators'
+# sheets and against the other documents, which all carry this column. The
+# table is written by 01 and is one row per NCBI gene id.
+gd_file = paste0(object_dir, "/gene_descritption.csv")
+have_gd = file.exists(gd_file)
+
+if (have_gd) {
+  wang_ids = read.csv(gd_file, stringsAsFactors = FALSE) %>%
+    dplyr::distinct(Gene, .keep_all = TRUE) %>%
+    dplyr::select(Gene, WangGeneID)
+
+  out = cmp %>%
+    dplyr::left_join(wang_ids, by = "Gene") %>%
+    dplyr::select(Gene, WangGeneID, ours_male, ours_female,
+                  dplyr::starts_with("male_"), dplyr::starts_with("fem_"))
+} else {
+  out = cmp %>%
+    dplyr::select(Gene, ours_male, ours_female,
+                  dplyr::starts_with("male_"), dplyr::starts_with("fem_"))
+}
 
 write.csv(out, file = paste0(results_dir, "/bulk_vs_pseudobulk_per_gene.csv"),
           row.names = FALSE)
@@ -1191,6 +1116,8 @@ write.csv(out, file = paste0(results_dir, "/bulk_vs_pseudobulk_per_gene.csv"),
 datatable(head(out %>% mutate(across(where(is.numeric), ~signif(., 3))), 100),
           rownames = FALSE, filter = "top")
 ```
+
+`r if (have_bulk && exists("have_gd")) { if (!have_gd) paste0("**WangGeneID is not shown.** ", gd_file, " was not found, so the export carries NCBI gene ids only.") else { n_na = sum(is.na(out$WangGeneID)); if (n_na > 0) paste0(format(n_na, big.mark = ","), " of ", format(nrow(out), big.mark = ","), " genes have no Wang identifier and are left blank.") else "Every gene in the export carries a Wang identifier." } } else ""`
 
 # Summary
 
@@ -1212,7 +1139,7 @@ axis_block = function(ax, label) {
   yas_row  = row_for(ax, top_set, "yasmin")
   gw_row   = row_for(ax, "genome-wide", "ours")
   data.frame(
-    question = paste0(label, c(", rho genome-wide (the floor)",
+    question = paste0(label, c(", rho genome-wide",
                                ", rho on our top genes",
                                ", permutation p, our ranking",
                                ", rho on Yasmin's top genes",
@@ -1231,23 +1158,19 @@ summary_tbl = dplyr::bind_rows(
                           paste0("genes at or above ", min_pb, " counts here")),
              answer = c(format(nrow(cmp), big.mark = ","),
                         format(sum(cmp$well_measured), big.mark = ","))),
-  axis_block("male, endpoint",        "male endpoint"),
-  axis_block("male, trend",           "male trend"),
-  axis_block("female, endpoint",      "female endpoint, stage-matched"),
-  axis_block("female, endpoint all",  "female endpoint, all mid females"),
-  axis_block("female, early females", "female, early females"),
-  axis_block("female, trend",         "female trend"),
+  axis_block("male, endpoint",               "male endpoint"),
+  axis_block("female, endpoint",             "female endpoint"),
+  axis_block("male, trend groups",           "male trend, groups"),
+  axis_block("male, trend groups + stage",   "male trend, groups + stage"),
+  axis_block("female, trend groups",         "female trend, groups"),
+  axis_block("female, trend groups + stage", "female trend, groups + stage"),
   data.frame(question = c("animals in the male endpoint",
-                          "animals in the male trend",
-                          "animals in the female endpoint, stage-matched",
-                          "animals in the female endpoint, all mid females",
-                          "animals in the early female contrast",
-                          "animals in the female trend"),
+                          "animals in the female endpoint",
+                          "animals in each male trend",
+                          "animals in each female trend"),
              answer = as.character(c(length(runs_ud) + length(runs_mm),
-                                     length(male_runs),
-                                     length(runs_ud) + length(tf_match_runs),
                                      length(runs_ud) + length(runs_mf),
-                                     length(runs_ud) + length(runs_ef),
+                                     length(male_runs),
                                      length(fem_runs)))))
 
 datatable(summary_tbl, rownames = FALSE,
@@ -1259,11 +1182,11 @@ datatable(summary_tbl, rownames = FALSE,
 Agreement shows the pattern reproduces in a series without our July-to-November
 batch. It does not separate stage from batch within our data.
 
-The female *endpoint* rests on two stage-matched animals, which is thin for
-naming individual genes. The female trend carries ten animals and detects more
-genes than the male endpoint does, so the female axis as a whole is not the
-weaker of the two. Read each contrast on its own size rather than treating one
-sex as primary.
+Both endpoints use the whole mid group, so neither is stage-matched to our
+transformers animal by animal. The mid male group is stage 7 and
+post-metamorphosis throughout; the mid female group spans stage 1 to
+post-metamorphosis, so its late endpoint is broader than ours. Read each
+contrast on its own size rather than treating one sex as primary.
 
 The larval endpoint is matched by stage description rather than by size. Our
 larvae are sex-labile by our own staging and larger than every larval animal in
