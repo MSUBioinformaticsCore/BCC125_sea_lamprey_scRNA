@@ -1,7 +1,7 @@
 #!/bin/bash --login
 #SBATCH --job-name=bulk_validation
 #SBATCH --nodes=1
-#SBATCH --cpus-per-task=1
+#SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --time=06:00:00
 #SBATCH --output=run/bulk_validation_%j.out
@@ -17,9 +17,12 @@
 #   - data/yasmin_PRJNA749754_sample_groups.csv, the per-animal records
 #   - data/<marker_file>, optional; the composition section skips without it
 #
-# Nothing here is parallel, so one core is right. The slow step is the label
-# permutation: six contrasts times N_PERM edgeR refits. At the default 200 that
-# is about 1,200 fits, roughly twenty minutes. It is cached in
+# The slow step is the label permutation: six contrasts times N_PERM edgeR
+# refits, about 1,200 fits at the default 200. Those fits run in parallel across
+# the allocated cores, so the wall time scales with cpus-per-task. The draws are
+# generated in one stream before the fits fan out, so the result is identical
+# whatever the core count. Everything else in the document is serial. It is
+# cached in
 # results/<date>_bulk_validation/Robjects/label_permutation_null.Rds and reused
 # on a rerun unless the gene set, the group sizes, the trend scores, the count
 # filter or N_PERM change.
@@ -49,6 +52,7 @@ N_PERM="${N_PERM:-200}"
 N_BOOT="${N_BOOT:-2000}"
 N_RAND="${N_RAND:-2000}"
 MIN_PB="${MIN_PB:-10}"
+CORES="${SLURM_CPUS_PER_TASK:-1}"
 OUT_DIR="${PROJECT_DIR}/html"
 
 mkdir -p "${PROJECT_DIR}/run" "${OUT_DIR}"
@@ -118,7 +122,7 @@ export MKL_NUM_THREADS=1
 echo "host:        $(hostname)"
 echo "started:     $(date)"
 echo "counts:      ${NFCORE_DIR}/${FOUND}"
-echo "permutations: ${N_PERM}"
+echo "permutations: ${N_PERM} on ${CORES} core(s)"
 
 Rscript -e "
   rmarkdown::render(
@@ -134,7 +138,8 @@ Rscript -e "
                          n_perm_labels        = ${N_PERM},
                          n_boot               = ${N_BOOT},
                          n_rand_sets          = ${N_RAND},
-                         min_pseudobulk_count = ${MIN_PB}),
+                         min_pseudobulk_count = ${MIN_PB},
+                         cores                = ${CORES}),
     envir         = new.env()
   )
 "
