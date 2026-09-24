@@ -16,6 +16,8 @@
 #   - results/<date>_no_doublets/all.sce.Rds, for the pseudobulk
 #   - data/yasmin_PRJNA749754_sample_groups.csv, the per-animal records
 #   - data/<marker_file>, optional; the composition section skips without it
+#   - results/<date>_atlas/cluster_marker_genes.csv, from 13, for the germ
+#     cell signature section; that section skips without it
 #
 # The slow step is the label permutation: six contrasts times N_PERM edgeR
 # refits, about 1,200 fits at the default 200. Those fits run in parallel across
@@ -104,6 +106,10 @@ esac
 MARKERS="${PROJECT_DIR}/data/${MARKER_FILE}"
 [[ -f "${MARKERS}" ]] || \
   echo "note: ${MARKERS} not found; the composition section will be skipped."
+
+CLMARKERS="${PROJECT_DIR}/results/${RESULTS_DATE}_atlas/cluster_marker_genes.csv"
+[[ -f "${CLMARKERS}" ]] || \
+  echo "note: ${CLMARKERS} not found; the germ signature section will be skipped."
 
 GENOME_DIR="${GENOME_DIR:-/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus}"
 GAF="${GENOME_DIR}/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf"

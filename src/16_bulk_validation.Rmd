@@ -23,6 +23,9 @@ params:
     n_rand_sets: 2000
     min_pseudobulk_count: 10
     go_pval: 0.01
+    germ_clusters: "5,12_transformer,15,16,17,18"
+    n_signature_genes: 100
+    n_perm_scores: 2000
     cores: 1
 ---
 
@@ -1298,7 +1301,177 @@ if (have_markers) {
 
 `r if (have_bulk && exists("rand_tab")) { n_hi = sum(rand_tab$p_rand < 0.05, na.rm = TRUE); paste0("Marker genes agree more than a random set of ", rand_tab$n_markers[1], " genes on ", n_hi, " of the ", nrow(rand_tab), " contrasts. ", if (n_hi >= 3) "The shared signal is partly compositional on most contrasts. Describe it as a shift in gonad composition together with a shift in expression." else if (n_hi == 0) "Agreement is not concentrated in marker genes on any contrast. Expression appears to change within cell types in both datasets." else "The contrasts disagree, so the compositional contribution is not resolved. Report the table rather than a verdict.") } else ""`
 
-# Export
+# Germ cell signatures in the bulk series
+
+If the larva-to-transformer change is the arrival and expansion of germ cells,
+then the germ clusters' signatures should rise along Yasmin's developmental
+ordering. This section scores every Yasmin sample for each germ cluster and
+regresses that score on the same stage covariate the trends use.
+
+**Read this as an interpretation of the agreement rather than as separate
+evidence for it.** The mature germ clusters are made almost entirely of cells
+from the TF and TM libraries, so those cell types are absent from the larval
+libraries. A gene specific to them therefore contributes to our
+larva-to-transformer difference in proportion to how specific it is, whatever the
+markers were derived against. Our top pseudobulk genes and the germ cluster
+markers overlap for that reason alone, and the overlap is reported below so the
+size of the shared evidence is visible rather than assumed.
+
+What the section adds is the distinction the composition section reaches for by
+inference: whether the shared signal is a change in which cells are present.
+Scores that move with stage answer that directly.
+
+```{r}
+cluster_marker_file = paste0(atlas_dir, "/cluster_marker_genes.csv")
+have_cl_markers     = have_bulk && file.exists(cluster_marker_file)
+```
+
+`r if (have_bulk && !have_cl_markers) paste0("**The germ signature section is skipped.** ", cluster_marker_file, " was not found. Knit 13_atlas_and_stage_correspondence.Rmd first.") else ""`
+
+```{r, eval=have_cl_markers}
+germ_clusters = trimws(strsplit(as.character(params$germ_clusters), ",")[[1]])
+n_sig         = as.integer(params$n_signature_genes)
+
+cl_markers = read.csv(cluster_marker_file, stringsAsFactors = FALSE)
+stopifnot(all(c("Gene", "cluster", "meanLogFC") %in% colnames(cl_markers)))
+
+cl_markers$cluster = as.character(cl_markers$cluster)
+missing_cl = setdiff(germ_clusters, unique(cl_markers$cluster))
+if (length(missing_cl) > 0)
+  stop("germ_clusters not present in ", cluster_marker_file, ": ",
+       paste(missing_cl, collapse = ", "), ". Clusters found: ",
+       paste(sort(unique(cl_markers$cluster)), collapse = ", "))
+
+germ_markers = cl_markers %>% dplyr::filter(cluster %in% germ_clusters)
+
+# the signature is the strongest markers that are also measurable in the bulk
+sig = germ_markers %>%
+  dplyr::filter(Gene %in% rownames(y)) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::arrange(dplyr::desc(meanLogFC), .by_group = TRUE) %>%
+  dplyr::slice_head(n = n_sig) %>%
+  dplyr::ungroup()
+
+sig_tab = germ_markers %>%
+  dplyr::count(cluster, name = "markers") %>%
+  dplyr::left_join(sig %>% dplyr::count(cluster, name = "in_signature"),
+                   by = "cluster") %>%
+  dplyr::mutate(in_signature = tidyr::replace_na(in_signature, 0L))
+
+datatable(sig_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (have_cl_markers) paste0("Signatures are the top ", n_sig, " markers per cluster by mean log fold change, kept only where the gene is measurable in the Yasmin series. A cluster with fewer usable markers than that contributes all of them.") else ""`
+
+## Overlap with our top genes
+
+```{r, eval=have_cl_markers}
+# How much of our top pseudobulk ranking is germ cluster markers? The baseline is
+# the share of germ markers among all genes in the pool, which is what a random
+# list of the same size would return.
+ov_pool  = cmp[cmp$well_measured, , drop = FALSE]
+germ_set = unique(germ_markers$Gene)
+baseline = mean(ov_pool$Gene %in% germ_set)
+
+overlap_tab = dplyr::bind_rows(lapply(c("ours_male", "ours_female"), function(cl)
+  dplyr::bind_rows(lapply(c("up", "down"), function(dir) {
+    idx  = top_dir(ov_pool[[cl]], dir)
+    frac = mean(ov_pool$Gene[idx] %in% germ_set)
+    data.frame(set = paste0(sub("ours_", "", cl), ", ", dir),
+               n_genes = length(idx),
+               pct_germ_markers = 100 * frac,
+               pct_expected = 100 * baseline,
+               fold = frac / baseline)
+  }))))
+
+datatable(overlap_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (have_cl_markers) { r = overlap_tab[overlap_tab$set == "male, up", ]; paste0(signif(r$pct_germ_markers, 3), "% of our top male up-regulated genes are germ cluster markers, against ", signif(r$pct_expected, 3), "% expected from a random list of that size, a ", signif(r$fold, 2), "-fold enrichment. The higher this is, the more the scores below restate the agreement already reported rather than adding to it.") } else ""`
+
+## Scores along the stage axis
+
+```{r, eval=have_cl_markers}
+# Each gene is standardised across the 28 samples first, so a signature score
+# averages comparable quantities rather than raw abundances.
+ylog    = cpm(y, log = TRUE, prior.count = 1)
+gene_sd = apply(ylog, 1, sd)
+zmat    = t(scale(t(ylog[gene_sd > 0, , drop = FALSE])))
+
+score_mat = vapply(split(sig$Gene, sig$cluster), function(gs) {
+  gs = intersect(gs, rownames(zmat))
+  colMeans(zmat[gs, , drop = FALSE], na.rm = TRUE)
+}, numeric(ncol(zmat)))
+rownames(score_mat) = colnames(zmat)
+
+score_long = as.data.frame(score_mat) %>%
+  tibble::rownames_to_column("run") %>%
+  tidyr::pivot_longer(-run, names_to = "cluster", values_to = "score") %>%
+  dplyr::left_join(sample_meta %>%
+                     dplyr::select(run, sample_name, group_used, stage_score),
+                   by = "run")
+
+write.csv(score_long, file = paste0(results_dir, "/germ_signature_scores.csv"),
+          row.names = FALSE)
+```
+
+```{r, eval=have_cl_markers}
+# Spearman of score against the stage covariate, with the covariate permuted
+# among the animals of that axis. The permutation space is ample here, unlike
+# the two-group contrasts, so the p-value has real resolution.
+n_perm_scores = as.integer(params$n_perm_scores)
+
+axis_defs_sig = list(male   = list(runs = male_runs, cov = male_score),
+                     female = list(runs = fem_runs,  cov = fem_score))
+
+sig_trend = dplyr::bind_rows(lapply(names(axis_defs_sig), function(ax) {
+  a = axis_defs_sig[[ax]]
+  dplyr::bind_rows(lapply(colnames(score_mat), function(cl) {
+    v   = score_mat[a$runs, cl]
+    obs = suppressWarnings(cor(v, a$cov, method = "spearman"))
+    set.seed(1)
+    null = replicate(n_perm_scores,
+                     suppressWarnings(cor(v, sample(a$cov), method = "spearman")))
+    data.frame(axis = ax, cluster = cl, rho = obs,
+               null_95th = unname(quantile(null, .95, na.rm = TRUE)),
+               p_perm = (1 + sum(null >= obs, na.rm = TRUE)) /
+                        (1 + sum(is.finite(null))))
+  }))
+}))
+
+write.csv(sig_trend, file = paste0(results_dir, "/germ_signature_trend.csv"),
+          row.names = FALSE)
+
+datatable(sig_trend %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", pageLength = 20))
+```
+
+```{r, eval=have_cl_markers, fig.width=12, fig.height=7}
+plot_dat = dplyr::bind_rows(lapply(names(axis_defs_sig), function(ax) {
+  a = axis_defs_sig[[ax]]
+  data.frame(run = a$runs, cov = a$cov, axis = ax,
+             stringsAsFactors = FALSE) %>%
+    dplyr::left_join(score_long, by = "run")
+}))
+
+p_sig = ggplot(plot_dat, aes(x = cov, y = score)) +
+  geom_smooth(method = "lm", se = FALSE, colour = "grey55", linewidth = .5) +
+  geom_point(aes(colour = group_used), size = 1.9) +
+  facet_grid(axis ~ cluster, scales = "free") +
+  labs(x = "stage covariate", y = "signature score", colour = NULL,
+       title = "Germ cluster signatures across the Yasmin series") +
+  theme_bw() + theme(legend.position = "bottom")
+
+p_sig
+
+ggsave(p_sig, file = paste0(results_dir, "/germ_signature_scores.png"),
+       width = 12, height = 7, dpi = 300)
+```
+
+`r if (have_cl_markers) { n_up = sum(sig_trend$p_perm < 0.05, na.rm = TRUE); paste0(n_up, " of ", nrow(sig_trend), " cluster-by-axis combinations rise with stage at p < 0.05. A signature that rises says the cells defining that cluster make up more of the gonad in Yasmin's later animals, which is the compositional reading of the agreement reported above.") } else ""`
+
+# Full gene table
 
 ```{r, eval=have_bulk}
 out = cmp %>%
