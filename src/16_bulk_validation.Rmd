@@ -16,6 +16,7 @@ params:
     genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
     nfcore_dir: /mnt/research/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results/yasmin_nfcore
     marker_file: canonical_markers_S1_only_2026-08-14.csv
+    group_column: group_suppT1labels
     top_n_list: "100,250,500"
     n_boot: 2000
     n_perm_labels: 200
@@ -220,8 +221,17 @@ stage_score = function(s) {
 sample_meta$stage_score = stage_score(sample_meta$suppT1_life_stage)
 stopifnot(!any(is.na(sample_meta$stage_score)))
 
+# Which group assignment to use. The sample sheet carries two, because the paper
+# and its Supplementary Table 1 split early from mid males differently: the text
+# and count tables cut at metamorphic stage 5, Supplementary Table 1 cuts at
+# stage 7. They disagree for M_M5 and M_M6 and agree everywhere else, so no
+# female group and no female result depends on this choice.
+group_col = as.character(params$group_column)
+stopifnot(group_col %in% colnames(sample_meta))
+sample_meta$group_used = sample_meta[[group_col]]
+
 series_tab = sample_meta %>%
-  dplyr::group_by(group_textcounts) %>%
+  dplyr::group_by(group_used) %>%
   dplyr::summarise(n = dplyr::n(),
                    length_mm = paste0(min(suppT1_length_mm), "-",
                                       max(suppT1_length_mm)),
@@ -230,6 +240,8 @@ series_tab = sample_meta %>%
 
 datatable(series_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
+
+`r if (have_bulk) paste0("Groups are taken from the **", group_col, "** column. ", if (group_col == "group_suppT1labels") "Supplementary Table 1 labels its own rows M_E1 to M_E5 and M_M1 to M_M4, putting metamorphic stages 1 to 6 in early males and stage 7 with post-metamorphosis in mid males. This matches how the main text describes mid males, \"metamorphosing stage 7 and immediately post-metamorphosis\". It does not reproduce the n of 4 early and 6 mid printed in the text, which the group_textcounts column does. Mid males here are the four animals at stage 7 or beyond, which is the same rule used to pick the stage-matched mid females, so the two sexes are selected alike." else "This column reproduces the group sizes printed in the main text by cutting early from mid males at metamorphic stage 5. Supplementary Table 1 labels those rows differently, cutting at stage 7, which is what group_suppT1labels holds.") else ""`
 
 ## Stage correspondence
 
@@ -241,7 +253,7 @@ per-animal records in Supplementary Table 1 rather than the group labels.
 # the two stage-matched female transformers, selected by recorded stage rather
 # than by group. Mid females span stage 1 to post-metamorphosis.
 tf_match_runs = sample_meta$run[
-  sample_meta$group_textcounts == "MF mid females" &
+  sample_meta$group_used == "MF mid females" &
   sample_meta$stage_score >= 7]
 
 if (length(tf_match_runs) != 2)
@@ -318,7 +330,7 @@ if (length(shared) < 0.5 * nrow(pseudobulk))
 
 ```{r, eval=have_bulk}
 y = DGEList(counts = yasmin_counts[shared, ], samples = sample_meta)
-keep = filterByExpr(y, group = sample_meta$group_textcounts)
+keep = filterByExpr(y, group = sample_meta$group_used)
 y = y[keep, , keep.lib.sizes = FALSE]
 y = calcNormFactors(y)
 
@@ -371,7 +383,7 @@ spearman_ci = function(x, y, n_boot = params$n_boot, seed = 1) {
     hi = unname(quantile(bs, .975, na.rm = TRUE)), n = length(x))
 }
 
-g = sample_meta$group_textcounts
+g = sample_meta$group_used
 runs_ud = sample_meta$run[g == "UD undifferentiated larvae"]
 runs_pm = sample_meta$run[g == "PM prospective males"]
 runs_em = sample_meta$run[g == "EM early males"]
