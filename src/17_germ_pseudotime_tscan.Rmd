@@ -35,10 +35,11 @@ params:
     prev_nodes_file: ""
     annotate_lineages: "all,male"
     node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
-    drop_annotations: "Migrating neural crest cells;Granulosa"
+    drop_annotations: "Migrating neural crest cells"
     min_map_jaccard: 0.25
     on_merge: "combine"
     min_library_cells: 50
+    downsample_check: TRUE
     fdr_cut: 0.01
     lfc_thresh: 1
     go_pval: 0.05
@@ -116,6 +117,15 @@ gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
 
 lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
              "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+```
+
+```{r}
+# Read here rather than at the point of use, because the checks on the annotated
+# run's nodes happen before the corrected space exists.
+tech       = technical_gene_ids(gene_description)
+mito_ids   = tech$mito
+ribo_ids   = tech$ribo
+tech_genes = tech$all
 ```
 
 ```{r}
@@ -341,7 +351,9 @@ somatic_scores = NULL
 somatic_bubble = NULL
 somatic_levels = character(0)
 
-if (length(drop_cells) > 0) {
+# runs whenever the annotated run is available, so the nodes can be examined in
+# her numbering whether or not any of them is being removed
+if (have_prev) {
   chk_list = lapply(all.sce, function(x) {
     keep = intersect(colnames(x), predrop_barcodes)
     if (length(keep) == 0) NULL else x[, keep]
@@ -392,6 +404,42 @@ if (length(drop_cells) > 0) {
             file = paste0(results_dir, "/somatic_check_set_scores.csv"),
             row.names = FALSE)
 
+  # Depth and technical content on the same nodes. Summed per library so the
+  # full counts matrix is never assembled, unlike the marker scoring above,
+  # which needs only the marker rows.
+  old_qc = dplyr::bind_rows(lapply(chk_list, function(x) {
+    ct = counts(x)
+    data.frame(barcode  = colnames(x),
+               total    = Matrix::colSums(ct),
+               detected = Matrix::colSums(ct > 0),
+               mito     = Matrix::colSums(ct[intersect(mito_ids, rownames(ct)), ,
+                                             drop = FALSE]),
+               ribo     = Matrix::colSums(ct[intersect(ribo_ids, rownames(ct)), ,
+                                             drop = FALSE]),
+               stringsAsFactors = FALSE)
+  })) %>%
+    dplyr::mutate(pct_mito = 100 * mito / total,
+                  pct_ribo = 100 * ribo / total,
+                  node     = prev_nodes$node[match(barcode, prev_nodes$barcode)]) %>%
+    dplyr::filter(!is.na(node)) %>%
+    dplyr::mutate(node = factor(node, levels = somatic_levels))
+
+  old_qc_tab = old_qc %>%
+    dplyr::group_by(node) %>%
+    dplyr::summarise(annotation      = unname(anno_map[as.character(node[1])]),
+                     removed         = as.character(node[1]) %in% chk_drop,
+                     n_cells         = dplyr::n(),
+                     median_total    = round(median(total)),
+                     median_detected = round(median(detected)),
+                     median_pct_mito = round(median(pct_mito), 1),
+                     median_pct_ribo = round(median(pct_ribo), 1),
+                     .groups = "drop") %>%
+    dplyr::arrange(node)
+
+  write.csv(old_qc_tab,
+            file = paste0(results_dir, "/annotated_run_depth_and_technical.csv"),
+            row.names = FALSE)
+
   somatic_bubble = marker_bubble_df(chk_lc, chk_node, all_sets)
   write.csv(somatic_bubble,
             file = paste0(results_dir, "/somatic_check_gene_expression.csv"),
@@ -402,9 +450,9 @@ if (length(drop_cells) > 0) {
 }
 ```
 
-`r if (length(drop_cells) == 0) "No cell is removed. There is nothing to check here." else ""`
+`r if (!have_prev) "prev_nodes_file is not set, so the annotated run's nodes cannot be examined here." else if (length(drop_cells) == 0) "No cell is removed. The nodes are still scored below, so the evidence is on the page either way." else ""`
 
-`r if (length(drop_cells) == 0) "" else if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found.** Only the ", dplyr::n_distinct(s1_sets$CellTypeMarkerSet), " sets in ", params$marker_file, " are scored here. If a node is being removed as a cell type that file was meant to cover, this check cannot speak to it.") else if (have_extra) paste0("Scored against ", dplyr::n_distinct(all_sets$CellTypeMarkerSet), " sets, of which ", paste(sort(setdiff(unique(all_sets$CellTypeMarkerSet), unique(s1_sets$CellTypeMarkerSet))), collapse = ", "), " come from ", extra_file, ".") else ""`
+`r if (!have_prev) "" else if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found.** Only the ", dplyr::n_distinct(s1_sets$CellTypeMarkerSet), " sets in ", params$marker_file, " are scored here. If a node is being removed as a cell type that file was meant to cover, this check cannot speak to it.") else if (have_extra) paste0("Scored against ", dplyr::n_distinct(all_sets$CellTypeMarkerSet), " sets, of which ", paste(sort(setdiff(unique(all_sets$CellTypeMarkerSet), unique(s1_sets$CellTypeMarkerSet))), collapse = ", "), " come from ", extra_file, ".") else ""`
 
 ```{r}
 if (!is.null(drop_cell_tab))
@@ -425,11 +473,75 @@ if (!is.null(somatic_bubble)) {
 }
 ```
 
+### Depth and technical content of the annotated nodes
+
+Markers say what a node expresses. They do not say whether it had the depth to
+express anything else. A node that is shallow, or that is largely mitochondrial,
+will look like whatever its few remaining transcripts happen to be.
+
+Mitochondrial and ribosomal genes are kept throughout this analysis. Their
+variation across gonad cell types is not separable from the biology. Reading them
+here is a description of the nodes, not a step toward removing them.
+
+Two patterns to tell apart. High percent mitochondrial with low counts and few
+genes detected is the damage signature, where cytoplasmic mRNA has leaked away
+and the organelle's transcripts remain. High percent mitochondrial at normal or
+high depth is more likely real mitochondrial mass, which oocytes do accumulate.
+
+```{r}
+if (exists("old_qc_tab"))
+  datatable(old_qc_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, fig.width=11, fig.height=8}
+if (exists("old_qc")) {
+  old_qc_long = old_qc %>%
+    tidyr::pivot_longer(c(total, detected, pct_mito, pct_ribo),
+                        names_to = "measure", values_to = "value") %>%
+    dplyr::mutate(measure = factor(measure,
+                    levels = c("total", "detected", "pct_mito", "pct_ribo"),
+                    labels = c("total counts", "genes detected",
+                               "percent mitochondrial", "percent ribosomal")),
+                  removed = as.character(node) %in% chk_drop)
+
+  p_old_qc = ggplot(old_qc_long, aes(x = node, y = value, fill = removed)) +
+    geom_violin(scale = "width", colour = NA) +
+    geom_boxplot(width = .18, outlier.size = .2, fill = "white") +
+    facet_wrap(~ measure, scales = "free_y", ncol = 2) +
+    scale_y_continuous(trans = "log1p") +
+    scale_fill_manual(values = c("FALSE" = "grey85", "TRUE" = "#f4a582")) +
+    theme_bw() +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = NULL, y = NULL, fill = "removed",
+         title = "Depth and technical content by node of the annotated run",
+         subtitle = "log1p scale")
+
+  print(p_old_qc)
+  ggsave(p_old_qc,
+         file = paste0(results_dir, "/annotated_run_depth_and_technical.png"),
+         width = 11, height = 8, dpi = 300)
+}
+```
+
+`r if (!exists("old_qc_tab")) "" else { d = old_qc_tab %>% dplyr::arrange(dplyr::desc(median_pct_mito)); s = old_qc_tab %>% dplyr::arrange(median_total); paste0("The most mitochondrial node is ", d$node[1], " at ", d$median_pct_mito[1], " percent, with a median of ", format(d$median_total[1], big.mark = ","), " counts. The shallowest is ", s$node[1], " at ", format(s$median_total[1], big.mark = ","), " counts, against ", format(max(old_qc_tab$median_total), big.mark = ","), " for the deepest. A node that tops both lists is the one to treat with suspicion.") }`
+
 # Corrected space
 
 Libraries contributing fewer than `r params$min_library_cells` cells are dropped.
 With more than one library left, the space is `fastMNN` output computed on these
 cells alone. With one library, it is PCA on that library.
+
+Mitochondrial and ribosomal genes are identified here, and they are kept. Their
+expression is not separable from cell state in a gonad series. Oocytes accumulate
+mitochondria and spermatids shed them, so a real mitochondrial gradient should
+run through this lineage in opposite directions by sex. Ribosome content tracks
+proliferation, which is a property of the early stages. Removing these genes
+would remove that signal along with whatever quality variation rides on it. They
+are measured instead, and the sections below report whether the clustering and
+the ordering follow them.
+
+
+`r paste0(format(length(mito_ids), big.mark = ","), " mitochondrial and ", format(length(ribo_ids), big.mark = ","), " ribosomal genes are identified from the annotation. They enter the highly variable set and every test here on the same footing as any other gene.")`
 
 ```{r}
 obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
@@ -826,41 +938,11 @@ if (!is.null(merge_tab))
 
 `r if (is.null(merge_tab)) "" else paste0("**", nrow(merge_tab), " annotated subcluster(s) have no counterpart in this clustering.** The clustering did not separate them from the subcluster that absorbed their cells. Both labels are kept on that node, joined with a slash. ", paste0(merge_tab$old, " (", merge_tab$annotation, ") went into ", merge_tab$absorbed_by, ", taking ", round(100 * merge_tab$kept_share), " percent of its cells there", collapse = "; "), ". The combined labels are worth confirming with whoever made the annotation.")`
 
-## Nodes dropped
-
 ```{r}
-drop_nodes = node_levels[node_anno %in% drop_anno]
-
-# A drop annotation naming a cell type this lineage does not have is normal.
-# The male lineage has no subclusters, so the female somatic labels never
-# appear there.
-missing_drop = setdiff(drop_anno, node_anno)
-
-dropped_anno = unname(node_anno[drop_nodes])
-
-if (length(drop_nodes) > 0) {
-  keep_cells  = !(node_chr %in% drop_nodes)
-  merged      = merged[, keep_cells]
-  combined    = combined[, keep_cells]
-  node_chr    = node_chr[keep_cells]
-  node_levels = node_levels[!(node_levels %in% drop_nodes)]
-  node_anno   = node_anno[node_levels]
-  node_label  = node_label[node_levels]
-}
-
 if (length(node_levels) < 2)
-  stop("fewer than two nodes remain after dropping ",
-       paste(drop_nodes, collapse = ", "), ".")
+  stop("fewer than two nodes: ", paste(node_levels, collapse = ", "),
+       ". TSCAN needs at least two to build a tree.")
 
-drop_tab = data.frame(node = drop_nodes, annotation = dropped_anno,
-                      stringsAsFactors = FALSE)
-```
-
-`r if (length(missing_drop) > 0) paste0("These drop_annotations name nothing in this lineage and were ignored: ", paste(missing_drop, collapse = ", "), ".") else ""`
-
-`r if (length(drop_nodes) == 0) "No node was dropped." else paste0("Dropped ", length(drop_nodes), " node(s) carrying the annotations named in drop_annotations: ", paste(paste0(drop_tab$node, " (", drop_tab$annotation, ")"), collapse = ", "), ". Their cells are removed from the tree and the ordering. They were present when the corrected space was built, so they still influenced the embedding.")`
-
-```{r}
 merged$node   = factor(node_chr, levels = node_levels)
 combined$node = merged$node
 
@@ -874,6 +956,160 @@ write.csv(node_tab, file = paste0(results_dir, "/node_composition.csv"),
 
 datatable(node_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
+
+## Depth and technical content
+
+Subclusters that differ by sequencing depth rather than by cell state show a
+characteristic pattern. The shallower group's markers are the abundant genes of
+the deeper one at lower magnitude, and housekeeping genes climb its marker list.
+This section measures depth directly so that reading does not rest on the marker
+lists alone.
+
+```{r}
+cnt = counts(combined)
+
+qc = data.frame(
+  barcode   = colnames(combined),
+  node      = as.character(merged$node),
+  total     = Matrix::colSums(cnt),
+  detected  = Matrix::colSums(cnt > 0),
+  pct_mito  = 100 * Matrix::colSums(cnt[intersect(mito_ids, rownames(cnt)), , drop = FALSE]) /
+                Matrix::colSums(cnt),
+  pct_ribo  = 100 * Matrix::colSums(cnt[intersect(ribo_ids, rownames(cnt)), , drop = FALSE]) /
+                Matrix::colSums(cnt),
+  stringsAsFactors = FALSE)
+
+qc_tab = qc %>%
+  dplyr::group_by(node) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   median_total    = round(median(total)),
+                   median_detected = round(median(detected)),
+                   median_pct_mito = round(median(pct_mito), 1),
+                   median_pct_ribo = round(median(pct_ribo), 1),
+                   .groups = "drop") %>%
+  dplyr::mutate(node = factor(node, levels = node_levels)) %>%
+  dplyr::arrange(node)
+
+write.csv(qc_tab, file = paste0(results_dir, "/node_depth_and_technical.csv"),
+          row.names = FALSE)
+
+datatable(qc_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, fig.width=11, fig.height=8}
+qc_long = qc %>%
+  dplyr::mutate(node = factor(node, levels = node_levels)) %>%
+  tidyr::pivot_longer(c(total, detected, pct_mito, pct_ribo),
+                      names_to = "measure", values_to = "value") %>%
+  dplyr::mutate(measure = factor(measure,
+                  levels = c("total", "detected", "pct_mito", "pct_ribo"),
+                  labels = c("total counts", "genes detected",
+                             "percent mitochondrial", "percent ribosomal")))
+
+p_qc = ggplot(qc_long, aes(x = node, y = value)) +
+  geom_violin(scale = "width", fill = "grey90", colour = NA) +
+  geom_boxplot(width = .18, outlier.size = .2) +
+  facet_wrap(~ measure, scales = "free_y", ncol = 2) +
+  scale_y_continuous(trans = "log1p") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, title = "Depth and technical content by node",
+       subtitle = "log1p scale")
+
+p_qc
+ggsave(p_qc, file = paste0(results_dir, "/node_depth_and_technical.png"),
+       width = 11, height = 8, dpi = 300)
+```
+
+```{r}
+# Does node membership track depth within a subclustered cluster? Kruskal-Wallis
+# on the subclusters alone, plus how far apart the extreme nodes sit.
+depth_tests = NULL
+if (have_split) {
+  depth_tests = dplyr::bind_rows(lapply(split_clusters, function(cl) {
+    sub = qc %>% dplyr::filter(grepl(paste0("^", cl, "\\."), node))
+    if (dplyr::n_distinct(sub$node) < 2) return(NULL)
+    med = sub %>% dplyr::group_by(node) %>%
+      dplyr::summarise(m = median(total), .groups = "drop")
+    dplyr::bind_rows(lapply(c("total", "detected", "pct_mito", "pct_ribo"), function(v) {
+      kt = kruskal.test(sub[[v]] ~ factor(sub$node))
+      data.frame(cluster = cl, measure = v,
+                 kruskal_p = signif(kt$p.value, 3),
+                 fold_range = signif(max(med$m) / min(med$m), 3),
+                 stringsAsFactors = FALSE)
+    }))
+  }))
+  if (!is.null(depth_tests)) {
+    depth_tests$fold_range[depth_tests$measure != "total"] = NA
+    write.csv(depth_tests,
+              file = paste0(results_dir, "/subcluster_depth_tests.csv"),
+              row.names = FALSE)
+    datatable(depth_tests, rownames = FALSE,
+              options = list(dom = "t", paging = FALSE))
+  }
+}
+```
+
+`r if (is.null(depth_tests)) "" else { tt = depth_tests %>% dplyr::filter(measure == "total"); paste0("Median total counts across the subclusters of cluster ", paste(tt$cluster, collapse = ", "), " differ by a factor of ", paste(tt$fold_range, collapse = ", "), " between the deepest and shallowest node (Kruskal-Wallis p ", paste(tt$kruskal_p, collapse = ", "), "). A large factor here is the signature of a depth split. It does not by itself prove one, because a real cell state can also carry more RNA.") }`
+
+The test that separates the two is below. Counts are downsampled to a common
+depth, the subclustering is repeated on the downsampled values, and the result is
+compared with the original. A split that survives downsampling is not a depth
+split. A split that dissolves is.
+
+```{r, eval=(have_split && isTRUE(params$downsample_check))}
+ds_res = NULL
+
+for (cl in split_clusters) {
+  cl_cells = colnames(merged)[merged$final_label == cl]
+  orig     = as.character(merged$node)[match(cl_cells, colnames(merged))]
+  if (dplyr::n_distinct(orig) < 2) next
+
+  sub_cnt = cnt[, cl_cells, drop = FALSE]
+  keep_g  = Matrix::rowSums(sub_cnt) > 0
+
+  set.seed(1)
+  ds = scuttle::downsampleMatrix(sub_cnt[keep_g, , drop = FALSE],
+                                 prop = min(Matrix::colSums(sub_cnt)) /
+                                        Matrix::colSums(sub_cnt))
+  ds_sce = SingleCellExperiment(assays = list(counts = ds))
+  ds_sce = scuttle::logNormCounts(ds_sce)
+
+  dec_ds = scran::modelGeneVar(ds_sce)
+  hvg_ds = scran::getTopHVGs(dec_ds, n = 2000)
+  set.seed(1)
+  ds_sce = scater::runPCA(ds_sce, subset_row = hvg_ds, ncomponents = 30,
+                          BSPARAM = BiocSingular::RandomParam())
+  set.seed(1)
+  snn_ds = buildSNNGraph(ds_sce, k = chosen_ks[cl], use.dimred = "PCA")
+  new_ds = igraph::cluster_louvain(snn_ds)$membership
+
+  ds_res[[cl]] = list(
+    tab = table(original = orig, downsampled = new_ds),
+    row = data.frame(cluster = cl,
+                     k = chosen_ks[cl],
+                     n_original = dplyr::n_distinct(orig),
+                     n_downsampled = dplyr::n_distinct(new_ds),
+                     ari = signif(mclust::adjustedRandIndex(orig, new_ds), 3),
+                     stringsAsFactors = FALSE))
+}
+
+if (!is.null(ds_res)) {
+  ds_tab = dplyr::bind_rows(lapply(ds_res, `[[`, "row"))
+  write.csv(ds_tab, file = paste0(results_dir, "/subcluster_downsample_check.csv"),
+            row.names = FALSE)
+  datatable(ds_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+}
+```
+
+```{r, eval=(have_split && isTRUE(params$downsample_check))}
+for (cl in names(ds_res)) {
+  cat("\ncluster", cl, "- original subclusters against the downsampled ones\n")
+  print(ds_res[[cl]]$tab)
+}
+```
+
+`r if (!isTRUE(params$downsample_check)) "The downsampling check is off. Set downsample_check to TRUE to run it." else ""`
 
 ## Node identity
 
@@ -1284,7 +1520,7 @@ gr_pseudo =
 ggsave(file = paste0(results_dir, "/tscan_node_graph.pdf"), width = 7, height = 7)
 ```
 
-## Library and stage
+## What the ordering tracks
 
 ```{r}
 lib_r2 = if (dplyr::n_distinct(pt_df$library) > 1)
@@ -1294,6 +1530,62 @@ stage_r2 = if (dplyr::n_distinct(pt_df$stage) > 1)
 ```
 
 `r if (is.na(lib_r2)) "All cells come from one library, so library cannot explain pseudotime." else paste0("Library explains ", round(100 * lib_r2, 1), "% of the variance in pseudotime", if (!is.na(stage_r2)) paste0(", and stage explains ", round(100 * stage_r2, 1), "%") else "", ".")`
+
+Mitochondrial and ribosomal genes are kept in this analysis, because their
+variation across these cell types is not separable from the biology. What can be
+checked is whether the ordering is explained by them. A trajectory that is mostly
+a depth or a mitochondrial gradient will show a high figure below whatever the
+marker genes say.
+
+```{r}
+# pt_df comes from colData(merged), in colnames(merged) order, and qc carries
+# its own barcodes. Joined rather than bound, so a reordering cannot go unseen.
+conf = pt_df
+conf$barcode = colnames(merged)
+conf = conf %>%
+  dplyr::left_join(qc %>% dplyr::select(-node), by = "barcode")
+stopifnot(!anyNA(conf$total))
+
+conf_tab = dplyr::bind_rows(lapply(
+  c("total", "detected", "pct_mito", "pct_ribo"), function(v) {
+    ok = is.finite(conf[[v]]) & is.finite(conf$pseudotime)
+    if (sum(ok) < 3) return(NULL)
+    x = if (v %in% c("total", "detected")) log10(conf[[v]][ok]) else conf[[v]][ok]
+    ct = suppressWarnings(cor.test(x, conf$pseudotime[ok], method = "spearman"))
+    data.frame(measure = v,
+               scale   = if (v %in% c("total", "detected")) "log10" else "percent",
+               r2      = signif(summary(lm(conf$pseudotime[ok] ~ x))$r.squared, 3),
+               spearman_rho = signif(unname(ct$estimate), 3),
+               p       = signif(ct$p.value, 3),
+               stringsAsFactors = FALSE)
+  }))
+
+write.csv(conf_tab, file = paste0(results_dir, "/pseudotime_vs_technical.csv"),
+          row.names = FALSE)
+
+datatable(conf_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, fig.width=11, fig.height=3.2}
+conf_long = conf %>%
+  tidyr::pivot_longer(c(total, detected, pct_mito, pct_ribo),
+                      names_to = "measure", values_to = "value")
+
+p_conf = ggplot(conf_long, aes(x = pseudotime, y = value)) +
+  geom_point(size = .2, alpha = .3) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = .6, colour = "#b2182b") +
+  facet_wrap(~ measure, scales = "free_y", nrow = 1) +
+  scale_y_continuous(trans = "log1p") +
+  theme_bw() +
+  labs(x = "pseudotime", y = NULL,
+       title = "Depth and technical content along the ordering")
+
+p_conf
+ggsave(p_conf, file = paste0(results_dir, "/pseudotime_vs_technical.png"),
+       width = 11, height = 3.2, dpi = 300)
+```
+
+`r if (!exists("conf_tab") || is.null(conf_tab) || nrow(conf_tab) == 0) "" else { top = conf_tab[which.max(conf_tab$r2), ]; paste0("The strongest of these is ", top$measure, ", explaining ", round(100 * top$r2, 1), " percent of the variance in pseudotime (Spearman rho ", top$spearman_rho, ", p ", top$p, "). Read this against the ", round(100 * lib_r2, 1), " percent explained by library. A figure of the same order as the biological signal means the ordering cannot be reported as developmental on this evidence alone.") }`
 
 # Pseudotime-associated genes
 
