@@ -440,15 +440,23 @@ if (have_prev && length(sub_nodes_now) > 0) {
   n_old = now %>% dplyr::filter(!is.na(old)) %>%
     dplyr::count(old, name = "n_old")
 
-  map_old = now
-  map_tab = pair %>%
+  # every old-new pair, kept so the check below can say where the cells of an
+  # unmatched old subcluster went
+  pair_j = pair %>%
     dplyr::left_join(n_new, by = "new") %>%
     dplyr::left_join(n_old, by = "old") %>%
-    dplyr::mutate(jaccard = shared / (n_new + n_old - shared)) %>%
+    dplyr::mutate(jaccard = shared / (n_new + n_old - shared))
+
+  map_tab = pair_j %>%
     dplyr::group_by(new) %>%
     dplyr::slice_max(jaccard, n = 1, with_ties = FALSE) %>%
     dplyr::ungroup() %>%
     dplyr::mutate(annotation = unname(anno_map[old]))
+
+  # written before the check below so a run that stops there still leaves the
+  # whole contingency table to read
+  write.csv(pair_j, file = paste0(results_dir, "/subcluster_annotation_map.csv"),
+            row.names = FALSE)
 
   datatable(map_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
             rownames = FALSE, options = list(dom = "t", paging = FALSE))
@@ -462,11 +470,23 @@ if (!is.null(map_tab)) {
   split = unique(map_tab$old[duplicated(map_tab$old)])
   unlab = map_tab$new[is.na(map_tab$annotation)]
   # an old subcluster that is present in the data but wins nothing is a merge,
-  # and its annotation would be lost without a word
-  old_present = setdiff(unique(map_old$old), NA)
+  # and its annotation would be lost without a word. Only cluster 5 is
+  # subclustered, so only old nodes with a subcluster number are at risk; whole
+  # clusters carry their annotation by name and never enter the mapping.
+  old_sub     = unique(pair_j$old[grepl("\\.", pair_j$old)])
   droppable   = names(anno_map)[anno_map %in% drop_anno]
-  merged_away = setdiff(intersect(old_present, names(anno_map)),
+  merged_away = setdiff(intersect(old_sub, names(anno_map)),
                         c(map_tab$old, droppable))
+
+  # where the cells of an unmatched old subcluster ended up
+  fate = function(olds) paste0(
+    pair_j %>%
+      dplyr::filter(old %in% olds) %>%
+      dplyr::arrange(old, dplyr::desc(shared)) %>%
+      dplyr::mutate(line = sprintf("      %s -> %s: %d of %d cells, jaccard %s",
+                                   old, new, shared, n_old, signif(jaccard, 2))) %>%
+      dplyr::pull(line),
+    collapse = "\n")
 
   if (length(weak) > 0 || length(split) > 0 || length(unlab) > 0 ||
       length(merged_away) > 0)
@@ -480,7 +500,8 @@ if (!is.null(map_tab)) {
          if (length(merged_away) > 0)
            paste0("  these old subclusters are the best match for nothing, so ",
                   "their annotation would be lost: ",
-                  paste(merged_away, collapse = ", "), "\n") else "",
+                  paste(merged_away, collapse = ", "), "\n",
+                  "    their cells are now in:\n", fate(merged_away), "\n") else "",
          if (length(unlab) > 0)
            paste0("  no annotation given for the matched old subcluster of: ",
                   paste(unlab, collapse = ", "), "\n") else "",
