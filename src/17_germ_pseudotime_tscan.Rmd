@@ -15,18 +15,27 @@ params:
     results_date: "20260813"
     lineage: "female"
     female_clusters: "5"
-    male_clusters: "12_transformer,15,16,17,18"
-    all_clusters: "5,12_transformer,15,16,17,18"
+    male_clusters: "15,16,17,18"
+    all_clusters: "5,15,16,17,18"
     female_root_rule: "min:Oocyte"
     male_root_rule: "max:Primordial germ cells"
     all_root_rule: "max:Primordial germ cells"
     min_detect_pct: 5
     marker_file: canonical_markers_S1_only_2026-08-14.csv
+    extra_marker_file: placeholder_neural_crest_markers.csv
     split_by_subcluster: "5"
     sub_k: 0
     sub_k_range: "5,10,15,20,25,30,40,50"
     sub_n_iterations: 10
     root_node: ""
+    female_root_node: ""
+    male_root_node: "Spermatogonia"
+    all_root_node: "Primordial germ cells (PGCs)"
+    prev_nodes_file: ""
+    annotate_lineages: "all,male"
+    node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
+    drop_annotations: "Migrating neural crest cells;Granulosa"
+    min_map_jaccard: 0.25
     min_library_cells: 50
     fdr_cut: 0.01
     lfc_thresh: 1
@@ -145,6 +154,55 @@ if (length(absent) > 0)
        ". Set the ", lineage, "_clusters parameter from the current labelling.")
 
 lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
+
+# Cells the collaborators annotated as somatic are removed here, before the
+# corrected space is built, so they influence neither the embedding nor the
+# subclustering. They are identified by barcode from the run that was
+# annotated, so this does not depend on the new subclustering agreeing with the
+# old numbering. Every lineage holding those cells loses them, including the
+# ones whose own subclusters are never annotated.
+parse_pairs = function(x) {
+  x = trimws(x)
+  if (!nzchar(x)) return(character(0))
+  kv = strsplit(trimws(strsplit(x, ";")[[1]]), "=")
+  setNames(vapply(kv, function(z) trimws(z[2]), character(1)),
+           vapply(kv, function(z) trimws(z[1]), character(1)))
+}
+
+anno_map  = parse_pairs(params$node_annotation)
+drop_anno = trimws(strsplit(as.character(params$drop_annotations), ";")[[1]])
+drop_anno = drop_anno[nzchar(drop_anno)]
+prev_file = as.character(params$prev_nodes_file)
+have_prev = nzchar(prev_file) && file.exists(prev_file)
+
+drop_cells = character(0)
+drop_cell_tab = NULL
+
+if (have_prev && length(drop_anno) > 0) {
+  prev_nodes = read.csv(prev_file, stringsAsFactors = FALSE)
+  stopifnot(all(c("barcode", "node") %in% colnames(prev_nodes)))
+  prev_nodes$node = as.character(prev_nodes$node)
+
+  old_drop_nodes = names(anno_map)[anno_map %in% drop_anno]
+  absent = setdiff(old_drop_nodes, unique(prev_nodes$node))
+  if (length(absent) > 0)
+    stop("nodes named by drop_annotations are not in ", prev_file, ": ",
+         paste(absent, collapse = ", "), ". Nodes there: ",
+         paste(sort(unique(prev_nodes$node)), collapse = ", "))
+
+  drop_cells = prev_nodes$barcode[prev_nodes$node %in% old_drop_nodes]
+
+  drop_cell_tab = prev_nodes %>%
+    dplyr::filter(node %in% old_drop_nodes) %>%
+    dplyr::count(node, name = "cells_annotated") %>%
+    dplyr::mutate(annotation = unname(anno_map[node]),
+                  cells_here = vapply(node, function(nd)
+                    sum(lineage_key$barcode %in%
+                          prev_nodes$barcode[prev_nodes$node == nd]),
+                    integer(1)))
+
+  lineage_key = lineage_key %>% dplyr::filter(!(barcode %in% drop_cells))
+}
 
 comp_tab = lineage_key %>%
   dplyr::count(final_label, cell_type, library, name = "n") %>%
@@ -312,6 +370,172 @@ if (length(node_levels) < 2)
   stop("only one node (", node_levels, "). TSCAN needs at least two; for a ",
        "single cluster, name it in split_by_subcluster.")
 
+```
+
+## Annotation
+
+The collaborators annotated the nodes of an earlier run of this document. The
+subclusters of cluster 5 are recomputed here, in a space that no longer contains
+12_transformer, so their numbers need not match the ones that were annotated.
+Nodes that are whole clusters keep their names and carry their annotation
+directly.
+
+Old and new subclusters are matched by the cells they hold. Both runs subcluster
+the same cluster 5 cells, so the match is a contingency table rather than a
+similarity measure. Each new subcluster takes the annotation of the old
+subcluster it shares the most cells with, and the Jaccard for that pair is
+reported. A pair below `min_map_jaccard`, a split or a merge stops the
+annotation rather than assigning a label the overlap does not support.
+
+```{r}
+parse_pairs = function(x) {
+  x = trimws(x)
+  if (!nzchar(x)) return(character(0))
+  kv = strsplit(trimws(strsplit(x, ";")[[1]]), "=")
+  setNames(vapply(kv, function(z) trimws(z[2]), character(1)),
+           vapply(kv, function(z) trimws(z[1]), character(1)))
+}
+
+# The annotation applies only to the lineages named in annotate_lineages. The
+# female run subclusters cluster 5 in its own space, so its numbering is its own
+# and the labels from another run do not carry over to it.
+anno_lineages = trimws(strsplit(as.character(params$annotate_lineages), ",")[[1]])
+do_anno       = lineage %in% anno_lineages
+
+anno_map      = if (do_anno) parse_pairs(params$node_annotation) else character(0)
+drop_anno     = if (do_anno)
+  trimws(strsplit(as.character(params$drop_annotations), ";")[[1]]) else character(0)
+drop_anno     = drop_anno[nzchar(drop_anno)]
+prev_file     = as.character(params$prev_nodes_file)
+have_prev     = do_anno && nzchar(prev_file) && file.exists(prev_file)
+sub_nodes_now = node_levels[grepl("\\.", node_levels)]
+```
+
+`r if (!do_anno) paste0("**No annotation is applied to the ", lineage, " lineage.** annotate_lineages is ", params$annotate_lineages, ".") else if (length(anno_map) == 0) "**No annotation is applied.** The node_annotation parameter is empty." else if (length(sub_nodes_now) > 0 && !have_prev) paste0("**Subclusters cannot be annotated.** ", if (nzchar(prev_file)) paste0(prev_file, " was not found.") else "prev_nodes_file is not set.", " Set it to the pseudotime_per_cell.csv of the run the annotation came from. Whole-cluster nodes are still annotated by name.") else ""`
+
+```{r}
+map_tab = NULL
+
+if (have_prev && length(sub_nodes_now) > 0) {
+  prev = read.csv(prev_file, stringsAsFactors = FALSE)
+  stopifnot(all(c("barcode", "node") %in% colnames(prev)))
+
+  old_node = setNames(as.character(prev$node), prev$barcode)
+  now      = data.frame(barcode = colnames(merged),
+                        new = as.character(node_chr),
+                        stringsAsFactors = FALSE)
+  now$old  = unname(old_node[now$barcode])
+
+  # only the subclustered cells can move between numbering schemes
+  pair = now %>%
+    dplyr::filter(new %in% sub_nodes_now, !is.na(old)) %>%
+    dplyr::count(new, old, name = "shared")
+
+  if (nrow(pair) == 0)
+    stop("no cells matched between the current nodes and ", prev_file,
+         ". Check that it is the pseudotime_per_cell.csv of the same lineage.")
+
+  n_new = now %>% dplyr::filter(new %in% sub_nodes_now) %>%
+    dplyr::count(new, name = "n_new")
+  n_old = now %>% dplyr::filter(!is.na(old)) %>%
+    dplyr::count(old, name = "n_old")
+
+  map_old = now
+  map_tab = pair %>%
+    dplyr::left_join(n_new, by = "new") %>%
+    dplyr::left_join(n_old, by = "old") %>%
+    dplyr::mutate(jaccard = shared / (n_new + n_old - shared)) %>%
+    dplyr::group_by(new) %>%
+    dplyr::slice_max(jaccard, n = 1, with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(annotation = unname(anno_map[old]))
+
+  datatable(map_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+            rownames = FALSE, options = list(dom = "t", paging = FALSE))
+}
+```
+
+```{r}
+if (!is.null(map_tab)) {
+  weak  = map_tab$new[map_tab$jaccard < params$min_map_jaccard]
+  # one old subcluster winning two new ones is a split
+  split = unique(map_tab$old[duplicated(map_tab$old)])
+  unlab = map_tab$new[is.na(map_tab$annotation)]
+  # an old subcluster that is present in the data but wins nothing is a merge,
+  # and its annotation would be lost without a word
+  old_present = setdiff(unique(map_old$old), NA)
+  droppable   = names(anno_map)[anno_map %in% drop_anno]
+  merged_away = setdiff(intersect(old_present, names(anno_map)),
+                        c(map_tab$old, droppable))
+
+  if (length(weak) > 0 || length(split) > 0 || length(unlab) > 0 ||
+      length(merged_away) > 0)
+    stop("the annotation cannot be carried over.\n",
+         if (length(weak) > 0)
+           paste0("  below min_map_jaccard (", params$min_map_jaccard, "): ",
+                  paste(weak, collapse = ", "), "\n") else "",
+         if (length(split) > 0)
+           paste0("  one old subcluster is the best match for more than one new ",
+                  "one: ", paste(split, collapse = ", "), "\n") else "",
+         if (length(merged_away) > 0)
+           paste0("  these old subclusters are the best match for nothing, so ",
+                  "their annotation would be lost: ",
+                  paste(merged_away, collapse = ", "), "\n") else "",
+         if (length(unlab) > 0)
+           paste0("  no annotation given for the matched old subcluster of: ",
+                  paste(unlab, collapse = ", "), "\n") else "",
+         "Read the table above and set node_annotation, or raise ",
+         "min_map_jaccard deliberately.")
+}
+
+# annotation for every node: subclusters through the mapping, whole clusters by
+# name, anything left over as itself
+node_anno = setNames(node_levels, node_levels)
+direct    = intersect(node_levels, names(anno_map))
+node_anno[direct] = anno_map[direct]
+if (!is.null(map_tab))
+  node_anno[map_tab$new] = map_tab$annotation
+
+node_label = ifelse(node_anno == node_levels, node_levels,
+                    paste0(node_levels, " ", node_anno))
+names(node_label) = node_levels
+```
+
+## Nodes dropped
+
+```{r}
+drop_nodes = node_levels[node_anno %in% drop_anno]
+
+# A drop annotation naming a cell type this lineage does not have is normal.
+# The male lineage has no subclusters, so the female somatic labels never
+# appear there.
+missing_drop = setdiff(drop_anno, node_anno)
+
+dropped_anno = unname(node_anno[drop_nodes])
+
+if (length(drop_nodes) > 0) {
+  keep_cells  = !(node_chr %in% drop_nodes)
+  merged      = merged[, keep_cells]
+  combined    = combined[, keep_cells]
+  node_chr    = node_chr[keep_cells]
+  node_levels = node_levels[!(node_levels %in% drop_nodes)]
+  node_anno   = node_anno[node_levels]
+  node_label  = node_label[node_levels]
+}
+
+if (length(node_levels) < 2)
+  stop("fewer than two nodes remain after dropping ",
+       paste(drop_nodes, collapse = ", "), ".")
+
+drop_tab = data.frame(node = drop_nodes, annotation = dropped_anno,
+                      stringsAsFactors = FALSE)
+```
+
+`r if (length(missing_drop) > 0) paste0("These drop_annotations name nothing in this lineage and were ignored: ", paste(missing_drop, collapse = ", "), ".") else ""`
+
+`r if (length(drop_nodes) == 0) "No node was dropped." else paste0("Dropped ", length(drop_nodes), " node(s) carrying the annotations named in drop_annotations: ", paste(paste0(drop_tab$node, " (", drop_tab$annotation, ")"), collapse = ", "), ". Their cells are removed from the tree and the ordering. They were present when the corrected space was built, so they still influenced the embedding.")`
+
+```{r}
 merged$node   = factor(node_chr, levels = node_levels)
 combined$node = merged$node
 
@@ -324,6 +548,88 @@ write.csv(node_tab, file = paste0(results_dir, "/node_composition.csv"),
           row.names = FALSE)
 
 datatable(node_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## Node identity
+
+Every node is scored against **all** the marker sets available, somatic ones
+included, rather than only the germ sets the root rule uses. This is the evidence
+behind calling a subcluster somatic. A subcluster scoring high on a somatic set
+and low on every germ set is not a germ cell state, and the table below is what
+supports excluding it rather than the judgment alone.
+
+`extra_marker_file` adds sets that the collaborators' sheet does not carry. It is
+read the same way and is marked separately in the output, so a placeholder set
+cannot be mistaken for a curated one.
+
+```{r}
+s1_sets = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
+                   stringsAsFactors = FALSE) %>%
+  dplyr::mutate(loc_id = trimws(loc_id), origin = "S1 sheet")
+
+extra_file  = as.character(params$extra_marker_file)
+extra_path  = paste0(params$project_dir, "/data/", extra_file)
+have_extra  = nzchar(extra_file) && file.exists(extra_path)
+
+all_sets = if (have_extra) {
+  dplyr::bind_rows(s1_sets,
+                   read.csv(extra_path, stringsAsFactors = FALSE) %>%
+                     dplyr::mutate(loc_id = trimws(loc_id),
+                                   origin = "extra"))
+} else s1_sets
+
+id_genes = all_sets %>%
+  dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id) %>%
+  dplyr::filter(gene %in% rownames(combined)) %>%
+  dplyr::distinct()
+
+set_origin = all_sets %>%
+  dplyr::distinct(CellTypeMarkerSet, origin) %>%
+  dplyr::group_by(CellTypeMarkerSet) %>%
+  dplyr::summarise(origin = paste(sort(unique(origin)), collapse = ", "),
+                   .groups = "drop")
+
+id_scores = score_marker_sets(combined, merged$node, id_genes) %>%
+  dplyr::rename(node = group)
+
+id_table = id_scores %>%
+  dplyr::left_join(set_origin, by = c("set" = "CellTypeMarkerSet")) %>%
+  dplyr::mutate(node = factor(node, levels = node_levels),
+                mean_logexpr = signif(mean_logexpr, 3),
+                pct_detected = round(pct_detected, 1)) %>%
+  dplyr::arrange(node, dplyr::desc(mean_logexpr)) %>%
+  dplyr::select(node, set, origin, n_genes, n_cells, mean_logexpr,
+                pct_detected)
+
+write.csv(id_table, file = paste0(results_dir, "/node_identity_scores.csv"),
+          row.names = FALSE)
+
+datatable(id_table, rownames = FALSE, filter = "top",
+          options = list(pageLength = 20))
+```
+
+`r if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found**, so only the sets in ", params$marker_file, " are scored.") else ""`
+
+`r paste0(dplyr::n_distinct(id_genes$set), " marker sets are scored, covering ", format(dplyr::n_distinct(id_genes$gene), big.mark = ","), " genes present in this lineage.", if (have_extra) paste0(" Sets from ", extra_file, " are marked 'extra' in the origin column and are placeholders until the curated list arrives.") else "")`
+
+```{r, fig.width=11, fig.height=6}
+id_heat = id_scores %>%
+  dplyr::mutate(node = factor(node, levels = node_levels))
+
+p_id = ggplot(id_heat, aes(x = node, y = set, fill = mean_logexpr)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = round(pct_detected)), size = 2.4, colour = "grey20") +
+  scale_fill_gradient(low = "white", high = "#b2182b") +
+  labs(x = NULL, y = NULL, fill = "mean log expression",
+       title = "Marker set scores by node",
+       subtitle = "numbers are the percent of cells detecting the set") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p_id
+
+ggsave(p_id, file = paste0(results_dir, "/node_identity_scores.png"),
+       width = 11, height = 6, dpi = 300)
 ```
 
 ## Root
@@ -372,8 +678,29 @@ root_pct  = NA_real_
 weak_root = FALSE
 n_tied    = 1L
 
-if (nzchar(params$root_node)) {
-  root = as.character(params$root_node)
+# The root may be given as a node name or as one of the annotations, so it can
+# be specified without knowing what number a subcluster came out as.
+root_req = as.character(params$root_node)
+if (!nzchar(root_req))
+  root_req = as.character(switch(lineage,
+                                 female = params$female_root_node,
+                                 male   = params$male_root_node,
+                                 all    = params$all_root_node))
+
+if (nzchar(root_req)) {
+  root = if (root_req %in% node_levels) {
+    root_req
+  } else if (root_req %in% node_anno) {
+    hit = node_levels[node_anno == root_req]
+    if (length(hit) > 1)
+      stop("the root annotation '", root_req, "' matches more than one node: ",
+           paste(hit, collapse = ", "))
+    hit
+  } else {
+    stop("root '", root_req, "' is neither a node nor an annotation. Nodes: ",
+         paste(node_levels, collapse = ", "), ". Annotations: ",
+         paste(sort(unique(node_anno)), collapse = ", "))
+  }
 } else {
   rule_parts = regmatches(root_rule, regexec("^(max|min):(.+)$", root_rule))[[1]]
   if (length(rule_parts) != 3)
@@ -407,7 +734,7 @@ datatable(set_table, rownames = FALSE,
           options = list(dom = "t", paging = FALSE, scrollX = TRUE))
 ```
 
-`r paste0("The ordering is rooted at node **", root, "**", if (length(root_type) == 1) paste0(" (", root_type, ")") else "", if (nzchar(params$root_node)) ", set by the root_node parameter." else paste0(", the node with the ", if (rule_dir == "max") "highest" else "lowest", " mean expression of the ", rule_set, " set (", lineage, "_root_rule = ", root_rule, ")."), " The root is an assumption: rooting the same tree elsewhere gives a different ordering.")`
+`r paste0("The ordering is rooted at node **", node_label[root], "**", if (nzchar(root_req)) paste0(", set by the parameter as '", root_req, "'.") else paste0(", the node with the ", if (rule_dir == "max") "highest" else "lowest", " mean expression of the ", rule_set, " set (", lineage, "_root_rule = ", root_rule, ")."), " The root is an assumption. Rooting the same tree elsewhere gives a different ordering.")`
 
 `r if (!is.na(rule_set)) paste0("The ", rule_set, " set chose the root, so its genes rise or fall along pseudotime partly by construction. Do not read their trend as a result.") else ""`
 
