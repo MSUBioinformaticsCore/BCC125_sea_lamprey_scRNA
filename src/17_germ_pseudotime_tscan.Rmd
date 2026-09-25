@@ -13,6 +13,7 @@ params:
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
     results_date: "20260813"
+    atlas_suffix: ""
     lineage: "female"
     female_clusters: "5"
     male_clusters: "15,16,17,18"
@@ -31,7 +32,7 @@ params:
     root_node: ""
     female_root_node: ""
     male_root_node: "Spermatogonia"
-    all_root_node: "Primordial germ cells (PGCs)"
+    all_root_node: ""
     prev_nodes_file: ""
     annotate_lineages: "all,male"
     node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
@@ -99,10 +100,11 @@ clusters = clusters[nzchar(clusters)]
 
 object_dir      = paste0(params$project_dir, "/results/", params$results_date,
                          "_no_doublets")
+# atlas_suffix picks which atlas to read. "" is 13, "_no_technical_genes" is 13b.
 atlas_dir       = paste0(params$project_dir, "/results/", params$results_date,
-                         "_atlas")
+                         "_atlas", params$atlas_suffix)
 results_dir     = paste0(params$project_dir, "/results/", params$results_date,
-                         "_pseudotime_tscan_", lineage)
+                         "_pseudotime_tscan_", lineage, params$atlas_suffix)
 Robject_out_dir = paste0(results_dir, "/Robjects")
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 
@@ -125,9 +127,26 @@ lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
 # run's nodes happen before the corrected space exists.
 tech       = technical_gene_ids(gene_description)
 mito_ids   = tech$mito
+rrna_ids   = tech$rrna
 ribo_ids   = tech$ribo
 tech_genes = tech$all
+
+# The pipeline computed subsets_Mito_percent before the cells were filtered on
+# it, so that is the number the filtering was applied to and the one to report.
+# Recomputing it here from the annotation would be a second, unvalidated
+# definition of the same quantity.
+mito_src = try(dplyr::bind_rows(lapply(all.sce, function(x) {
+  cd = as.data.frame(colData(x))
+  if (!"subsets_Mito_percent" %in% colnames(cd)) return(NULL)
+  data.frame(barcode = colnames(x), pct_mito = cd$subsets_Mito_percent,
+             stringsAsFactors = FALSE)
+})), silent = TRUE)
+
+have_mito_src = !inherits(mito_src, "try-error") && is.data.frame(mito_src) &&
+                nrow(mito_src) > 0
 ```
+
+`r paste0(format(length(mito_ids), big.mark = ","), " mitochondrially encoded genes, ", length(rrna_ids), " cytoplasmic rRNA genes and ", format(length(ribo_ids), big.mark = ","), " ribosomal proteins are identified from the annotation. ", if (have_mito_src) "Percent mitochondrial is taken from subsets_Mito_percent in the per-library objects, which is the quantity the cells were filtered on upstream." else "**subsets_Mito_percent was not found in the per-library objects**, so percent mitochondrial is recomputed here from the annotation and may not match the filter applied upstream.", " Cytoplasmic 28S and 18S rRNA are counted separately, because they are not mitochondrial and are abundant enough to distort that fraction if folded into it.")`
 
 ```{r}
 # The marker sets are read here rather than at the point of use, because the
@@ -413,17 +432,23 @@ if (have_prev) {
     data.frame(barcode  = colnames(x),
                total    = Matrix::colSums(ct),
                detected = Matrix::colSums(ct > 0),
-               mito     = Matrix::colSums(ct[intersect(mito_ids, rownames(ct)), ,
+               mito_g   = Matrix::colSums(ct[intersect(mito_ids, rownames(ct)), ,
+                                             drop = FALSE]),
+               rrna     = Matrix::colSums(ct[intersect(rrna_ids, rownames(ct)), ,
                                              drop = FALSE]),
                ribo     = Matrix::colSums(ct[intersect(ribo_ids, rownames(ct)), ,
                                              drop = FALSE]),
                stringsAsFactors = FALSE)
   })) %>%
-    dplyr::mutate(pct_mito = 100 * mito / total,
+    dplyr::mutate(pct_rrna = 100 * rrna / total,
                   pct_ribo = 100 * ribo / total,
                   node     = prev_nodes$node[match(barcode, prev_nodes$barcode)]) %>%
     dplyr::filter(!is.na(node)) %>%
     dplyr::mutate(node = factor(node, levels = somatic_levels))
+
+  old_qc = if (have_mito_src) {
+    old_qc %>% dplyr::left_join(mito_src, by = "barcode")
+  } else old_qc %>% dplyr::mutate(pct_mito = 100 * mito_g / total)
 
   old_qc_tab = old_qc %>%
     dplyr::group_by(node) %>%
@@ -433,6 +458,7 @@ if (have_prev) {
                      median_total    = round(median(total)),
                      median_detected = round(median(detected)),
                      median_pct_mito = round(median(pct_mito), 1),
+                     median_pct_rrna = round(median(pct_rrna), 1),
                      median_pct_ribo = round(median(pct_ribo), 1),
                      .groups = "drop") %>%
     dplyr::arrange(node)
@@ -494,15 +520,17 @@ if (exists("old_qc_tab"))
   datatable(old_qc_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-```{r, fig.width=11, fig.height=8}
+```{r, fig.width=11, fig.height=11}
 if (exists("old_qc")) {
   old_qc_long = old_qc %>%
-    tidyr::pivot_longer(c(total, detected, pct_mito, pct_ribo),
+    tidyr::pivot_longer(c(total, detected, pct_mito, pct_rrna, pct_ribo),
                         names_to = "measure", values_to = "value") %>%
     dplyr::mutate(measure = factor(measure,
-                    levels = c("total", "detected", "pct_mito", "pct_ribo"),
+                    levels = c("total", "detected", "pct_mito", "pct_rrna",
+                               "pct_ribo"),
                     labels = c("total counts", "genes detected",
-                               "percent mitochondrial", "percent ribosomal")),
+                               "percent mitochondrial", "percent 28S/18S rRNA",
+                               "percent ribosomal protein")),
                   removed = as.character(node) %in% chk_drop)
 
   p_old_qc = ggplot(old_qc_long, aes(x = node, y = value, fill = removed)) +
@@ -520,7 +548,7 @@ if (exists("old_qc")) {
   print(p_old_qc)
   ggsave(p_old_qc,
          file = paste0(results_dir, "/annotated_run_depth_and_technical.png"),
-         width = 11, height = 8, dpi = 300)
+         width = 11, height = 11, dpi = 300)
 }
 ```
 
@@ -831,10 +859,68 @@ if (have_prev && length(sub_nodes_now) > 0) {
   write.csv(pair_j, file = paste0(results_dir, "/subcluster_annotation_map.csv"),
             row.names = FALSE)
 
+  # the full grid, including pairs that share no cells, so the heatmap below has
+  # a value everywhere rather than gaps
+  node_ord = function(x) x[order(suppressWarnings(as.numeric(sub("^.*\\.", "", x))),
+                                 sub("\\..*$", "", x))]
+  overlap_grid = tidyr::expand_grid(new = sub_nodes_now,
+                                    old = sort(unique(pair_j$old))) %>%
+    dplyr::left_join(pair_j %>% dplyr::select(new, old, shared),
+                     by = c("new", "old")) %>%
+    dplyr::mutate(shared = tidyr::replace_na(shared, 0L)) %>%
+    dplyr::left_join(n_new, by = "new") %>%
+    dplyr::left_join(n_old, by = "old") %>%
+    dplyr::mutate(`percent of the new subcluster` = 100 * shared / n_new,
+                  `percent of the old subcluster` = 100 * shared / n_old,
+                  `percent of the union (Jaccard)` =
+                    100 * shared / (n_new + n_old - shared))
+
+  write.csv(overlap_grid,
+            file = paste0(results_dir, "/subcluster_overlap_grid.csv"),
+            row.names = FALSE)
+
   datatable(map_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
             rownames = FALSE, options = list(dom = "t", paging = FALSE))
 }
 ```
+
+Jaccard alone hides which way an overlap runs. A new subcluster holding every
+cell of a small old one, and a small slice of a large one, scores low against
+both. The three panels below separate that. Read down a column to see what a new
+subcluster is made of, and across a row to see where an old one went.
+
+```{r, fig.width=12, fig.height=4.5}
+if (exists("overlap_grid")) {
+  ov_long = overlap_grid %>%
+    tidyr::pivot_longer(dplyr::starts_with("percent of"),
+                        names_to = "measure", values_to = "pct") %>%
+    dplyr::mutate(new = factor(new, levels = node_ord(sub_nodes_now)),
+                  old = factor(old, levels = rev(node_ord(sort(unique(overlap_grid$old))))),
+                  measure = factor(measure,
+                    levels = c("percent of the new subcluster",
+                               "percent of the old subcluster",
+                               "percent of the union (Jaccard)")))
+
+  p_overlap = ggplot(ov_long, aes(x = new, y = old, fill = pct)) +
+    geom_tile(colour = "white") +
+    geom_text(aes(label = ifelse(pct < 1, "", round(pct))), size = 2.6,
+              colour = "grey15") +
+    facet_wrap(~ measure, nrow = 1) +
+    scale_fill_gradient(low = "white", high = "#2166ac", limits = c(0, 100)) +
+    theme_minimal() +
+    theme(panel.grid = element_blank()) +
+    labs(x = "new subcluster", y = "subcluster of the annotated run",
+         fill = "percent",
+         title = "Cell overlap between the annotated run and this one",
+         subtitle = "blank means under one percent")
+
+  print(p_overlap)
+  ggsave(p_overlap, file = paste0(results_dir, "/subcluster_overlap.png"),
+         width = 12, height = 4.5, dpi = 300)
+}
+```
+
+`r if (!exists("overlap_grid")) "" else paste0("If the carried-over labels do not look right, this figure is what to set them from. node_annotation takes the old numbering, so a label can be moved by editing that parameter, and min_map_jaccard controls how weak a match is allowed to stand. The grid is written to subcluster_overlap_grid.csv.")`
 
 ```{r}
 merge_tab = NULL
@@ -1001,11 +1087,17 @@ qc = data.frame(
   node      = as.character(merged$node),
   total     = Matrix::colSums(cnt),
   detected  = Matrix::colSums(cnt > 0),
-  pct_mito  = 100 * Matrix::colSums(cnt[intersect(mito_ids, rownames(cnt)), , drop = FALSE]) /
+  pct_rrna  = 100 * Matrix::colSums(cnt[intersect(rrna_ids, rownames(cnt)), , drop = FALSE]) /
                 Matrix::colSums(cnt),
   pct_ribo  = 100 * Matrix::colSums(cnt[intersect(ribo_ids, rownames(cnt)), , drop = FALSE]) /
                 Matrix::colSums(cnt),
   stringsAsFactors = FALSE)
+
+qc = if (have_mito_src) {
+  qc %>% dplyr::left_join(mito_src, by = "barcode")
+} else qc %>% dplyr::mutate(
+  pct_mito = 100 * Matrix::colSums(cnt[intersect(mito_ids, rownames(cnt)), , drop = FALSE]) /
+               Matrix::colSums(cnt))
 
 qc_tab = qc %>%
   dplyr::group_by(node) %>%
@@ -1013,6 +1105,7 @@ qc_tab = qc %>%
                    median_total    = round(median(total)),
                    median_detected = round(median(detected)),
                    median_pct_mito = round(median(pct_mito), 1),
+                   median_pct_rrna = round(median(pct_rrna), 1),
                    median_pct_ribo = round(median(pct_ribo), 1),
                    .groups = "drop") %>%
   dplyr::mutate(node = factor(node, levels = node_levels)) %>%
@@ -1024,15 +1117,17 @@ write.csv(qc_tab, file = paste0(results_dir, "/node_depth_and_technical.csv"),
 datatable(qc_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-```{r, fig.width=11, fig.height=8}
+```{r, fig.width=11, fig.height=11}
 qc_long = qc %>%
   dplyr::mutate(node = factor(node, levels = node_levels)) %>%
-  tidyr::pivot_longer(c(total, detected, pct_mito, pct_ribo),
+  tidyr::pivot_longer(c(total, detected, pct_mito, pct_rrna, pct_ribo),
                       names_to = "measure", values_to = "value") %>%
   dplyr::mutate(measure = factor(measure,
-                  levels = c("total", "detected", "pct_mito", "pct_ribo"),
+                  levels = c("total", "detected", "pct_mito", "pct_rrna",
+                             "pct_ribo"),
                   labels = c("total counts", "genes detected",
-                             "percent mitochondrial", "percent ribosomal")))
+                             "percent mitochondrial", "percent 28S/18S rRNA",
+                             "percent ribosomal protein")))
 
 p_qc = ggplot(qc_long, aes(x = node, y = value)) +
   geom_violin(scale = "width", fill = "grey90", colour = NA) +
@@ -1046,7 +1141,7 @@ p_qc = ggplot(qc_long, aes(x = node, y = value)) +
 
 p_qc
 ggsave(p_qc, file = paste0(results_dir, "/node_depth_and_technical.png"),
-       width = 11, height = 8, dpi = 300)
+       width = 11, height = 11, dpi = 300)
 ```
 
 ```{r}
@@ -1059,7 +1154,7 @@ if (have_split) {
     if (dplyr::n_distinct(sub$node) < 2) return(NULL)
     med = sub %>% dplyr::group_by(node) %>%
       dplyr::summarise(m = median(total), .groups = "drop")
-    dplyr::bind_rows(lapply(c("total", "detected", "pct_mito", "pct_ribo"), function(v) {
+    dplyr::bind_rows(lapply(c("total", "detected", "pct_mito", "pct_rrna", "pct_ribo"), function(v) {
       kt = kruskal.test(sub[[v]] ~ factor(sub$node))
       data.frame(cluster = cl, measure = v,
                  kruskal_p = signif(kt$p.value, 3),
@@ -1567,6 +1662,12 @@ checked is whether the ordering is explained by them. A trajectory that is mostl
 a depth or a mitochondrial gradient will show a high figure below whatever the
 marker genes say.
 
+Each measure is regressed on pseudotime twice. Once across all cells, and once
+within each library. The pooled figure counts a difference between libraries as
+a trend, because the libraries occupy different parts of the tree. The
+within-library figures cannot do that. A pooled result that disappears within
+libraries is a between-library difference wearing the shape of a gradient.
+
 ```{r}
 # pt_df comes from colData(merged), in colnames(merged) order, and qc carries
 # its own barcodes. Joined rather than bound, so a reordering cannot go unseen.
@@ -1576,46 +1677,71 @@ conf = conf %>%
   dplyr::left_join(qc %>% dplyr::select(-node), by = "barcode")
 stopifnot(!anyNA(conf$total))
 
-conf_tab = dplyr::bind_rows(lapply(
-  c("total", "detected", "pct_mito", "pct_ribo"), function(v) {
-    ok = is.finite(conf[[v]]) & is.finite(conf$pseudotime)
-    if (sum(ok) < 3) return(NULL)
-    x = if (v %in% c("total", "detected")) log10(conf[[v]][ok]) else conf[[v]][ok]
-    ct = suppressWarnings(cor.test(x, conf$pseudotime[ok], method = "spearman"))
-    data.frame(measure = v,
+conf_measures = c("total", "detected", "pct_mito", "pct_rrna", "pct_ribo")
+
+# Pooled across libraries, a trend can be nothing more than the libraries
+# sitting at different ends of the tree. Computed within each library as well,
+# where that explanation is unavailable.
+conf_stats = function(d, label) {
+  if (nrow(d) < 20) return(NULL)
+  dplyr::bind_rows(lapply(conf_measures, function(v) {
+    ok = is.finite(d[[v]]) & is.finite(d$pseudotime)
+    if (sum(ok) < 20) return(NULL)
+    x = if (v %in% c("total", "detected")) log10(d[[v]][ok]) else d[[v]][ok]
+    if (stats::sd(x) == 0) return(NULL)
+    ct = suppressWarnings(cor.test(x, d$pseudotime[ok], method = "spearman"))
+    data.frame(within  = label,
+               measure = v,
+               n_cells = sum(ok),
                scale   = if (v %in% c("total", "detected")) "log10" else "percent",
-               r2      = signif(summary(lm(conf$pseudotime[ok] ~ x))$r.squared, 3),
+               r2      = signif(summary(lm(d$pseudotime[ok] ~ x))$r.squared, 3),
                spearman_rho = signif(unname(ct$estimate), 3),
                p       = signif(ct$p.value, 3),
                stringsAsFactors = FALSE)
   }))
+}
+
+conf_tab = dplyr::bind_rows(
+  conf_stats(conf, "all cells"),
+  dplyr::bind_rows(lapply(sort(unique(as.character(conf$library))), function(lb)
+    conf_stats(conf[as.character(conf$library) == lb, , drop = FALSE], lb))))
 
 write.csv(conf_tab, file = paste0(results_dir, "/pseudotime_vs_technical.csv"),
           row.names = FALSE)
 
-datatable(conf_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+datatable(conf_tab, rownames = FALSE, filter = "top",
+          options = list(pageLength = 15))
 ```
 
-```{r, fig.width=11, fig.height=3.2}
+```{r, fig.width=13, fig.height=4}
 conf_long = conf %>%
-  tidyr::pivot_longer(c(total, detected, pct_mito, pct_ribo),
-                      names_to = "measure", values_to = "value")
+  tidyr::pivot_longer(dplyr::all_of(conf_measures),
+                      names_to = "measure", values_to = "value") %>%
+  dplyr::mutate(measure = factor(measure, levels = conf_measures,
+                  labels = c("total counts", "genes detected",
+                             "percent mitochondrial", "percent 28S/18S rRNA",
+                             "percent ribosomal protein")))
 
-p_conf = ggplot(conf_long, aes(x = pseudotime, y = value)) +
-  geom_point(size = .2, alpha = .3) +
-  geom_smooth(method = "loess", se = FALSE, linewidth = .6, colour = "#b2182b") +
+p_conf = ggplot(conf_long, aes(x = pseudotime, y = value, colour = library)) +
+  geom_point(size = .2, alpha = .25) +
+  geom_smooth(method = "loess", se = FALSE, linewidth = .7) +
+  geom_smooth(aes(colour = NULL), method = "loess", se = FALSE,
+              linewidth = .7, colour = "grey20", linetype = "22") +
   facet_wrap(~ measure, scales = "free_y", nrow = 1) +
   scale_y_continuous(trans = "log1p") +
+  scale_colour_manual(values = lib_cols) +
+  guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
   theme_bw() +
-  labs(x = "pseudotime", y = NULL,
-       title = "Depth and technical content along the ordering")
+  labs(x = "pseudotime", y = NULL, colour = NULL,
+       title = "Depth and technical content along the ordering",
+       subtitle = "one loess per library; the dashed grey line pools them")
 
 p_conf
 ggsave(p_conf, file = paste0(results_dir, "/pseudotime_vs_technical.png"),
-       width = 11, height = 3.2, dpi = 300)
+       width = 13, height = 3.2, dpi = 300)
 ```
 
-`r if (!exists("conf_tab") || is.null(conf_tab) || nrow(conf_tab) == 0) "" else { top = conf_tab[which.max(conf_tab$r2), ]; paste0("The strongest of these is ", top$measure, ", explaining ", round(100 * top$r2, 1), " percent of the variance in pseudotime (Spearman rho ", top$spearman_rho, ", p ", top$p, "). Read this against the ", round(100 * lib_r2, 1), " percent explained by library. A figure of the same order as the biological signal means the ordering cannot be reported as developmental on this evidence alone.") }`
+`r if (!exists("conf_tab") || is.null(conf_tab) || nrow(conf_tab) == 0) "" else { pooled = conf_tab %>% dplyr::filter(within == "all cells"); top = pooled[which.max(pooled$r2), ]; wit = conf_tab %>% dplyr::filter(within != "all cells", measure == top$measure); paste0("Pooled across libraries, the strongest of these is ", top$measure, ", explaining ", round(100 * top$r2, 1), " percent of the variance in pseudotime (Spearman rho ", top$spearman_rho, ", p ", top$p, "). Library on its own explains ", round(100 * lib_r2, 1), " percent.", if (nrow(wit) == 0) "" else paste0(" Within each library the same measure gives ", paste0(wit$within, " ", round(100 * wit$r2, 1), " percent", collapse = ", "), ". A pooled figure much larger than the within-library ones is the libraries sitting at different ends of the tree rather than a gradient along it.")) }`
 
 # Pseudotime-associated genes
 

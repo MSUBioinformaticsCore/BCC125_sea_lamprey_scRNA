@@ -47,6 +47,7 @@ export R_LIBS_SITE="/opt/software-current/2023.06/x86_64/generic/software/R-bund
 PROJECT_DIR="/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA"
 RESULTS_DATE="${RESULTS_DATE:-20260813}"
 LINEAGE="${LINEAGE:-all}"
+ATLAS_SUFFIX="${ATLAS_SUFFIX:-}"
 OUT_DIR="${PROJECT_DIR}/html"
 
 # unset rather than absent means "run without the annotation and the drops"
@@ -58,7 +59,7 @@ mkdir -p "${PROJECT_DIR}/run" "${OUT_DIR}"
 
 set -euo pipefail
 
-LABELS="${PROJECT_DIR}/results/${RESULTS_DATE}_atlas/cell_cluster_labels.csv"
+LABELS="${PROJECT_DIR}/results/${RESULTS_DATE}_atlas${ATLAS_SUFFIX}/cell_cluster_labels.csv"
 [[ -f "${LABELS}" ]] || {
   echo "missing ${LABELS}" >&2
   echo "Knit 13_atlas_and_stage_correspondence.Rmd first." >&2
@@ -97,6 +98,7 @@ export MKL_NUM_THREADS=1
 echo "host:       $(hostname)"
 echo "started:    $(date)"
 echo "lineage:    ${LINEAGE}"
+echo "atlas:      ${RESULTS_DATE}_atlas${ATLAS_SUFFIX}"
 echo "prev nodes: ${PREV_NODES:-<none>}"
 
 Rscript -e "
@@ -108,6 +110,7 @@ Rscript -e "
     params        = list(project_dir     = '${PROJECT_DIR}',
                          results_date    = '${RESULTS_DATE}',
                          lineage         = '${LINEAGE}',
+                         atlas_suffix    = '${ATLAS_SUFFIX}',
                          prev_nodes_file = '${PREV_NODES}'),
     envir         = new.env()
   )
@@ -116,7 +119,7 @@ Rscript -e "
 echo
 echo "finished: $(date)"
 echo "html:     ${OUT_DIR}/17_germ_pseudotime_tscan_${LINEAGE}.html"
-echo "results:  ${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_${LINEAGE}"
+echo "results:  ${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_${LINEAGE}${ATLAS_SUFFIX}"
 echo
 echo "resource use for this job:"
 seff "${SLURM_JOB_ID}" || true
