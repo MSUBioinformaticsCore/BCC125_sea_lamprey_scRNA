@@ -22,7 +22,7 @@ params:
     all_root_rule: "max:Primordial germ cells"
     min_detect_pct: 5
     marker_file: canonical_markers_S1_only_2026-08-14.csv
-    extra_marker_file: placeholder_neural_crest_markers.csv
+    extra_marker_file: neural_crest_markers_2026-09-25.csv
     split_by_subcluster: "5"
     sub_k: 0
     sub_k_range: "5,10,15,20,25,30,40,50"
@@ -117,6 +117,91 @@ lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
 ```
 
 ```{r}
+# The marker sets are read here rather than at the point of use, because the
+# somatic check scores cells that are removed before the corrected space exists.
+s1_sets = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
+                   stringsAsFactors = FALSE) %>%
+  dplyr::mutate(loc_id = trimws(loc_id), origin = "S1 sheet")
+
+extra_file = as.character(params$extra_marker_file)
+extra_path = paste0(params$project_dir, "/data/", extra_file)
+have_extra = nzchar(extra_file) && file.exists(extra_path)
+
+all_sets = if (have_extra) {
+  dplyr::bind_rows(s1_sets,
+                   read.csv(extra_path, stringsAsFactors = FALSE) %>%
+                     dplyr::mutate(loc_id = trimws(loc_id), origin = "extra"))
+} else s1_sets
+
+set_origin = all_sets %>%
+  dplyr::distinct(CellTypeMarkerSet, origin) %>%
+  dplyr::group_by(CellTypeMarkerSet) %>%
+  dplyr::summarise(origin = paste(sort(unique(origin)), collapse = ", "),
+                   .groups = "drop")
+
+# A set whose genes all sit inside another set is not a separate measurement.
+# Scoring high on it says nothing about it that the larger set does not already
+# say, which matters most for the one-gene sets.
+set_genes = lapply(split(all_sets$loc_id, all_sets$CellTypeMarkerSet), unique)
+set_containment = dplyr::bind_rows(lapply(names(set_genes), function(a)
+  dplyr::bind_rows(lapply(setdiff(names(set_genes), a), function(b)
+    if (length(set_genes[[a]]) > 0 && all(set_genes[[a]] %in% set_genes[[b]]))
+      data.frame(set = a, contained_in = b, n_genes = length(set_genes[[a]]),
+                 genes = paste(sort(set_genes[[a]]), collapse = ", "),
+                 stringsAsFactors = FALSE)
+    else NULL))))
+
+# carried onto every set-score table, so a contained set is flagged where it is
+# read rather than in a note further up the page
+set_flag = if (nrow(set_containment) > 0) {
+  set_containment %>%
+    dplyr::group_by(set) %>%
+    dplyr::summarise(contained_in = paste(sort(contained_in), collapse = ", "),
+                     .groups = "drop")
+} else data.frame(set = character(0), contained_in = character(0),
+                  stringsAsFactors = FALSE)
+
+# one row per marker gene per group, for the bubble plots. A gene belonging to
+# two sets appears once per set, so the rows line up with sets_df positionally.
+marker_bubble_df = function(lc, groups, sets_df) {
+  present = sets_df %>%
+    dplyr::distinct(CellTypeMarkerSet, loc_id, symbol) %>%
+    dplyr::filter(loc_id %in% rownames(lc))
+  groups  = as.character(groups)
+  dplyr::bind_rows(lapply(unique(groups), function(gr) {
+    m = as.matrix(lc[present$loc_id, groups == gr, drop = FALSE])
+    data.frame(group          = gr,
+               set            = present$CellTypeMarkerSet,
+               gene           = present$loc_id,
+               symbol         = present$symbol,
+               n_cells        = sum(groups == gr),
+               pct_expressing = 100 * rowMeans(m > 0),
+               mean_logexpr   = rowMeans(m),
+               stringsAsFactors = FALSE)
+  }))
+}
+
+marker_bubble_plot = function(df, group_levels, title, subtitle = NULL) {
+  df = df %>%
+    dplyr::mutate(group = factor(group, levels = group_levels),
+                  label = ifelse(is.na(symbol) | !nzchar(symbol), gene, symbol))
+  ggplot(df, aes(x = group, y = label,
+                 size = pct_expressing, colour = mean_logexpr)) +
+    geom_point() +
+    scale_colour_viridis_c() +
+    scale_size_continuous(range = c(0.4, 5)) +
+    facet_grid(set ~ ., scales = "free_y", space = "free_y") +
+    theme_bw() +
+    theme(strip.text.y     = element_text(angle = 0, size = 6),
+          axis.text.y      = element_text(size = 6),
+          axis.text.x      = element_text(size = 8, angle = 45, hjust = 1),
+          panel.grid.major = element_line(linewidth = .2)) +
+    labs(x = NULL, y = NULL, title = title, subtitle = subtitle,
+         size = "% expressing", colour = "mean log expression")
+}
+```
+
+```{r}
 gaf_file      = file.path(params$genome_dir,
                           "GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf")
 go_names_file = file.path(params$genome_dir, "GOs_names.txt")
@@ -175,8 +260,11 @@ drop_anno = drop_anno[nzchar(drop_anno)]
 prev_file = as.character(params$prev_nodes_file)
 have_prev = nzchar(prev_file) && file.exists(prev_file)
 
-drop_cells = character(0)
+drop_cells    = character(0)
 drop_cell_tab = NULL
+# kept so the somatic check can score the removed cells alongside the ones
+# that stay
+predrop_barcodes = lineage_key$barcode
 
 if (have_prev && length(drop_anno) > 0) {
   prev_nodes = read.csv(prev_file, stringsAsFactors = FALSE)
@@ -217,6 +305,116 @@ datatable(comp_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
 `r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ".")`
+
+## Somatic check
+
+The cells named by `drop_annotations` are removed above on the strength of the
+label they were given. This section scores them before they go. The removal then
+has expression behind it.
+
+Every node of the annotated run is scored against all the marker sets, somatic
+ones included. Grouping is by the node assignment in `prev_nodes_file`. The
+values are the depth-normalized ones in the per-library objects. Neither the new
+embedding nor the new subcluster numbering enters this. The table therefore
+stands whatever the subclustering returns.
+
+The nodes being removed are placed first on the axis. A node that carries a
+somatic set and none of the germ sets is the pattern that supports dropping it.
+
+```{r}
+if (nrow(set_containment) > 0)
+  datatable(set_containment, rownames = FALSE,
+            options = list(dom = "t", paging = FALSE))
+```
+
+`r if (nrow(set_containment) > 0) paste0("**", nrow(set_containment), " marker set(s) sit entirely inside another set.** A node scoring high on one of these is also scoring high on the set that contains it. The two cannot be read as separate evidence. Judge these from the per-gene plot rather than the set score. The `contained_in` column on the score tables carries the same flag.") else "No marker set sits entirely inside another. Each set score is its own measurement."`
+
+```{r}
+somatic_scores = NULL
+somatic_bubble = NULL
+somatic_levels = character(0)
+
+if (length(drop_cells) > 0) {
+  chk_list = lapply(all.sce, function(x) {
+    keep = intersect(colnames(x), predrop_barcodes)
+    if (length(keep) == 0) NULL else x[, keep]
+  })
+  chk_list = chk_list[!vapply(chk_list, is.null, logical(1))]
+  # only the marker genes are scored here, so the rest are never materialized
+  chk_univ = intersect(Reduce(intersect, lapply(chk_list, rownames)),
+                       unique(all_sets$loc_id))
+  if (length(chk_univ) == 0)
+    stop("none of the marker genes in ", params$marker_file,
+         " are present in every library of this lineage.")
+
+  chk_lc = do.call(cbind, lapply(chk_list, function(x)
+    logcounts(x)[chk_univ, , drop = FALSE]))
+
+  chk_node = prev_nodes$node[match(colnames(chk_lc), prev_nodes$barcode)]
+  keep_chk = !is.na(chk_node)
+  chk_lc   = chk_lc[, keep_chk, drop = FALSE]
+  chk_node = chk_node[keep_chk]
+
+  # the removed nodes first, then the rest, subclusters before whole clusters
+  chk_drop = intersect(names(anno_map)[anno_map %in% drop_anno], chk_node)
+  chk_rest = setdiff(unique(chk_node), chk_drop)
+  chk_rest = c(sort(chk_rest[grepl("\\.", chk_rest)]),
+               sort(chk_rest[!grepl("\\.", chk_rest)]))
+  somatic_levels = c(chk_drop, chk_rest)
+
+  chk_sce = SingleCellExperiment(assays = list(logcounts = chk_lc))
+
+  somatic_scores = score_marker_sets(
+      chk_sce, chk_node,
+      all_sets %>% dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id) %>%
+        dplyr::distinct()) %>%
+    dplyr::rename(node = group) %>%
+    dplyr::left_join(set_origin, by = c("set" = "CellTypeMarkerSet")) %>%
+    dplyr::left_join(set_flag, by = "set") %>%
+    dplyr::mutate(node    = factor(node, levels = somatic_levels),
+                  removed = node %in% chk_drop,
+                  annotation = unname(anno_map[as.character(node)]),
+                  contained_in = tidyr::replace_na(contained_in, ""),
+                  mean_logexpr = signif(mean_logexpr, 3),
+                  pct_detected = round(pct_detected, 1)) %>%
+    dplyr::arrange(node, dplyr::desc(mean_logexpr)) %>%
+    dplyr::select(node, annotation, removed, set, origin, contained_in,
+                  n_genes, n_cells, mean_logexpr, pct_detected)
+
+  write.csv(somatic_scores,
+            file = paste0(results_dir, "/somatic_check_set_scores.csv"),
+            row.names = FALSE)
+
+  somatic_bubble = marker_bubble_df(chk_lc, chk_node, all_sets)
+  write.csv(somatic_bubble,
+            file = paste0(results_dir, "/somatic_check_gene_expression.csv"),
+            row.names = FALSE)
+
+  datatable(somatic_scores, rownames = FALSE, filter = "top",
+            options = list(pageLength = 20))
+}
+```
+
+`r if (length(drop_cells) == 0) "No cell is removed, so there is nothing to check here." else ""`
+
+```{r}
+if (!is.null(drop_cell_tab))
+  datatable(drop_cell_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, fig.width=11, fig.height=11}
+if (!is.null(somatic_bubble)) {
+  p_somatic = marker_bubble_plot(
+    somatic_bubble, somatic_levels,
+    title    = "Marker expression by node of the annotated run",
+    subtitle = paste0("removed: ",
+                      paste(paste0(chk_drop, " (", anno_map[chk_drop], ")"),
+                            collapse = ", ")))
+  print(p_somatic)
+  ggsave(p_somatic, file = paste0(results_dir, "/somatic_check_bubble.png"),
+         width = 11, height = 11, dpi = 300)
+}
+```
 
 # Corrected space
 
@@ -574,53 +772,34 @@ datatable(node_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ## Node identity
 
 Every node is scored against **all** the marker sets available, somatic ones
-included, rather than only the germ sets the root rule uses. This is the evidence
-behind calling a subcluster somatic. A subcluster scoring high on a somatic set
-and low on every germ set is not a germ cell state, and the table below is what
-supports excluding it rather than the judgment alone.
+included, rather than only the germ sets the root rule uses. The cells that were
+removed are not here. Those are scored under Somatic check, before the removal.
+This table is the check on what is left. A node scoring high on a somatic set and
+low on every germ set is not a germ cell state.
 
-`extra_marker_file` adds sets that the collaborators' sheet does not carry. It is
-read the same way and is marked separately in the output, so a placeholder set
-cannot be mistaken for a curated one.
+`extra_marker_file` adds sets that the collaborators' Supplementary Table 1 does
+not carry. It is read the same way. Sets from it are marked in the `origin`
+column, so a set from it is never mistaken for one from the table.
 
 ```{r}
-s1_sets = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
-                   stringsAsFactors = FALSE) %>%
-  dplyr::mutate(loc_id = trimws(loc_id), origin = "S1 sheet")
-
-extra_file  = as.character(params$extra_marker_file)
-extra_path  = paste0(params$project_dir, "/data/", extra_file)
-have_extra  = nzchar(extra_file) && file.exists(extra_path)
-
-all_sets = if (have_extra) {
-  dplyr::bind_rows(s1_sets,
-                   read.csv(extra_path, stringsAsFactors = FALSE) %>%
-                     dplyr::mutate(loc_id = trimws(loc_id),
-                                   origin = "extra"))
-} else s1_sets
-
 id_genes = all_sets %>%
   dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id) %>%
   dplyr::filter(gene %in% rownames(combined)) %>%
   dplyr::distinct()
-
-set_origin = all_sets %>%
-  dplyr::distinct(CellTypeMarkerSet, origin) %>%
-  dplyr::group_by(CellTypeMarkerSet) %>%
-  dplyr::summarise(origin = paste(sort(unique(origin)), collapse = ", "),
-                   .groups = "drop")
 
 id_scores = score_marker_sets(combined, merged$node, id_genes) %>%
   dplyr::rename(node = group)
 
 id_table = id_scores %>%
   dplyr::left_join(set_origin, by = c("set" = "CellTypeMarkerSet")) %>%
+  dplyr::left_join(set_flag, by = "set") %>%
   dplyr::mutate(node = factor(node, levels = node_levels),
+                contained_in = tidyr::replace_na(contained_in, ""),
                 mean_logexpr = signif(mean_logexpr, 3),
                 pct_detected = round(pct_detected, 1)) %>%
   dplyr::arrange(node, dplyr::desc(mean_logexpr)) %>%
-  dplyr::select(node, set, origin, n_genes, n_cells, mean_logexpr,
-                pct_detected)
+  dplyr::select(node, set, origin, contained_in, n_genes, n_cells,
+                mean_logexpr, pct_detected)
 
 write.csv(id_table, file = paste0(results_dir, "/node_identity_scores.csv"),
           row.names = FALSE)
@@ -631,26 +810,25 @@ datatable(id_table, rownames = FALSE, filter = "top",
 
 `r if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found**, so only the sets in ", params$marker_file, " are scored.") else ""`
 
-`r paste0(dplyr::n_distinct(id_genes$set), " marker sets are scored, covering ", format(dplyr::n_distinct(id_genes$gene), big.mark = ","), " genes present in this lineage.", if (have_extra) paste0(" Sets from ", extra_file, " are marked 'extra' in the origin column and are placeholders until the curated list arrives.") else "")`
+`r paste0(dplyr::n_distinct(id_genes$set), " marker sets are scored, covering ", format(dplyr::n_distinct(id_genes$gene), big.mark = ","), " genes present in this lineage.", if (have_extra) paste0(" Sets from ", extra_file, " are marked 'extra' in the origin column. That file records the symbol each gene was requested under, since several requested markers have no entry in this annotation and are stood in for by a lamprey paralog.") else "")`
 
-```{r, fig.width=11, fig.height=6}
-id_heat = id_scores %>%
-  dplyr::mutate(node = factor(node, levels = node_levels))
+The plot below breaks the set scores back out into the genes behind them. A set
+scoring high on the strength of one gene reads differently from a set whose genes
+are expressed together. Only the per-gene view separates the two.
 
-p_id = ggplot(id_heat, aes(x = node, y = set, fill = mean_logexpr)) +
-  geom_tile(colour = "white") +
-  geom_text(aes(label = round(pct_detected)), size = 2.4, colour = "grey20") +
-  scale_fill_gradient(low = "white", high = "#b2182b") +
-  labs(x = NULL, y = NULL, fill = "mean log expression",
-       title = "Marker set scores by node",
-       subtitle = "numbers are the percent of cells detecting the set") +
-  theme_minimal() +
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```{r, fig.width=11, fig.height=11}
+id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
+
+write.csv(id_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
+          row.names = FALSE)
+
+p_id = marker_bubble_plot(id_bubble, node_levels,
+                          title = "Marker expression by node")
 
 p_id
 
 ggsave(p_id, file = paste0(results_dir, "/node_identity_scores.png"),
-       width = 11, height = 6, dpi = 300)
+       width = 11, height = 11, dpi = 300)
 ```
 
 ## Root
