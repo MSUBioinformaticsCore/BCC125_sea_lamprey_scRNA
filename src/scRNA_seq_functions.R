@@ -1725,3 +1725,42 @@ plot_tsne <- function(df,
 
   p
 }
+
+#' Mitochondrial and ribosomal gene ids
+#'
+#' @description The genes whose expression tracks cell quality, ambient RNA and
+#'   lysis as much as cell state. Shared by 13 and 17 so both documents exclude
+#'   the same set.
+#'
+#'   The mitochondrial set is named outright rather than matched on description.
+#'   The descriptions of the mitochondrially encoded genes are shared by the
+#'   nuclear assembly factors of the same complexes, and those are ordinary
+#'   genes. The ribosomal rule excludes the S6 kinases and the rRNA processing
+#'   enzymes for the same reason.
+#'
+#'   These genes are not purely technical in a gonad series. Oocytes accumulate
+#'   mitochondria and spermatids shed them, and ribosome biogenesis tracks
+#'   proliferation. Excluding them is a choice to be reported, not a cleanup.
+#'
+#' @param gene_description data frame with Gene, WangGeneID and description
+#' @return list with $mito, $ribo and $all, each a vector of Gene ids
+technical_gene_ids <- function(gene_description) {
+  stopifnot(all(c("Gene", "WangGeneID", "description") %in%
+                  colnames(gene_description)))
+
+  mt_genes <- c("COX1", "COX2", "COX3", "CYTB", "ND1", "ND2", "ND3", "ND4",
+                "ND4L", "ND5", "ND6", "ATP6", "ATP8")
+  rrna_pat <- "^(28S|18S|16S|12S|5.8S) ribosomal RNA$|^(l|s)-rRNA$"
+  rp_pat   <- "ribosomal protein (L|S|SA)[0-9]|^(28S|39S|40S|60S) ribosomal protein"
+  not_rp   <- "kinase|methyltransferase|pseudouridine|assembly|biogenesis|processing"
+
+  mito <- unique(gene_description$Gene[
+    gene_description$WangGeneID %in% mt_genes |
+      grepl(rrna_pat, gene_description$description, ignore.case = TRUE)])
+
+  ribo <- unique(gene_description$Gene[
+    grepl(rp_pat, gene_description$description, ignore.case = TRUE) &
+      !grepl(not_rp, gene_description$description, ignore.case = TRUE)])
+
+  list(mito = mito, ribo = ribo, all = union(mito, ribo))
+}
