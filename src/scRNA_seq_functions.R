@@ -1743,24 +1743,53 @@ plot_tsne <- function(df,
 #'   proliferation. Excluding them is a choice to be reported, not a cleanup.
 #'
 #' @param gene_description data frame with Gene, WangGeneID and description
-#' @return list with $mito, $ribo and $all, each a vector of Gene ids
+#' @return list with $mito (mitochondrially encoded), $rrna (cytoplasmic rRNA),
+#'   $ribo (ribosomal proteins) and $all
 technical_gene_ids <- function(gene_description) {
   stopifnot(all(c("Gene", "WangGeneID", "description") %in%
                   colnames(gene_description)))
 
+  # The 13 protein-coding genes of the mitochondrial genome, plus its own two
+  # rRNAs, which this annotation names s-rRNA and l-rRNA.
   mt_genes <- c("COX1", "COX2", "COX3", "CYTB", "ND1", "ND2", "ND3", "ND4",
                 "ND4L", "ND5", "ND6", "ATP6", "ATP8")
-  rrna_pat <- "^(28S|18S|16S|12S|5.8S) ribosomal RNA$|^(l|s)-rRNA$"
-  rp_pat   <- "ribosomal protein (L|S|SA)[0-9]|^(28S|39S|40S|60S) ribosomal protein"
-  not_rp   <- "kinase|methyltransferase|pseudouridine|assembly|biogenesis|processing"
+  mt_rrna  <- "^(l|s)-rRNA$|^(16S|12S) ribosomal RNA$"
+
+  # 28S, 18S and 5.8S are cytoplasmic and belong nowhere near the mitochondrial
+  # fraction. They are also among the most abundant transcripts in a library, so
+  # counting them as mitochondrial inflates that percentage severely.
+  cyto_rrna <- "^(28S|18S|5.8S) ribosomal RNA$"
+
+  # Matched on symbol as well as description, because several entries carry a
+  # description of "partial true" and would otherwise be missed. RPLP0 to RPLP2,
+  # RPSA and UBA52 are structural ribosomal proteins whose names do not fit the
+  # RP + number pattern.
+  rp_pat  <- paste0("ribosomal protein (L|S|SA)[0-9]",
+                    "|^(28S|39S|40S|60S) ribosomal protein",
+                    "|ribosomal protein lateral stalk",
+                    "|^ribosomal protein SA$",
+                    "|ribosomal protein fusion product")
+  rp_sym  <- "^(RPL|RPS|MRPL|MRPS)[0-9]|^(RPLP[0-2]|RPSA|UBA52)$"
+  # the S6 kinases are signaling genes; several carry a description of
+  # "partial true", so they can only be excluded by symbol
+  not_sym <- "^RPS6K"
+  not_rp  <- paste0("kinase|methyltransferase|pseudouridine|assembly|biogenesis",
+                    "|processing|recycling|maturation|export|surveillance",
+                    "|production|GTPase|homolog, ribosome")
 
   mito <- unique(gene_description$Gene[
     gene_description$WangGeneID %in% mt_genes |
-      grepl(rrna_pat, gene_description$description, ignore.case = TRUE)])
+      grepl(mt_rrna, gene_description$description, ignore.case = TRUE)])
+
+  rrna <- unique(gene_description$Gene[
+    grepl(cyto_rrna, gene_description$description, ignore.case = TRUE)])
 
   ribo <- unique(gene_description$Gene[
-    grepl(rp_pat, gene_description$description, ignore.case = TRUE) &
-      !grepl(not_rp, gene_description$description, ignore.case = TRUE)])
+    (grepl(rp_pat, gene_description$description, ignore.case = TRUE) |
+       grepl(rp_sym, gene_description$WangGeneID)) &
+      !grepl(not_rp, gene_description$description, ignore.case = TRUE) &
+      !grepl(not_sym, gene_description$WangGeneID)])
 
-  list(mito = mito, ribo = ribo, all = union(mito, ribo))
+  list(mito = mito, rrna = rrna, ribo = ribo,
+       all = Reduce(union, list(mito, rrna, ribo)))
 }
