@@ -402,7 +402,9 @@ if (length(drop_cells) > 0) {
 }
 ```
 
-`r if (length(drop_cells) == 0) "No cell is removed, so there is nothing to check here." else ""`
+`r if (length(drop_cells) == 0) "No cell is removed. There is nothing to check here." else ""`
+
+`r if (length(drop_cells) == 0) "" else if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found.** Only the ", dplyr::n_distinct(s1_sets$CellTypeMarkerSet), " sets in ", params$marker_file, " are scored here. If a node is being removed as a cell type that file was meant to cover, this check cannot speak to it.") else if (have_extra) paste0("Scored against ", dplyr::n_distinct(all_sets$CellTypeMarkerSet), " sets, of which ", paste(sort(setdiff(unique(all_sets$CellTypeMarkerSet), unique(s1_sets$CellTypeMarkerSet))), collapse = ", "), " come from ", extra_file, ".") else ""`
 
 ```{r}
 if (!is.null(drop_cell_tab))

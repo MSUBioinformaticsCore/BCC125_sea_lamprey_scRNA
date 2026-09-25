@@ -56,6 +56,7 @@ data/*
 # name, so a version skew between them and the code is a knit failure. Small
 # text files; tracked with the code that depends on them.
 !data/canonical_markers_*.csv
+!data/neural_crest_markers_*.csv
 !data/S1*.csv
 !data/yasmin_PRJNA749754_sample_groups.csv
 results/
