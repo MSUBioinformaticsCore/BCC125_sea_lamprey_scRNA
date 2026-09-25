@@ -38,6 +38,7 @@ params:
     drop_annotations: "Migrating neural crest cells"
     min_map_jaccard: 0.25
     on_merge: "combine"
+    on_split: "label_both"
     min_library_cells: 50
     downsample_check: TRUE
     fdr_cut: 0.01
@@ -837,6 +838,7 @@ if (have_prev && length(sub_nodes_now) > 0) {
 
 ```{r}
 merge_tab = NULL
+split_tab = NULL
 
 if (!is.null(map_tab)) {
   weak  = map_tab$new[map_tab$jaccard < params$min_map_jaccard]
@@ -879,6 +881,21 @@ if (!is.null(map_tab)) {
     merged_away = character(0)
   }
 
+  # A split is the mirror of a merge and is not a failure either. The clustering
+  # resolved finer than the earlier run did inside one annotated group, so both
+  # new subclusters are part of that group and both take its label. They stay
+  # apart as nodes, because their numbers differ. Under on_split = "stop" the
+  # run halts instead.
+  if (length(split) > 0 && identical(as.character(params$on_split), "label_both")) {
+    split_tab = map_tab %>%
+      dplyr::filter(old %in% split) %>%
+      dplyr::arrange(old, dplyr::desc(shared)) %>%
+      dplyr::mutate(share_of_old = shared / n_old) %>%
+      dplyr::select(old, annotation, new, shared, n_new, n_old, share_of_old,
+                    jaccard)
+    split = character(0)
+  }
+
   if (length(weak) > 0 || length(split) > 0 || length(unlab) > 0 ||
       length(merged_away) > 0)
     stop("the annotation cannot be carried over.\n",
@@ -887,7 +904,10 @@ if (!is.null(map_tab)) {
                   paste(weak, collapse = ", "), "\n") else "",
          if (length(split) > 0)
            paste0("  one old subcluster is the best match for more than one new ",
-                  "one: ", paste(split, collapse = ", "), "\n") else "",
+                  "one: ", paste(split, collapse = ", "), "\n",
+                  "    the new subclusters holding its cells:\n", fate(split), "\n",
+                  "    set on_split to 'label_both' to give them all its label.\n")
+         else "",
          if (length(merged_away) > 0)
            paste0("  these old subclusters are the best match for nothing, so ",
                   "their annotation would be lost: ",
@@ -935,6 +955,14 @@ if (!is.null(merge_tab))
   datatable(merge_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
             rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
+
+```{r}
+if (!is.null(split_tab))
+  datatable(split_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+            rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (is.null(split_tab)) "" else paste0("**", dplyr::n_distinct(split_tab$old), " annotated subcluster(s) are split by this clustering.** It resolved finer inside them than the earlier run did. Every new subcluster drawn from one of them takes its label, and they remain separate nodes because their numbers differ. ", paste(vapply(split(split_tab, split_tab$old), function(d) paste0(d$old[1], " (", d$annotation[1], ") became ", paste(paste0(d$new, ", ", round(100 * d$share_of_old), " percent of it"), collapse = " and ")), character(1)), collapse = "; "), ". Whether the finer division means anything is a question for the node identity scores below.")`
 
 `r if (is.null(merge_tab)) "" else paste0("**", nrow(merge_tab), " annotated subcluster(s) have no counterpart in this clustering.** The clustering did not separate them from the subcluster that absorbed their cells. Both labels are kept on that node, joined with a slash. ", paste0(merge_tab$old, " (", merge_tab$annotation, ") went into ", merge_tab$absorbed_by, ", taking ", round(100 * merge_tab$kept_share), " percent of its cells there", collapse = "; "), ". The combined labels are worth confirming with whoever made the annotation.")`
 
@@ -1240,7 +1268,9 @@ if (nzchar(root_req)) {
     hit = node_levels[has_part]
     if (length(hit) > 1)
       stop("the root annotation '", root_req, "' matches more than one node: ",
-           paste(hit, collapse = ", "))
+           paste(hit, collapse = ", "),
+           ". That annotation was split across them, so the root has to be named ",
+           "by node rather than by label. Set root_node to one of them.")
     hit
   } else {
     stop("root '", root_req, "' is neither a node nor an annotation. Nodes: ",
