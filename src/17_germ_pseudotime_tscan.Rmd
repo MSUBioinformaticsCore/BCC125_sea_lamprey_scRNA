@@ -25,6 +25,7 @@ params:
     extra_marker_file: neural_crest_markers_2026-09-25.csv
     split_by_subcluster: "5"
     sub_k: 0
+    sub_n_clusters: 0
     sub_k_range: "5,10,15,20,25,30,40,50"
     sub_n_iterations: 10
     root_node: ""
@@ -36,6 +37,7 @@ params:
     node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
     drop_annotations: "Migrating neural crest cells;Granulosa"
     min_map_jaccard: 0.25
+    on_merge: "combine"
     min_library_cells: 50
     fdr_cut: 0.01
     lfc_thresh: 1
@@ -266,11 +268,16 @@ drop_cell_tab = NULL
 # that stay
 predrop_barcodes = lineage_key$barcode
 
-if (have_prev && length(drop_anno) > 0) {
+# read whenever it is available, because the subclustering below uses it to set
+# the number of subclusters to look for, which does not depend on any drop
+prev_nodes = NULL
+if (have_prev) {
   prev_nodes = read.csv(prev_file, stringsAsFactors = FALSE)
   stopifnot(all(c("barcode", "node") %in% colnames(prev_nodes)))
   prev_nodes$node = as.character(prev_nodes$node)
+}
 
+if (!is.null(prev_nodes) && length(drop_anno) > 0) {
   old_drop_nodes = names(anno_map)[anno_map %in% drop_anno]
   absent = setdiff(old_drop_nodes, unique(prev_nodes$node))
   if (length(absent) > 0)
@@ -327,7 +334,7 @@ if (nrow(set_containment) > 0)
             options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (nrow(set_containment) > 0) paste0("**", nrow(set_containment), " marker set(s) sit entirely inside another set.** A node scoring high on one of these is also scoring high on the set that contains it. The two cannot be read as separate evidence. Judge these from the per-gene plot rather than the set score. The `contained_in` column on the score tables carries the same flag.") else "No marker set sits entirely inside another. Each set score is its own measurement."`
+`r if (nrow(set_containment) > 0) paste0("**", nrow(set_containment), " marker set(s) sit entirely inside another set.** A node scoring high on one of these is also scoring high on the set that contains it. The two cannot be read as separate evidence. Judge these from the per-gene plot rather than the set score. The contained_in column on the score tables carries the same flag.") else "No marker set sits entirely inside another. Each set score is its own measurement."`
 
 ```{r}
 somatic_scores = NULL
@@ -471,15 +478,16 @@ split_clusters = intersect(split_clusters[nzchar(split_clusters)], clusters)
 have_split     = length(split_clusters) > 0
 ```
 
-`r if (have_split) paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " are subclustered in this lineage's corrected space, using only that cluster's cells, and every other cluster is one node. k is the most reproducible value in a subsampling stability sweep that gives at least two clusters, unless the sub_k parameter is set. The space depends on the lineage, so cluster 5 subclusters from the female and all runs are computed separately and need not match.") else paste0("The ", length(clusters), " selected clusters are the nodes.")`
+`r if (!have_split) paste0("The ", length(clusters), " selected clusters are the nodes.") else paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " are subclustered in this lineage's corrected space, using only that cluster's cells, and every other cluster is one node. k is the most reproducible value in a subsampling stability sweep that gives at least two subclusters. Setting sub_n_clusters restricts the search to the k values returning that many subclusters, and the most reproducible of those is taken. The sub_k parameter overrides the sweep. The space depends on the lineage, so cluster 5 subclusters from the female and all runs are computed separately and need not match.")`
 
 ```{r, eval=have_split}
 k_range = as.integer(trimws(strsplit(as.character(params$sub_k_range), ",")[[1]]))
 stopifnot(length(k_range) > 0, !anyNA(k_range))
 
-sub_assign = list()
-stab_tabs  = list()
-chosen_ks  = integer(0)
+sub_assign  = list()
+stab_tabs   = list()
+search_tabs = list()
+chosen_ks   = integer(0)
 
 for (cl in split_clusters) {
   cl_cells = colnames(merged)[merged$final_label == cl]
@@ -512,22 +520,59 @@ for (cl in split_clusters) {
 
   eligible = tab %>% dplyr::filter(mean_n_clusters >= 2, !is.na(mean_ari))
 
-  k_cl =
-    if (as.integer(params$sub_k) > 0) {
-      as.integer(params$sub_k)
-    } else if (nrow(eligible) > 0) {
-      eligible$k[which.max(eligible$mean_ari)]
+  # k is the most stable value in the sweep. sub_n_clusters restricts the search
+  # to the k values returning a given number of subclusters, which is off by
+  # default. mean_n_clusters is a mean over subsamples and does not say what the
+  # full-data clustering returns, so every candidate k is fitted and counted.
+  target = if (as.integer(params$sub_n_clusters) > 0)
+    as.integer(params$sub_n_clusters) else NA_integer_
+
+  fit_k = function(k) {
+    set.seed(1)
+    snn = buildSNNGraph(merged[, cl_cells], k = k, use.dimred = "corrected")
+    setNames(igraph::cluster_louvain(snn)$membership, cl_cells)
+  }
+
+  if (as.integer(params$sub_k) > 0) {
+    k_cl   = as.integer(params$sub_k)
+    fits   = setNames(list(fit_k(k_cl)), as.character(k_cl))
+    search = data.frame(cluster = cl, k = k_cl, mean_ari = NA_real_,
+                        n_clusters = dplyr::n_distinct(fits[[1]]),
+                        stringsAsFactors = FALSE)
+  } else {
+    if (nrow(eligible) == 0)
+      stop("cluster ", cl, ": no k in the sweep gave two or more subclusters. ",
+           "Set sub_k to force a value.")
+
+    cand   = eligible %>% dplyr::arrange(dplyr::desc(mean_ari))
+    fits   = lapply(cand$k, fit_k)
+    names(fits) = as.character(cand$k)
+    search = data.frame(cluster    = cl,
+                        k          = cand$k,
+                        mean_ari   = cand$mean_ari,
+                        n_clusters = vapply(fits, dplyr::n_distinct, integer(1)),
+                        stringsAsFactors = FALSE)
+
+    if (is.na(target)) {
+      k_cl = search$k[which.max(search$mean_ari)]
     } else {
-      NA_integer_
+      ok = search %>% dplyr::filter(n_clusters == target)
+      if (nrow(ok) == 0)
+        stop("cluster ", cl, ": no k in sub_k_range returns ", target,
+             " subclusters. The sweep gives ",
+             paste0("k=", search$k, " -> ", search$n_clusters,
+                    collapse = "; "),
+             ". Widen sub_k_range, set sub_n_clusters to a count the sweep ",
+             "reaches, or set sub_k to force a value.")
+      k_cl = ok$k[which.max(ok$mean_ari)]
     }
+  }
 
-  if (is.na(k_cl))
-    stop("cluster ", cl, ": no k in the sweep gave two or more subclusters. ",
-         "Set sub_k to force a value.")
+  search$target = target
+  search$chosen = search$k == k_cl
+  search_tabs[[cl]] = search
 
-  set.seed(1)
-  snn = buildSNNGraph(merged[, cl_cells], k = k_cl, use.dimred = "corrected")
-  sub_assign[[cl]] = setNames(igraph::cluster_louvain(snn)$membership, cl_cells)
+  sub_assign[[cl]] = fits[[as.character(k_cl)]]
 
   stab_tabs[[cl]] = tab
   chosen_ks[cl]   = k_cl
@@ -541,7 +586,22 @@ datatable(stab_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
+Each k in the sweep is fitted on the full cluster and the subclusters it returns
+are counted. The table below is that search, ordered by stability. When a target
+count applies, the chosen k is the most stable one returning that count.
+
+```{r, eval=have_split}
+search_tab = dplyr::bind_rows(search_tabs)
+write.csv(search_tab, file = paste0(results_dir, "/subcluster_k_choice.csv"),
+          row.names = FALSE)
+
+datatable(search_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
 `r if (have_split) paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".") else ""`
+
+`r if (!have_split) "" else if (all(is.na(search_tab$target))) "No target count is set. k is the most stable value in the sweep." else { best = search_tab %>% dplyr::group_by(cluster) %>% dplyr::summarise(top = max(mean_ari, na.rm = TRUE), got = mean_ari[chosen], tgt = target[1], .groups = "drop"); paste0("sub_n_clusters restricts the search to the k values returning ", paste(unique(best$tgt), collapse = ", "), " subclusters. ", paste0("Cluster ", best$cluster, " was fitted at mean ARI ", signif(best$got, 3), " against a best-in-sweep of ", signif(best$top, 3), collapse = "; "), ".") }`
 
 ```{r}
 node_chr = merged$final_label
@@ -662,6 +722,8 @@ if (have_prev && length(sub_nodes_now) > 0) {
 ```
 
 ```{r}
+merge_tab = NULL
+
 if (!is.null(map_tab)) {
   weak  = map_tab$new[map_tab$jaccard < params$min_map_jaccard]
   # one old subcluster winning two new ones is a split
@@ -686,6 +748,23 @@ if (!is.null(map_tab)) {
       dplyr::pull(line),
     collapse = "\n")
 
+  # A merge is not a failure of the mapping. The clustering simply did not
+  # separate two groups the earlier run did, and both labels belong on the node
+  # that took the cells. Under on_merge = "combine" the annotations are joined
+  # and reported; under "stop" the run halts instead.
+  if (length(merged_away) > 0 && identical(as.character(params$on_merge), "combine")) {
+    merge_tab = pair_j %>%
+      dplyr::filter(old %in% merged_away) %>%
+      dplyr::group_by(old) %>%
+      dplyr::slice_max(shared, n = 1, with_ties = FALSE) %>%
+      dplyr::ungroup() %>%
+      dplyr::mutate(annotation = unname(anno_map[old]),
+                    kept_share = shared / n_old) %>%
+      dplyr::select(old, annotation, absorbed_by = new, shared, n_old,
+                    kept_share, jaccard)
+    merged_away = character(0)
+  }
+
   if (length(weak) > 0 || length(split) > 0 || length(unlab) > 0 ||
       length(merged_away) > 0)
     stop("the annotation cannot be carried over.\n",
@@ -699,7 +778,9 @@ if (!is.null(map_tab)) {
            paste0("  these old subclusters are the best match for nothing, so ",
                   "their annotation would be lost: ",
                   paste(merged_away, collapse = ", "), "\n",
-                  "    their cells are now in:\n", fate(merged_away), "\n") else "",
+                  "    their cells are now in:\n", fate(merged_away), "\n",
+                  "    set on_merge to 'combine' to join the labels instead.\n")
+         else "",
          if (length(unlab) > 0)
            paste0("  no annotation given for the matched old subcluster of: ",
                   paste(unlab, collapse = ", "), "\n") else "",
@@ -715,10 +796,33 @@ node_anno[direct] = anno_map[direct]
 if (!is.null(map_tab))
   node_anno[map_tab$new] = map_tab$annotation
 
+# a node that absorbed another annotated subcluster carries both labels. The
+# components are kept in node_parts so the root can still be named by any one
+# of them.
+node_parts = as.list(node_anno)
+names(node_parts) = node_levels
+if (!is.null(merge_tab)) {
+  for (i in seq_len(nrow(merge_tab))) {
+    nd = merge_tab$absorbed_by[i]
+    node_parts[[nd]] = union(node_parts[[nd]], merge_tab$annotation[i])
+  }
+  node_anno[names(node_parts)] = vapply(node_parts,
+                                        function(z) paste(z, collapse = " / "),
+                                        character(1))
+}
+
 node_label = ifelse(node_anno == node_levels, node_levels,
                     paste0(node_levels, " ", node_anno))
 names(node_label) = node_levels
 ```
+
+```{r}
+if (!is.null(merge_tab))
+  datatable(merge_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
+            rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (is.null(merge_tab)) "" else paste0("**", nrow(merge_tab), " annotated subcluster(s) have no counterpart in this clustering.** The clustering did not separate them from the subcluster that absorbed their cells. Both labels are kept on that node, joined with a slash. ", paste0(merge_tab$old, " (", merge_tab$annotation, ") went into ", merge_tab$absorbed_by, ", taking ", round(100 * merge_tab$kept_share), " percent of its cells there", collapse = "; "), ". The combined labels are worth confirming with whoever made the annotation.")`
 
 ## Nodes dropped
 
@@ -887,10 +991,15 @@ if (!nzchar(root_req))
                                  all    = params$all_root_node))
 
 if (nzchar(root_req)) {
+  # a node that absorbed another annotated subcluster carries several labels, so
+  # the match is against the components rather than the joined string
+  has_part = vapply(node_levels,
+                    function(nd) root_req %in% node_parts[[nd]], logical(1))
+
   root = if (root_req %in% node_levels) {
     root_req
-  } else if (root_req %in% node_anno) {
-    hit = node_levels[node_anno == root_req]
+  } else if (any(has_part)) {
+    hit = node_levels[has_part]
     if (length(hit) > 1)
       stop("the root annotation '", root_req, "' matches more than one node: ",
            paste(hit, collapse = ", "))
@@ -898,7 +1007,7 @@ if (nzchar(root_req)) {
   } else {
     stop("root '", root_req, "' is neither a node nor an annotation. Nodes: ",
          paste(node_levels, collapse = ", "), ". Annotations: ",
-         paste(sort(unique(node_anno)), collapse = ", "))
+         paste(sort(unique(unlist(node_parts))), collapse = ", "))
   }
 } else {
   rule_parts = regmatches(root_rule, regexec("^(max|min):(.+)$", root_rule))[[1]]
