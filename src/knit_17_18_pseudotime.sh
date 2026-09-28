@@ -22,10 +22,11 @@
 # TSCAN runs before monocle3 for each lineage, because the monocle3 document
 # compares its ordering with the TSCAN one when that file exists.
 #
-# Run a subset by setting LINEAGES or METHODS:
+# Defaults to the all lineage with TSCAN, which is the analysis being reported.
+# Widen it by setting LINEAGES or METHODS:
 #
-#   LINEAGES=all METHODS=monocle3 sbatch src/knit_17_18_pseudotime.sh
-#   LINEAGES=male sbatch src/knit_17_18_pseudotime.sh
+#   LINEAGES="female male all" sbatch src/knit_17_18_pseudotime.sh
+#   METHODS="tscan monocle3" sbatch src/knit_17_18_pseudotime.sh
 #
 # Time and memory are estimates. Read the seff output and trim them on a rerun.
 
@@ -36,10 +37,15 @@ export R_LIBS_SITE="/opt/software-current/2023.06/x86_64/generic/software/R-bund
 
 PROJECT_DIR="/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA"
 RESULTS_DATE="${RESULTS_DATE:-20260813}"
-LINEAGES="${LINEAGES:-female male all}"
-METHODS="${METHODS:-tscan monocle3}"
+LINEAGES="${LINEAGES:-all}"
+METHODS="${METHODS:-tscan}"
 OUT_DIR="${PROJECT_DIR}/html"
 CORES="${SLURM_CPUS_PER_TASK:-4}"
+# The node assignment of the run whose subclusters were annotated. 17 needs it
+# to carry the annotation onto the new subclusters and to drop the cells the
+# collaborators called somatic. Re-running 17 overwrites pseudotime_per_cell.csv,
+# so this points at a copy.
+PREV_NODES="${PREV_NODES:-${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_all/pseudotime_per_cell_annotated.csv}"
 
 mkdir -p "${PROJECT_DIR}/run" "${OUT_DIR}"
 
@@ -72,7 +78,7 @@ for lineage in ${LINEAGES}; do
     case "${method}" in
       tscan)
         RMD="${PROJECT_DIR}/src/17_germ_pseudotime_tscan.Rmd"
-        EXTRA=""
+        EXTRA=", prev_nodes_file = '${PREV_NODES}'"
         ;;
       monocle3)
         RMD="${PROJECT_DIR}/src/18_germ_pseudotime_monocle3.Rmd"
