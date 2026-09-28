@@ -36,8 +36,11 @@ params:
     prev_nodes_file: ""
     annotate_lineages: "all,male"
     node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
-    drop_annotations: "Migrating neural crest cells"
+    drop_annotations: ""
     min_map_jaccard: 0.25
+    dist_method: "mnn"
+    mnn_k: 50
+    outgroup: FALSE
     on_merge: "combine"
     on_split: "label_both"
     min_library_cells: 50
@@ -1525,6 +1528,7 @@ pseudo_file     = paste0(Robject_out_dir, "/tscan_pseudo.Rds")
 pseudo_sig_file = paste0(Robject_out_dir, "/tscan_pseudo_signature.txt")
 pseudo_sig      = paste(obj_sig, root, paste(node_levels, collapse = ","),
                         paste(as.integer(table(merged$node)), collapse = ","),
+                        params$dist_method, params$mnn_k, params$outgroup,
                         sep = "|")
 
 if (file.exists(pseudo_file) && file.exists(pseudo_sig_file) &&
@@ -1533,10 +1537,12 @@ if (file.exists(pseudo_file) && file.exists(pseudo_sig_file) &&
 } else {
   set.seed(1)
   pseudo = quickPseudotime(merged,
-                           clusters   = merged$node,
-                           use.dimred = "corrected",
-                           outgroup   = FALSE,
-                           start      = root)
+                           clusters    = merged$node,
+                           use.dimred  = "corrected",
+                           dist.method = as.character(params$dist_method),
+                           mnn.k       = params$mnn_k,
+                           outgroup    = params$outgroup,
+                           start       = root)
   saveRDS(pseudo, file = pseudo_file)
   writeLines(pseudo_sig, pseudo_sig_file)
 }
