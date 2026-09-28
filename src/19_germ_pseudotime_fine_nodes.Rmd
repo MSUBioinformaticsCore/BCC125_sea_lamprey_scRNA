@@ -1,0 +1,631 @@
+---
+title: "19_germ_pseudotime_fine_nodes"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    results_date: "20260813"
+    atlas_suffix: ""
+    lineage: "all"
+    female_clusters: "5"
+    male_clusters: "15,16,17,18"
+    all_clusters: "5,15,16,17,18"
+    sub_k: 10
+    min_node_cells: 30
+    dist_method: "mnn"
+    mnn_k: 50
+    outgroup: FALSE
+    root_rule: "max:Primordial germ cells"
+    root_node: ""
+    min_detect_pct: 5
+    marker_file: canonical_markers_S1_only_2026-08-14.csv
+    prev_nodes_file: ""
+    node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
+    min_library_cells: 50
+    fdr_cut: 0.01
+    go_pval: 0.05
+    genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+cat("#### Lineage:", params$lineage, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(batchelor)
+library(BiocSingular)
+library(TSCAN)
+library(patchwork)
+library(DT)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+TSCAN pseudotime for the `r params$lineage` germ cells, with **every** cluster
+subclustered finely and no cell removed.
+
+The tree TSCAN fits is a minimum spanning tree over one centroid per node, so
+the number of nodes is the number of points the trajectory is fitted to. `17`
+gives it around a dozen, of which four are whole clusters holding thousands of
+cells each. A tree on twelve points is coarse and moves whenever a node moves.
+
+This document treats nodes as waypoints rather than cell types. Every cluster is
+cut into small subclusters at a fixed `sub_k`, which gives the tree many more
+points to follow. Nothing here needs a node to be interpretable, so nothing here
+depends on the subclustering being stable or on any node carrying a label.
+
+The collaborators' annotation is carried **per cell**, by barcode, from the run
+named in `prev_nodes_file`. It is never attached to a node. Re-clustering
+therefore cannot break it, and the interpretation is read off the composition of
+the trajectory rather than off node names.
+
+```{r}
+lineage = as.character(params$lineage)
+if (!lineage %in% c("female", "male", "all"))
+  stop("lineage must be 'female', 'male' or 'all', not '", lineage, "'")
+
+clusters = trimws(strsplit(as.character(switch(lineage,
+  female = params$female_clusters,
+  male   = params$male_clusters,
+  all    = params$all_clusters)), ",")[[1]])
+clusters = clusters[nzchar(clusters)]
+
+object_dir      = paste0(params$project_dir, "/results/", params$results_date,
+                         "_no_doublets")
+atlas_dir       = paste0(params$project_dir, "/results/", params$results_date,
+                         "_atlas", params$atlas_suffix)
+results_dir     = paste0(params$project_dir, "/results/", params$results_date,
+                         "_pseudotime_fine_", lineage, params$atlas_suffix)
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+
+label_file = paste0(atlas_dir, "/cell_cluster_labels.csv")
+if (!file.exists(label_file))
+  stop("missing ", label_file, ". Run 13 first.")
+
+cell_labels      = read.csv(label_file, stringsAsFactors = FALSE)
+all.sce          = readRDS(paste0(object_dir, "/all.sce.Rds"))
+gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE) %>%
+  dplyr::distinct(Gene, .keep_all = TRUE)
+
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+
+tech     = technical_gene_ids(gene_description)
+mito_ids = tech$mito
+rrna_ids = tech$rrna
+ribo_ids = tech$ribo
+```
+
+# Cells
+
+```{r}
+absent = setdiff(clusters, cell_labels$final_label)
+if (length(absent) > 0)
+  stop("cluster(s) ", paste(absent, collapse = ", "), " are not in ", label_file,
+       ". Labels present: ",
+       paste(sort(unique(cell_labels$final_label)), collapse = ", "))
+
+lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
+
+# the annotation, per cell, by barcode. Nothing is dropped on the strength of it.
+parse_pairs = function(x) {
+  x = trimws(x)
+  if (!nzchar(x)) return(character(0))
+  kv = strsplit(trimws(strsplit(x, ";")[[1]]), "=")
+  setNames(vapply(kv, function(z) trimws(z[2]), character(1)),
+           vapply(kv, function(z) trimws(z[1]), character(1)))
+}
+
+anno_map  = parse_pairs(params$node_annotation)
+prev_file = as.character(params$prev_nodes_file)
+have_prev = nzchar(prev_file) && file.exists(prev_file)
+
+cell_anno = rep(NA_character_, nrow(lineage_key))
+if (have_prev) {
+  prev = read.csv(prev_file, stringsAsFactors = FALSE)
+  stopifnot(all(c("barcode", "node") %in% colnames(prev)))
+  old = prev$node[match(lineage_key$barcode, prev$barcode)]
+  cell_anno = unname(anno_map[as.character(old)])
+  cell_anno[is.na(cell_anno) & !is.na(old)] = as.character(old)[is.na(cell_anno) & !is.na(old)]
+}
+lineage_key$annotation = ifelse(is.na(cell_anno), "unannotated", cell_anno)
+
+comp_tab = lineage_key %>%
+  dplyr::count(final_label, annotation, name = "n") %>%
+  tidyr::pivot_wider(names_from = annotation, values_from = n, values_fill = 0)
+
+write.csv(comp_tab, file = paste0(results_dir, "/cluster_by_annotation.csv"),
+          row.names = FALSE)
+
+datatable(comp_tab, rownames = FALSE, options = list(dom = "t", scrollX = TRUE))
+```
+
+`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ". No cell is removed, so 5.1 is present.", if (!have_prev) " **prev_nodes_file is not set**, so no annotation is carried and the trajectory cannot be read against it." else paste0(" ", format(sum(lineage_key$annotation != "unannotated"), big.mark = ","), " carry an annotation from ", basename(prev_file), "."))`
+
+# Corrected space
+
+```{r}
+obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
+obj_sig_file = paste0(Robject_out_dir, "/lineage_objects_signature.txt")
+obj_sig      = paste(lineage, paste(sort(clusters), collapse = ","),
+                     nrow(lineage_key), params$min_library_cells, sep = "|")
+
+if (file.exists(obj_file) && file.exists(obj_sig_file) &&
+    identical(readLines(obj_sig_file, warn = FALSE)[1], obj_sig)) {
+  objs = readRDS(obj_file)
+} else {
+  objs = build_lineage_sce(all.sce, lineage_key$barcode,
+                           min_library_cells = params$min_library_cells)
+  saveRDS(objs, file = obj_file)
+  writeLines(obj_sig, obj_sig_file)
+}
+
+merged   = objs$corrected
+combined = objs$combined
+
+key_idx = match(colnames(merged), lineage_key$barcode)
+stopifnot(!anyNA(key_idx))
+merged$library     = lineage_key$library[key_idx]
+merged$stage       = lineage_key$stage[key_idx]
+merged$final_label = lineage_key$final_label[key_idx]
+merged$annotation  = lineage_key$annotation[key_idx]
+```
+
+`r paste0(format(ncol(merged), big.mark = ","), " cells from ", length(objs$kept_batches), " librar", if (length(objs$kept_batches) == 1) "y" else "ies", " are kept.")`
+
+# Fine nodes
+
+Every cluster is subclustered in the shared corrected space, using only that
+cluster's cells, at a fixed `sub_k`. A smaller `sub_k` gives more and smaller
+subclusters. There is no stability sweep, because nothing downstream asks a node
+to be a reproducible cell type.
+
+Subclusters below `min_node_cells` are merged into the nearest subcluster of the
+same parent cluster, by centroid distance. A node of five cells gives a centroid
+that is mostly noise, and the tree is fitted on centroids.
+
+```{r}
+set.seed(1)
+sub_of = rep(NA_character_, ncol(merged))
+names(sub_of) = colnames(merged)
+
+for (cl in clusters) {
+  cl_cells = colnames(merged)[merged$final_label == cl]
+  if (length(cl_cells) < 2 * params$min_node_cells) {
+    sub_of[cl_cells] = paste0(cl, ".1")
+    next
+  }
+  set.seed(1)
+  snn = buildSNNGraph(merged[, cl_cells], k = params$sub_k,
+                      use.dimred = "corrected")
+  mem = igraph::cluster_louvain(snn)$membership
+  names(mem) = cl_cells
+
+  # merge anything too small into the nearest surviving subcluster
+  co = reducedDim(merged, "corrected")[cl_cells, , drop = FALSE]
+  repeat {
+    tab   = table(mem)
+    small = names(tab)[tab < params$min_node_cells]
+    if (length(small) == 0 || length(tab) <= 1) break
+    cent = do.call(rbind, lapply(names(tab), function(g)
+      colMeans(co[mem == g, , drop = FALSE])))
+    rownames(cent) = names(tab)
+    d = as.matrix(dist(cent))
+    diag(d) = Inf
+    s = small[which.min(tab[small])]
+    mem[mem == s] = names(tab)[which.min(d[s, ])]
+  }
+  sub_of[cl_cells] = paste0(cl, ".", match(mem, sort(unique(mem))))
+}
+
+stopifnot(!anyNA(sub_of))
+
+node_levels = unique(sub_of)
+node_levels = node_levels[order(match(sub(
+  "\\..*$", "", node_levels), clusters),
+  as.integer(sub("^.*\\.", "", node_levels)))]
+merged$node   = factor(sub_of, levels = node_levels)
+combined$node = merged$node
+
+node_tab = as.data.frame(colData(merged)) %>%
+  dplyr::count(node, final_label, name = "n_cells") %>%
+  dplyr::arrange(node)
+
+write.csv(node_tab, file = paste0(results_dir, "/node_composition.csv"),
+          row.names = FALSE)
+
+datatable(node_tab, rownames = FALSE, options = list(pageLength = 15))
+```
+
+`r paste0(length(node_levels), " nodes from ", length(clusters), " clusters, at sub_k = ", params$sub_k, ", with a floor of ", params$min_node_cells, " cells. Median node size ", round(median(as.integer(table(merged$node)))), " cells, smallest ", min(as.integer(table(merged$node))), ", largest ", max(as.integer(table(merged$node))), ". ", if (length(node_levels) < 2) "**Fewer than two nodes, so no tree can be built.**" else "")`
+
+```{r}
+per_cluster = node_tab %>%
+  dplyr::count(final_label, name = "n_nodes") %>%
+  dplyr::arrange(match(final_label, clusters))
+datatable(per_cluster, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## What the nodes are made of
+
+Nodes are not cell types, so the question is not what each one is but how the
+annotation is distributed over them. A node drawn from one annotation is a
+waypoint inside that population. A node mixing several is a waypoint on a
+boundary, which is expected wherever the biology is continuous.
+
+```{r, fig.width=12, fig.height=5}
+anno_by_node = as.data.frame(colData(merged)) %>%
+  dplyr::count(node, annotation, name = "n") %>%
+  dplyr::group_by(node) %>%
+  dplyr::mutate(frac = n / sum(n)) %>%
+  dplyr::ungroup()
+
+write.csv(anno_by_node, file = paste0(results_dir, "/node_by_annotation.csv"),
+          row.names = FALSE)
+
+p_anno = ggplot(anno_by_node, aes(x = node, y = frac, fill = annotation)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 7),
+        legend.text = element_text(size = 7)) +
+  labs(x = NULL, y = "fraction of the node", fill = NULL,
+       title = "Annotation composition of each node")
+
+p_anno
+ggsave(p_anno, file = paste0(results_dir, "/node_by_annotation.png"),
+       width = 12, height = 5, dpi = 300)
+```
+
+# Root
+
+Every node is scored on the germ cell marker sets. The root is the node with the
+highest mean expression of the set named in `root_rule`, unless `root_node` names
+one directly. This does not consult the annotation, so the root does not depend
+on any label being right.
+
+```{r}
+germ_sets = c("Primordial germ cells", "Migrating germ cells",
+              "Spermatogonial stem cells", "Spermatocytes", "Oocyte")
+
+set_genes = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
+                     stringsAsFactors = FALSE) %>%
+  dplyr::mutate(loc_id = trimws(loc_id)) %>%
+  dplyr::filter(CellTypeMarkerSet %in% germ_sets) %>%
+  dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id)
+
+set_scores = score_marker_sets(combined, merged$node, set_genes) %>%
+  dplyr::rename(node = group)
+
+write.csv(set_scores, file = paste0(results_dir, "/node_marker_set_scores.csv"),
+          row.names = FALSE)
+
+root_req = as.character(params$root_node)
+if (nzchar(root_req)) {
+  if (!root_req %in% node_levels)
+    stop("root_node '", root_req, "' is not a node. Nodes: ",
+         paste(node_levels, collapse = ", "))
+  root      = root_req
+  rule_set  = NA_character_
+  root_pct  = NA_real_
+  weak_root = FALSE
+} else {
+  rp = regmatches(params$root_rule,
+                  regexec("^(max|min):(.+)$", params$root_rule))[[1]]
+  if (length(rp) != 3)
+    stop("root_rule '", params$root_rule, "' must look like max:<set> or min:<set>")
+  rule_dir = rp[2]
+  rule_set = trimws(rp[3])
+  if (!rule_set %in% germ_sets)
+    stop("root rule set '", rule_set, "' is not one of: ",
+         paste(germ_sets, collapse = ", "))
+
+  cand = set_scores %>% dplyr::filter(set == rule_set, !is.na(mean_logexpr))
+  if (nrow(cand) == 0)
+    stop("no gene from the ", rule_set, " set is in the data; set root_node")
+  pick      = if (rule_dir == "max") which.max(cand$mean_logexpr) else
+                which.min(cand$mean_logexpr)
+  root      = as.character(cand$node[pick])
+  root_pct  = cand$pct_detected[pick]
+  weak_root = rule_dir == "max" && root_pct < params$min_detect_pct
+}
+```
+
+`r paste0("Rooted at **", root, "**", if (nzchar(root_req)) ", set by root_node." else paste0(", the node with the highest mean expression of the ", rule_set, " set, detected in ", round(root_pct, 1), " percent of its cells."), if (weak_root) paste0(" **That is below min_detect_pct (", params$min_detect_pct, "), so the root rests on weak evidence.**") else "", " The root is an assumption. Rooting elsewhere gives a different ordering.")`
+
+# Trajectory
+
+`dist_method` sets how the distance between two nodes is measured. `simple` is
+plain Euclidean distance between centroids and is the TSCAN default. `mnn`, the
+default here, instead finds the mutual nearest neighbor pairs between each pair
+of nodes and takes the median distance between them. It therefore measures how
+close two nodes are at their *boundaries* rather than at their centers, which is
+the right question when nodes are broad and intermingle. `mnn_k` sets how many
+neighbors the search considers.
+
+MNN runs a cell-based neighbor search for every pair of nodes, so it costs more
+time and memory than `simple`, and that cost grows with the number of nodes.
+
+`outgroup` decides whether every node must join one tree. With `FALSE` the tree
+is forced to be connected, so a node that belongs nowhere is still grafted on at
+its nearest neighbor. With `TRUE`, an edge longer than 1.5 times the median edge
+length is rerouted through an artificial outgroup and the tree breaks into
+components. That is how a node detaches itself rather than being removed by hand.
+
+```{r}
+pseudo_file     = paste0(Robject_out_dir, "/tscan_pseudo.Rds")
+pseudo_sig_file = paste0(Robject_out_dir, "/tscan_pseudo_signature.txt")
+pseudo_sig      = paste(obj_sig, root, params$sub_k, params$min_node_cells,
+                        params$dist_method, params$mnn_k, params$outgroup,
+                        paste(node_levels, collapse = ","), sep = "|")
+
+if (file.exists(pseudo_file) && file.exists(pseudo_sig_file) &&
+    identical(readLines(pseudo_sig_file, warn = FALSE)[1], pseudo_sig)) {
+  pseudo = readRDS(pseudo_file)
+} else {
+  set.seed(1)
+  pseudo = quickPseudotime(merged,
+                           clusters    = merged$node,
+                           use.dimred  = "corrected",
+                           dist.method = as.character(params$dist_method),
+                           mnn.k       = params$mnn_k,
+                           outgroup    = params$outgroup,
+                           start       = root)
+  saveRDS(pseudo, file = pseudo_file)
+  writeLines(pseudo_sig, pseudo_sig_file)
+}
+
+merged$pseudotime   = averagePseudotime(pseudo$ordering)
+combined$pseudotime = merged$pseudotime
+n_paths = ncol(pseudo$ordering)
+n_comp  = igraph::count_components(pseudo$mst)
+```
+
+`r paste0(n_paths, " path", if (n_paths == 1) "" else "s", " from the root. The tree has ", n_comp, " component", if (n_comp == 1) "" else "s", if (n_comp > 1) paste0(", so outgroup splitting separated ", n_comp - 1, " group(s) from the main tree.") else ".", " ", sum(is.na(merged$pseudotime)), " cells have no pseudotime.")`
+
+## Edge confidence
+
+`createClusterMST` records a `gain` on every edge: the extra distance the tree
+would need if that edge were removed, divided by the edge's own length. A small
+gain means the edge is arbitrary, because an almost equally short path exists
+without it. This is the tree's own statement about which connections to trust.
+
+```{r}
+edge_tab = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
+  dplyr::rename(node_1 = from, node_2 = to) %>%
+  dplyr::mutate(length = signif(weight, 3),
+                gain   = signif(gain, 3)) %>%
+  dplyr::select(node_1, node_2, length, gain) %>%
+  dplyr::arrange(gain)
+
+write.csv(edge_tab, file = paste0(results_dir, "/mst_edges.csv"),
+          row.names = FALSE)
+
+datatable(edge_tab, rownames = FALSE, options = list(pageLength = 15))
+```
+
+`r if (nrow(edge_tab) == 0) "" else paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], " at a normalized gain of ", edge_tab$gain[1], ". ", sum(edge_tab$gain < 1), " of ", nrow(edge_tab), " edges have a gain below 1, meaning removing them would lengthen the tree by less than their own length.")`
+
+```{r, fig.width=13, fig.height=5}
+by_node = aggregateAcrossCells(
+  merged, ids = merged$node,
+  use.assay.type = if ("reconstructed" %in% assayNames(merged))
+    "reconstructed" else "logcounts")
+edges_umap = reportEdges(by_node, mst = pseudo$mst, clusters = NULL,
+                         use.dimred = "UMAP")
+
+p_anno_umap = plotUMAP(merged, colour_by = "annotation", point_size = .4) +
+  geom_line(data = edges_umap, aes(x = UMAP1, y = UMAP2, group = edge)) +
+  ggtitle("Annotation, carried per cell")
+p_pt_umap = plotUMAP(merged, colour_by = "pseudotime", point_size = .4) +
+  geom_line(data = edges_umap, aes(x = UMAP1, y = UMAP2, group = edge)) +
+  ggtitle("Pseudotime")
+
+p_anno_umap | p_pt_umap
+ggsave(p_anno_umap | p_pt_umap,
+       file = paste0(results_dir, "/trajectory_umap.png"), width = 13, height = 5)
+```
+
+# What the ordering says
+
+This is where the trajectory is interpreted, and it is done from the cells
+rather than from node names. The annotation is the collaborators' expert call
+carried by barcode, so its distribution along pseudotime is the claim.
+
+```{r, fig.width=12, fig.height=5}
+pt_df = as.data.frame(colData(merged))
+pt_df$barcode = colnames(merged)
+
+p_anno_pt = ggplot(pt_df %>% dplyr::filter(!is.na(pseudotime)),
+                   aes(x = pseudotime, y = reorder(annotation, pseudotime,
+                                                   FUN = median))) +
+  geom_boxplot(outlier.size = .2) +
+  theme_bw() + labs(x = "pseudotime", y = NULL,
+                    title = "Annotation along the ordering")
+p_lib_pt = ggplot(pt_df %>% dplyr::filter(!is.na(pseudotime)),
+                  aes(x = pseudotime, y = library, fill = library)) +
+  geom_boxplot(outlier.size = .2) +
+  scale_fill_manual(values = lib_cols) +
+  theme_bw() + theme(legend.position = "none") +
+  labs(x = "pseudotime", y = NULL, title = "Library")
+
+p_anno_pt | p_lib_pt
+ggsave(p_anno_pt | p_lib_pt,
+       file = paste0(results_dir, "/pseudotime_by_annotation.png"),
+       width = 12, height = 5)
+```
+
+```{r}
+anno_order = pt_df %>%
+  dplyr::filter(!is.na(pseudotime)) %>%
+  dplyr::group_by(annotation) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   median_pseudotime = signif(median(pseudotime), 3),
+                   q1 = signif(quantile(pseudotime, .25), 3),
+                   q3 = signif(quantile(pseudotime, .75), 3),
+                   .groups = "drop") %>%
+  dplyr::arrange(median_pseudotime)
+
+write.csv(anno_order, file = paste0(results_dir, "/annotation_pseudotime.csv"),
+          row.names = FALSE)
+
+datatable(anno_order, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## Marker sets along the ordering
+
+Independent of both the node cuts and the annotation. If the ordering is
+developmental, the germ marker sets should move along it.
+
+```{r, fig.width=12, fig.height=4}
+mk_long = dplyr::bind_rows(lapply(germ_sets, function(s) {
+  g = intersect(unique(set_genes$gene[set_genes$set == s]), rownames(combined))
+  if (length(g) == 0) return(NULL)
+  m = as.matrix(logcounts(combined)[g, , drop = FALSE])
+  data.frame(set = s, pseudotime = merged$pseudotime,
+             score = colMeans(m), stringsAsFactors = FALSE)
+})) %>% dplyr::filter(!is.na(pseudotime))
+
+mk_stats = mk_long %>%
+  dplyr::group_by(set) %>%
+  dplyr::summarise(rho = signif(suppressWarnings(
+                     cor(pseudotime, score, method = "spearman")), 3),
+                   p = signif(suppressWarnings(
+                     cor.test(pseudotime, score, method = "spearman")$p.value), 3),
+                   .groups = "drop")
+
+write.csv(mk_stats, file = paste0(results_dir, "/marker_sets_vs_pseudotime.csv"),
+          row.names = FALSE)
+
+p_mk = ggplot(mk_long, aes(x = pseudotime, y = score)) +
+  geom_point(size = .15, alpha = .2) +
+  geom_smooth(method = "loess", se = FALSE, colour = "#b2182b", linewidth = .7) +
+  facet_wrap(~ set, scales = "free_y", nrow = 1) +
+  theme_bw() + labs(x = "pseudotime", y = "mean log expression")
+
+p_mk
+ggsave(p_mk, file = paste0(results_dir, "/marker_sets_vs_pseudotime.png"),
+       width = 12, height = 4, dpi = 300)
+
+datatable(mk_stats, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## What else the ordering tracks
+
+Pooled across libraries, a trend can be the libraries sitting at different ends
+of the tree. The within-library figures cannot be that.
+
+```{r}
+cnt = counts(combined)
+tot = Matrix::colSums(cnt)
+qc = data.frame(
+  barcode    = colnames(combined),
+  pseudotime = merged$pseudotime,
+  library    = as.character(merged$library),
+  total      = as.numeric(tot),
+  detected   = as.numeric(Matrix::colSums(cnt > 0)),
+  pct_mito   = 100 * as.numeric(Matrix::colSums(
+                 cnt[intersect(mito_ids, rownames(cnt)), , drop = FALSE])) / tot,
+  pct_rrna   = 100 * as.numeric(Matrix::colSums(
+                 cnt[intersect(rrna_ids, rownames(cnt)), , drop = FALSE])) / tot,
+  pct_ribo   = 100 * as.numeric(Matrix::colSums(
+                 cnt[intersect(ribo_ids, rownames(cnt)), , drop = FALSE])) / tot,
+  stringsAsFactors = FALSE) %>%
+  dplyr::filter(!is.na(pseudotime))
+
+conf_measures = c("total", "detected", "pct_mito", "pct_rrna", "pct_ribo")
+conf_stats = function(d, label) {
+  if (nrow(d) < 20) return(NULL)
+  dplyr::bind_rows(lapply(conf_measures, function(v) {
+    ok = is.finite(d[[v]]) & is.finite(d$pseudotime)
+    if (sum(ok) < 20) return(NULL)
+    x = if (v %in% c("total", "detected")) log10(d[[v]][ok]) else d[[v]][ok]
+    if (stats::sd(x) == 0) return(NULL)
+    ct = suppressWarnings(cor.test(x, d$pseudotime[ok], method = "spearman"))
+    data.frame(within = label, measure = v, n_cells = sum(ok),
+               r2 = signif(summary(lm(d$pseudotime[ok] ~ x))$r.squared, 3),
+               spearman_rho = signif(unname(ct$estimate), 3),
+               p = signif(ct$p.value, 3), stringsAsFactors = FALSE)
+  }))
+}
+
+conf_tab = dplyr::bind_rows(
+  conf_stats(qc, "all cells"),
+  dplyr::bind_rows(lapply(sort(unique(qc$library)), function(lb)
+    conf_stats(qc[qc$library == lb, , drop = FALSE], lb))))
+
+write.csv(conf_tab, file = paste0(results_dir, "/pseudotime_vs_technical.csv"),
+          row.names = FALSE)
+
+datatable(conf_tab, rownames = FALSE, options = list(pageLength = 15))
+```
+
+`r if (nrow(conf_tab) == 0) "" else { pooled = conf_tab %>% dplyr::filter(within == "all cells"); top = pooled[which.max(pooled$r2), ]; wit = conf_tab %>% dplyr::filter(within != "all cells", measure == top$measure); paste0("Pooled, the strongest is ", top$measure, " at ", round(100 * top$r2, 1), " percent of the variance in pseudotime. Within libraries the same measure gives ", paste0(wit$within, " ", round(100 * wit$r2, 1), " percent", collapse = ", "), ". A pooled figure much larger than the within-library ones is the libraries at different ends of the tree rather than a gradient along it.") }`
+
+# Pseudotime-associated genes
+
+```{r}
+have_pt = sum(!is.na(merged$pseudotime)) > 20
+```
+
+```{r, eval=have_pt}
+pt_res = testPseudotime(merged, pseudotime = merged$pseudotime)
+pt_tab = as.data.frame(pt_res) %>%
+  tibble::rownames_to_column("Gene") %>%
+  dplyr::filter(!is.na(FDR), FDR < params$fdr_cut) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::arrange(FDR) %>%
+  dplyr::select(Gene, WangGeneID, description, logFC, p.value, FDR)
+
+write.csv(pt_tab, file = paste0(results_dir, "/pseudotime_genes.csv"),
+          row.names = FALSE)
+
+datatable(pt_tab %>% dplyr::mutate(dplyr::across(where(is.numeric),
+                                                 ~signif(., 3))),
+          rownames = FALSE, filter = "top", options = list(pageLength = 15))
+```
+
+`r if (!have_pt) "Too few cells have a pseudotime for gene testing." else paste0(nrow(pt_tab), " genes change along the ordering at FDR < ", params$fdr_cut, ".")`
+
+# Export
+
+```{r}
+out = data.frame(barcode    = colnames(merged),
+                 node       = as.character(merged$node),
+                 cluster    = as.character(merged$final_label),
+                 annotation = as.character(merged$annotation),
+                 library    = as.character(merged$library),
+                 stage      = as.character(merged$stage),
+                 pseudotime = merged$pseudotime,
+                 stringsAsFactors = FALSE)
+
+write.csv(out, file = paste0(results_dir, "/pseudotime_per_cell.csv"),
+          row.names = FALSE)
+```
+
+`r paste0("Written to ", results_dir, ".")`
+
+# Session info
+
+```{r}
+sessionInfo()
+```

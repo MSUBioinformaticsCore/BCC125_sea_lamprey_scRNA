@@ -48,6 +48,10 @@ PROJECT_DIR="/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125
 RESULTS_DATE="${RESULTS_DATE:-20260813}"
 LINEAGE="${LINEAGE:-all}"
 ATLAS_SUFFIX="${ATLAS_SUFFIX:-}"
+DIST="${DIST:-mnn}"
+MNN_K="${MNN_K:-50}"
+OUTGROUP="${OUTGROUP:-FALSE}"
+DROP="${DROP:-}"
 OUT_DIR="${PROJECT_DIR}/html"
 
 # unset rather than absent means "run without the annotation and the drops"
@@ -99,6 +103,8 @@ echo "host:       $(hostname)"
 echo "started:    $(date)"
 echo "lineage:    ${LINEAGE}"
 echo "atlas:      ${RESULTS_DATE}_atlas${ATLAS_SUFFIX}"
+echo "distance:   ${DIST}    mnn.k: ${MNN_K}    outgroup: ${OUTGROUP}"
+echo "dropping:   ${DROP:-<nothing, 5.1 is kept>}"
 echo "prev nodes: ${PREV_NODES:-<none>}"
 
 Rscript -e "
@@ -111,6 +117,10 @@ Rscript -e "
                          results_date    = '${RESULTS_DATE}',
                          lineage         = '${LINEAGE}',
                          atlas_suffix    = '${ATLAS_SUFFIX}',
+                         dist_method     = '${DIST}',
+                         mnn_k           = ${MNN_K},
+                         outgroup        = ${OUTGROUP},
+                         drop_annotations = '${DROP}',
                          prev_nodes_file = '${PREV_NODES}'),
     envir         = new.env()
   )
