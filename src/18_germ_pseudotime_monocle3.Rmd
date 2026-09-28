@@ -13,10 +13,11 @@ params:
     project_name: BCC125_sea_lamprey_scRNA
     lab: Weiming Li
     results_date: "20260813"
+    atlas_suffix: ""
     lineage: "female"
     female_clusters: "5"
-    male_clusters: "12_transformer,15,16,17,18"
-    all_clusters: "5,12_transformer,15,16,17,18"
+    male_clusters: "15,16,17,18"
+    all_clusters: "5,15,16,17,18"
     female_root_rule: "min:Oocyte"
     male_root_rule: "max:Primordial germ cells"
     all_root_rule: "max:Primordial germ cells"
@@ -25,6 +26,9 @@ params:
     root_label: ""
     root_monocle_cluster: ""
     min_library_cells: 50
+    prev_nodes_file: ""
+    node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
+    drop_annotations: ""
     use_partition: FALSE
     graph_q: 0.01
     lfc_thresh: 1
@@ -83,12 +87,15 @@ clusters = clusters[nzchar(clusters)]
 
 object_dir      = paste0(params$project_dir, "/results/", params$results_date,
                          "_no_doublets")
+# atlas_suffix picks which atlas to read. "" is 13, "_no_technical_genes" is 13b.
 atlas_dir       = paste0(params$project_dir, "/results/", params$results_date,
-                         "_atlas")
+                         "_atlas", params$atlas_suffix)
 results_dir     = paste0(params$project_dir, "/results/", params$results_date,
-                         "_pseudotime_monocle3_", lineage)
+                         "_pseudotime_monocle3_", lineage, params$atlas_suffix)
+# the TSCAN ordering for the same lineage and the same atlas, when it exists
 tscan_file = paste0(params$project_dir, "/results/", params$results_date,
-                    "_pseudotime_tscan_", lineage, "/pseudotime_per_cell.csv")
+                    "_pseudotime_tscan_", lineage, params$atlas_suffix,
+                    "/pseudotime_per_cell.csv")
 Robject_out_dir = paste0(results_dir, "/Robjects")
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 
@@ -146,6 +153,36 @@ if (length(absent) > 0)
        ". Set the ", lineage, "_clusters parameter from the current labelling.")
 
 lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
+
+# The same cells 17 removes, identified the same way: by barcode, from the run
+# whose subclusters were annotated, before the corrected space is built. Kept
+# identical so the two methods order the same cells and can be compared.
+parse_pairs = function(x) {
+  x = trimws(x)
+  if (!nzchar(x)) return(character(0))
+  kv = strsplit(trimws(strsplit(x, ";")[[1]]), "=")
+  setNames(vapply(kv, function(z) trimws(z[2]), character(1)),
+           vapply(kv, function(z) trimws(z[1]), character(1)))
+}
+
+anno_map  = parse_pairs(params$node_annotation)
+drop_anno = trimws(strsplit(as.character(params$drop_annotations), ";")[[1]])
+drop_anno = drop_anno[nzchar(drop_anno)]
+prev_file = as.character(params$prev_nodes_file)
+have_prev = nzchar(prev_file) && file.exists(prev_file)
+
+drop_cells = character(0)
+if (have_prev && length(drop_anno) > 0) {
+  prev_nodes = read.csv(prev_file, stringsAsFactors = FALSE)
+  stopifnot(all(c("barcode", "node") %in% colnames(prev_nodes)))
+  old_drop_nodes = names(anno_map)[anno_map %in% drop_anno]
+  absent_drop = setdiff(old_drop_nodes, unique(as.character(prev_nodes$node)))
+  if (length(absent_drop) > 0)
+    stop("nodes named by drop_annotations are not in ", prev_file, ": ",
+         paste(absent_drop, collapse = ", "))
+  drop_cells  = prev_nodes$barcode[as.character(prev_nodes$node) %in% old_drop_nodes]
+  lineage_key = lineage_key %>% dplyr::filter(!(barcode %in% drop_cells))
+}
 
 comp_tab = lineage_key %>%
   dplyr::count(final_label, cell_type, library, name = "n") %>%
