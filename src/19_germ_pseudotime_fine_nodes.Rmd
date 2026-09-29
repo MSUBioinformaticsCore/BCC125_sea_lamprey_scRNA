@@ -56,6 +56,9 @@ library(BiocSingular)
 library(TSCAN)
 library(patchwork)
 library(DT)
+library(ggraph)
+library(tidygraph)
+library(ggrepel)
 source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
@@ -445,6 +448,105 @@ ggsave(p_anno_umap | p_pt_umap,
        file = paste0(results_dir, "/trajectory_umap.png"), width = 13, height = 5)
 ```
 
+## Node graph
+
+The tree on its own, laid out by its own structure rather than on the UMAP. With
+many small nodes the shape of the tree is the thing to read, and a UMAP can put
+adjacent nodes far apart. Nodes are sized by cell count, colored by mean
+pseudotime in the first panel and by the annotation holding the most cells in the
+second. Edge width and color both encode the normalized `gain` from the table
+above, so a thin red edge is one the tree could lose cheaply. With this many
+nodes the numbers are omitted; they are in `mst_edges.csv`.
+
+Edge length on this figure is meaningful. The layout is weighted by the real
+distance between nodes, so a long edge means the two nodes are far apart in the
+corrected space. Those distances are the `length` column of `mst_edges.csv`. The
+reproduction is not exact, because a tree in fifty dimensions cannot always be
+drawn faithfully in two, but it is close to a uniform rescale rather than
+arbitrary. If the message about a failed layout appears above, the figure fell
+back to an unweighted layout and edge lengths mean nothing.
+
+```{r, fig.width=11, fig.height=13}
+node_stats = as.data.frame(colData(merged)) %>%
+  dplyr::group_by(node) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   mean_pseudo = mean(pseudotime, na.rm = TRUE),
+                   top_anno = names(sort(table(annotation),
+                                         decreasing = TRUE))[1],
+                   .groups = "drop") %>%
+  dplyr::rename(name = node) %>%
+  dplyr::mutate(name = as.character(name))
+
+gr = as_tbl_graph(pseudo$mst) %>%
+  activate(nodes) %>%
+  left_join(node_stats, by = "name")
+
+# Layout by real distance. The stress layout ignores edge weights by default and
+# draws every edge at roughly the same length, so the picture says nothing about
+# how far apart nodes are. graphlayouts treats weights as similarities, not
+# distances, so the reciprocal is what is passed: a long edge then has a weak
+# pull and is drawn long. On test trees this reproduces the true edge lengths to
+# a near-uniform scale factor, correlation 0.999. It also survives a tree split
+# into components, which a distance-matrix layout does not.
+layout_by_distance = function(graph, lengths) {
+  w = as.numeric(lengths)
+  w[!is.finite(w) | w <= 0] = min(w[is.finite(w) & w > 0], na.rm = TRUE) / 1000
+  out = try(create_layout(graph, layout = "stress", weights = 1 / w), silent = TRUE)
+  if (inherits(out, "try-error")) {
+    message("distance-weighted layout failed; falling back to plain stress, ",
+            "so edge lengths on the figure will not be meaningful")
+    out = create_layout(graph, layout = "stress")
+  }
+  out
+}
+
+e_len = igraph::as_data_frame(pseudo$mst, what = "edges")$weight
+set.seed(1)
+lay = layout_by_distance(gr, e_len)
+
+# edges carry their normalized gain: width and colour both encode it, so an edge
+# the tree could lose cheaply reads as thin and red
+lay_d = as.matrix(dist(as.matrix(lay[, c("x", "y")])))
+diag(lay_d) = Inf
+lay_span = max(diff(range(lay$x)), diff(range(lay$y)))
+# node sizes scaled to how tightly the distance-faithful layout packs them
+size_hi = max(2.5, min(9, 55 * min(lay_d) / lay_span))
+
+edge_aes = list(
+  geom_edge_link(aes(edge_colour = gain, edge_width = gain)),
+  scale_edge_colour_gradient(low = "#d6604d", high = "#2166ac",
+                             name = "edge gain"),
+  scale_edge_width(range = c(.3, 1.8), guide = "none"))
+
+g_pt = ggraph(lay) +
+  edge_aes +
+  geom_node_point(aes(size = n_cells, colour = mean_pseudo)) +
+  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
+  scale_colour_viridis_c() +
+  scale_size_continuous(range = c(max(1, size_hi / 4), size_hi)) +
+  theme_void(base_size = 9) +
+  labs(colour = "mean pseudotime", size = "cells", tag = "A")
+
+g_an = ggraph(lay) +
+  edge_aes +
+  geom_node_point(aes(size = n_cells, colour = top_anno)) +
+  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
+  scale_size_continuous(range = c(max(1, size_hi / 4), size_hi)) +
+  theme_void(base_size = 9) +
+  labs(colour = "most common annotation", size = "cells", tag = "B")
+
+p_node_graph = (g_pt + coord_fixed()) / (g_an + coord_fixed())
+
+p_node_graph
+
+ggsave(p_node_graph, file = paste0(results_dir, "/node_graph.png"),
+       width = 11, height = 13, dpi = 300)
+ggsave(p_node_graph, file = paste0(results_dir, "/node_graph.pdf"),
+       width = 11, height = 13)
+```
+
+`r paste0("Panel B labels each node by whichever annotation holds the most of its cells. That is a summary, not a claim about the node: a node can be 51 percent one annotation and still be mixed. The full composition is in the stacked bar above and in node_by_annotation.csv.")`
+
 # What the ordering says
 
 This is where the trajectory is interpreted, and it is done from the cells
@@ -622,7 +724,55 @@ write.csv(out, file = paste0(results_dir, "/pseudotime_per_cell.csv"),
           row.names = FALSE)
 ```
 
-`r paste0("Written to ", results_dir, ".")`
+## Everything written by this document
+
+Built by listing the results directory and looking each file up, rather than by
+keeping a list by hand. A file with no description, or a description with no
+file, is reported below instead of passing unnoticed.
+
+```{r}
+file_notes = c(
+  "pseudotime_per_cell.csv" = "One row per cell: node, cluster, annotation carried by barcode, library, stage and pseudotime.",
+  "cluster_by_annotation.csv" = "How the annotation is distributed across the atlas clusters, before subclustering.",
+  "node_composition.csv"      = "Cells per node and the cluster each node came from.",
+  "node_by_annotation.csv"    = "Annotation composition of every node, as counts and fractions. The evidence behind panel B of the node graph.",
+  "node_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
+  "mst_edges.csv"             = "Every edge of the tree with its length and its normalized gain. A gain below 1 marks an edge the tree could lose cheaply.",
+  "annotation_pseudotime.csv" = "Median and quartiles of pseudotime for each annotation. The ordering claim in numbers.",
+  "marker_sets_vs_pseudotime.csv" = "Spearman correlation of each germ marker set against pseudotime. Independent of both the node cuts and the labels.",
+  "pseudotime_vs_technical.csv"   = "Pseudotime regressed on depth, mitochondrial, rRNA and ribosomal content, pooled and within each library.",
+  "pseudotime_genes.csv"      = "Genes whose expression changes along the ordering.",
+  "trajectory_umap.png"       = "UMAP colored by annotation and by pseudotime, with the tree drawn over it.",
+  "node_graph.png"            = "The tree laid out by its own structure: nodes sized by cell count, colored by mean pseudotime and by most common annotation.",
+  "node_graph.pdf"            = "The node graph as a vector file, for figure assembly.",
+  "node_by_annotation.png"    = "Annotation composition of each node as stacked bars.",
+  "pseudotime_by_annotation.png" = "Pseudotime distribution per annotation and per library.",
+  "marker_sets_vs_pseudotime.png" = "Each germ marker set against pseudotime.")
+
+on_disk = sort(setdiff(list.files(results_dir), "Robjects"))
+
+export_tab = data.frame(
+  file = on_disk,
+  size = sapply(file.path(results_dir, on_disk),
+                function(f) format(structure(file.size(f), class = "object_size"),
+                                   units = "auto")),
+  what = ifelse(on_disk %in% names(file_notes),
+                unname(file_notes[on_disk]), "**no description**"),
+  stringsAsFactors = FALSE)
+
+undescribed = on_disk[!on_disk %in% names(file_notes)]
+missing     = setdiff(names(file_notes), on_disk)
+
+datatable(export_tab, rownames = FALSE, escape = FALSE,
+          options = list(pageLength = 30, dom = "tp",
+                         columnDefs = list(list(width = "240px", targets = 0))))
+```
+
+`r if (length(undescribed) > 0) paste0("**", length(undescribed), " file(s) in the directory have no description here:** ", paste(undescribed, collapse = ", "), ". Add them to file_notes.") else ""`
+
+`r if (length(missing) > 0) paste0("Described but not written on this run: ", paste(missing, collapse = ", "), ".") else ""`
+
+`r paste0("Written to ", results_dir, ". Cached intermediates are in Robjects and are not listed.")`
 
 # Session info
 

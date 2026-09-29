@@ -86,7 +86,8 @@ fi
 
 Rscript -e "
   need = c('rmarkdown','tidyverse','SingleCellExperiment','scran','scater',
-           'batchelor','BiocSingular','BiocNeighbors','TSCAN','igraph','DT','patchwork')
+           'batchelor','BiocSingular','BiocNeighbors','TSCAN','igraph','DT','patchwork',
+           'ggraph','tidygraph','ggrepel')
   miss = Filter(function(p) !requireNamespace(p, quietly = TRUE), need)
   if (length(miss) > 0) {
     message('missing R packages: ', paste(miss, collapse = ', ')); quit(status = 1)
