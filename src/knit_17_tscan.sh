@@ -51,6 +51,8 @@ ATLAS_SUFFIX="${ATLAS_SUFFIX:-}"
 DIST="${DIST:-mnn}"
 MNN_K="${MNN_K:-50}"
 OUTGROUP="${OUTGROUP:-FALSE}"
+EDGE_BOOT="${EDGE_BOOT:-100}"
+EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
 DROP="${DROP:-}"
 OUT_DIR="${PROJECT_DIR}/html"
 
@@ -88,7 +90,8 @@ fi
 # fail before the knit rather than partway through
 Rscript -e "
   need = c('rmarkdown','tidyverse','SingleCellExperiment','scran','scater',
-           'batchelor','BiocSingular','TSCAN','igraph','DT','patchwork','purrr')
+           'batchelor','BiocSingular','TSCAN','igraph','DT','patchwork','purrr',
+           'ggraph','tidygraph','scatterpie','ggrepel')
   miss = Filter(function(p) !requireNamespace(p, quietly = TRUE), need)
   if (length(miss) > 0) {
     message('missing R packages: ', paste(miss, collapse = ', ')); quit(status = 1)
@@ -120,6 +123,8 @@ Rscript -e "
                          dist_method     = '${DIST}',
                          mnn_k           = ${MNN_K},
                          outgroup        = ${OUTGROUP},
+                         edge_boot       = ${EDGE_BOOT},
+                         edge_boot_cells = ${EDGE_BOOT_CELLS},
                          drop_annotations = '${DROP}',
                          prev_nodes_file = '${PREV_NODES}'),
     envir         = new.env()

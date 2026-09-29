@@ -25,6 +25,7 @@ params:
     marker_file: canonical_markers_S1_only_2026-08-14.csv
     extra_marker_file: neural_crest_markers_2026-09-25.csv
     split_by_subcluster: "5"
+    subcluster_source: "prev"
     sub_k: 0
     sub_n_clusters: 0
     sub_k_range: "5,10,15,20,25,30,40,50"
@@ -39,6 +40,8 @@ params:
     drop_annotations: ""
     min_map_jaccard: 0.25
     dist_method: "mnn"
+    edge_boot: 100
+    edge_boot_cells: 100
     mnn_k: 50
     outgroup: FALSE
     on_merge: "combine"
@@ -75,6 +78,7 @@ library(DT)
 library(ggraph)
 library(tidygraph)
 library(scatterpie)
+library(ggrepel)
 source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
@@ -622,11 +626,64 @@ two nodes.
 split_clusters = trimws(strsplit(as.character(params$split_by_subcluster), ",")[[1]])
 split_clusters = intersect(split_clusters[nzchar(split_clusters)], clusters)
 have_split     = length(split_clusters) > 0
+
+# "prev" takes the subclusters from the run whose subclusters were annotated,
+# rather than deriving new ones. With nothing dropped, that run's assignment
+# covers exactly the cells in these clusters, so there is nothing to recompute
+# and nothing to map afterwards.
+prev_src   = as.character(params$prev_nodes_file)
+reuse_sub  = have_split && identical(as.character(params$subcluster_source), "prev")
+if (reuse_sub && !(nzchar(prev_src) && file.exists(prev_src)))
+  stop("subcluster_source is 'prev' but prev_nodes_file is not set or not found: '",
+       prev_src, "'. Point it at the pseudotime_per_cell.csv of the annotated run, ",
+       "or set subcluster_source to 'recluster'.")
+
+have_sweep = have_split && !reuse_sub
 ```
 
-`r if (!have_split) paste0("The ", length(clusters), " selected clusters are the nodes.") else paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " are subclustered in this lineage's corrected space, using only that cluster's cells, and every other cluster is one node. k is the most reproducible value in a subsampling stability sweep that gives at least two subclusters. Setting sub_n_clusters restricts the search to the k values returning that many subclusters, and the most reproducible of those is taken. The sub_k parameter overrides the sweep. The space depends on the lineage, so cluster 5 subclusters from the female and all runs are computed separately and need not match.")`
+`r if (!have_split) paste0("The ", length(clusters), " selected clusters are the nodes.") else if (reuse_sub) paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " enter the tree as the subclusters of ", basename(prev_src), ", and every other cluster is one node. No cell is dropped from these clusters, so that assignment covers all of them and there is nothing to recompute. Deriving new subclusters here would produce a different partition, because this lineage's corrected space no longer holds the same cells, and the collaborators' labels would then have to be matched onto it. Taking the groups they were assigned to avoids that entirely. The subclusters are a partition of the earlier space carried forward; the centroids, the tree and the ordering are all computed in the current one.") else paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " are subclustered in this lineage's corrected space, using only that cluster's cells, and every other cluster is one node. k is the most reproducible value in a subsampling stability sweep that gives at least two subclusters. Setting sub_n_clusters restricts the search to the k values returning that many subclusters, and the most reproducible of those is taken. The sub_k parameter overrides the sweep. The space depends on the lineage, so cluster 5 subclusters from the female and all runs are computed separately and need not match.")`
 
-```{r, eval=have_split}
+```{r, eval=reuse_sub}
+prev_sub = read.csv(prev_src, stringsAsFactors = FALSE)
+stopifnot(all(c("barcode", "node") %in% colnames(prev_sub)))
+prev_sub$node = as.character(prev_sub$node)
+
+sub_assign = list()
+chosen_ks  = integer(0)
+
+for (cl in split_clusters) {
+  cl_cells = colnames(merged)[merged$final_label == cl]
+  old      = prev_sub$node[match(cl_cells, prev_sub$barcode)]
+
+  miss = is.na(old)
+  if (any(miss))
+    stop("cluster ", cl, ": ", sum(miss), " of ", length(cl_cells),
+         " cells have no node in ", prev_src,
+         ". Every cell must be assigned there for its subclusters to be reused.")
+
+  pref = paste0("^", cl, "\\.")
+  bad  = !grepl(pref, old)
+  if (any(bad))
+    stop("cluster ", cl, ": ", sum(bad), " of its cells sit in nodes of ",
+         prev_src, " that are not its subclusters: ",
+         paste(sort(unique(old[bad])), collapse = ", "),
+         ". That file describes a different clustering of these cells.")
+
+  sub_assign[[cl]] = setNames(sub(pref, "", old), cl_cells)
+  chosen_ks[cl]    = NA_integer_
+}
+
+reuse_tab = dplyr::bind_rows(lapply(split_clusters, function(cl)
+  data.frame(cluster = cl, subcluster = paste0(cl, ".", sub_assign[[cl]]),
+             stringsAsFactors = FALSE))) %>%
+  dplyr::count(cluster, subcluster, name = "n_cells")
+
+datatable(reuse_tab, rownames = FALSE, options = list(pageLength = 15))
+```
+
+`r if (!reuse_sub) "" else paste0("Reused ", nrow(reuse_tab), " subcluster(s) from ", basename(prev_src), ", covering ", format(sum(reuse_tab$n_cells), big.mark = ","), " cells. No stability sweep is run and no subcluster is recomputed.")`
+
+```{r, eval=have_sweep}
 k_range = as.integer(trimws(strsplit(as.character(params$sub_k_range), ",")[[1]]))
 stopifnot(length(k_range) > 0, !anyNA(k_range))
 
@@ -736,7 +793,7 @@ Each k in the sweep is fitted on the full cluster and the subclusters it returns
 are counted. The table below is that search, ordered by stability. When a target
 count applies, the chosen k is the most stable one returning that count.
 
-```{r, eval=have_split}
+```{r, eval=have_sweep}
 search_tab = dplyr::bind_rows(search_tabs)
 write.csv(search_tab, file = paste0(results_dir, "/subcluster_k_choice.csv"),
           row.names = FALSE)
@@ -745,9 +802,9 @@ datatable(search_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (have_split) paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".") else ""`
+`r if (!have_sweep) "" else paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".")`
 
-`r if (!have_split) "" else if (all(is.na(search_tab$target))) "No target count is set. k is the most stable value in the sweep." else { best = search_tab %>% dplyr::group_by(cluster) %>% dplyr::summarise(top = max(mean_ari, na.rm = TRUE), got = mean_ari[chosen], tgt = target[1], .groups = "drop"); paste0("sub_n_clusters restricts the search to the k values returning ", paste(unique(best$tgt), collapse = ", "), " subclusters. ", paste0("Cluster ", best$cluster, " was fitted at mean ARI ", signif(best$got, 3), " against a best-in-sweep of ", signif(best$top, 3), collapse = "; "), ".") }`
+`r if (!have_sweep) "" else if (all(is.na(search_tab$target))) "No target count is set. k is the most stable value in the sweep." else { best = search_tab %>% dplyr::group_by(cluster) %>% dplyr::summarise(top = max(mean_ari, na.rm = TRUE), got = mean_ari[chosen], tgt = target[1], .groups = "drop"); paste0("sub_n_clusters restricts the search to the k values returning ", paste(unique(best$tgt), collapse = ", "), " subclusters. ", paste0("Cluster ", best$cluster, " was fitted at mean ARI ", signif(best$got, 3), " against a best-in-sweep of ", signif(best$top, 3), collapse = "; "), ".") }`
 
 ```{r}
 node_chr = merged$final_label
@@ -815,12 +872,14 @@ have_prev     = do_anno && nzchar(prev_file) && file.exists(prev_file)
 sub_nodes_now = node_levels[grepl("\\.", node_levels)]
 ```
 
-`r if (!do_anno) paste0("**No annotation is applied to the ", lineage, " lineage.** annotate_lineages is ", params$annotate_lineages, ".") else if (length(anno_map) == 0) "**No annotation is applied.** The node_annotation parameter is empty." else if (length(sub_nodes_now) > 0 && !have_prev) paste0("**Subclusters cannot be annotated.** ", if (nzchar(prev_file)) paste0(prev_file, " was not found.") else "prev_nodes_file is not set.", " Set it to the pseudotime_per_cell.csv of the run the annotation came from. Whole-cluster nodes are still annotated by name.") else ""`
+`r if (!do_anno) paste0("**No annotation is applied to the ", lineage, " lineage.** annotate_lineages is ", params$annotate_lineages, ".") else if (length(anno_map) == 0) "**No annotation is applied.** The node_annotation parameter is empty." else if (reuse_sub) paste0("The subclusters were taken from ", basename(prev_src), ", so the nodes already carry that run's numbering and every label attaches by name. No overlap matching is needed, and no merge or split can arise.") else if (length(sub_nodes_now) > 0 && !have_prev) paste0("**Subclusters cannot be annotated.** ", if (nzchar(prev_file)) paste0(prev_file, " was not found.") else "prev_nodes_file is not set.", " Set it to the pseudotime_per_cell.csv of the run the annotation came from. Whole-cluster nodes are still annotated by name.") else ""`
 
 ```{r}
 map_tab = NULL
 
-if (have_prev && length(sub_nodes_now) > 0) {
+# Under subcluster_source = "prev" the nodes already carry her numbering, so
+# every label attaches by name and there is nothing to match by overlap.
+if (!reuse_sub && have_prev && length(sub_nodes_now) > 0) {
   prev = read.csv(prev_file, stringsAsFactors = FALSE)
   stopifnot(all(c("barcode", "node") %in% colnames(prev)))
 
@@ -1183,7 +1242,7 @@ depth, the subclustering is repeated on the downsampled values, and the result i
 compared with the original. A split that survives downsampling is not a depth
 split. A split that dissolves is.
 
-```{r, eval=(have_split && isTRUE(params$downsample_check))}
+```{r, eval=(have_sweep && isTRUE(params$downsample_check))}
 ds_res = NULL
 
 for (cl in split_clusters) {
@@ -1228,14 +1287,14 @@ if (!is.null(ds_res)) {
 }
 ```
 
-```{r, eval=(have_split && isTRUE(params$downsample_check))}
+```{r, eval=(have_sweep && isTRUE(params$downsample_check))}
 for (cl in names(ds_res)) {
   cat("\ncluster", cl, "- original subclusters against the downsampled ones\n")
   print(ds_res[[cl]]$tab)
 }
 ```
 
-`r if (!isTRUE(params$downsample_check)) "The downsampling check is off. Set downsample_check to TRUE to run it." else ""`
+`r if (reuse_sub) "The downsampling check is skipped: it re-clusters at the chosen k, and no k was chosen because the subclusters were reused." else if (!isTRUE(params$downsample_check)) "The downsampling check is off. Set downsample_check to TRUE to run it." else ""`
 
 ## Node identity
 
@@ -1591,10 +1650,120 @@ ggsave(p_box_node | p_box_lib, file = paste0(results_dir, "/tscan_pseudotime_by_
        width = 12, height = 4)
 ```
 
+## Edge confidence
+
+A minimum spanning tree always returns a tree. It connects every node whether or
+not the data supports the connection, so the shape on its own says nothing about
+how much of it is real. Two measures are reported here, and both belong on the
+figure rather than in a supplement.
+
+**Gain** comes from `createClusterMST`: the extra distance the tree would need
+if an edge were removed, divided by that edge's own length. A gain below 1 means
+an alternative path exists that is shorter than the edge itself, so the
+connection is close to arbitrary.
+
+**Frequency** is a subsampling check. `edge_boot` times, `edge_boot_cells` cells
+are drawn from each node, the centroids are recomputed, and the tree is rebuilt
+with the same distance method. The nodes are held fixed, so the only thing
+varying is which cells define each centroid.
+
+The count is fixed per node rather than proportional, and that matters. A node of
+5,000 cells has a centroid so precisely estimated that dropping a fifth of them
+moves it almost not at all, so a proportional subsample returns close to 100
+percent for every edge including the arbitrary ones. Drawing the same number from
+every node probes each equally and makes the question geometric rather than a
+restatement of node size.
+
+Read it as a stress test, not as a p-value. It asks how often this edge would be
+drawn from a smaller sample of the same cells. An edge that holds up under it is
+supported by the shape of the data; one that does not is a choice the algorithm
+made among near-equivalent options.
+
+```{r}
+edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
+
+edge_tab = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
+  dplyr::rename(node_1 = from, node_2 = to) %>%
+  dplyr::mutate(length = signif(weight, 3), gain = signif(gain, 3),
+                key = edge_key(node_1, node_2)) %>%
+  dplyr::select(node_1, node_2, key, length, gain)
+
+n_boot = as.integer(params$edge_boot)
+boot_ok = n_boot > 0
+
+if (boot_ok) {
+  co   = reducedDim(merged, "corrected")
+  nd   = as.character(merged$node)
+  by_node = split(seq_along(nd), nd)
+
+  tally = table(unlist(lapply(seq_len(n_boot), function(i) {
+    set.seed(1000 + i)
+    # stratified, so no node can vanish and change the node set
+    keep = unlist(lapply(by_node, function(ix)
+      sample(ix, min(length(ix), max(2L, as.integer(params$edge_boot_cells))))))
+    m = try(TrajectoryUtils::createClusterMST(
+              co[keep, , drop = FALSE], clusters = nd[keep],
+              dist.method = as.character(params$dist_method),
+              mnn.k = params$mnn_k, outgroup = params$outgroup),
+            silent = TRUE)
+    if (inherits(m, "try-error")) return(NULL)
+    e = igraph::as_data_frame(m, what = "edges")
+    unique(edge_key(e$from, e$to))
+  })))
+
+  n_done = n_boot
+  edge_tab$frequency = round(100 * as.integer(tally[edge_tab$key]) / n_done)
+  edge_tab$frequency[is.na(edge_tab$frequency)] = 0
+
+  # edges the resampling drew that the full-data tree did not
+  extra = setdiff(names(tally), edge_tab$key)
+  extra_tab = if (length(extra) == 0) NULL else
+    data.frame(edge = extra,
+               frequency = round(100 * as.integer(tally[extra]) / n_done),
+               stringsAsFactors = FALSE) %>%
+      dplyr::filter(frequency >= 10) %>%
+      dplyr::arrange(dplyr::desc(frequency))
+} else {
+  edge_tab$frequency = NA_integer_
+  extra_tab = NULL
+}
+
+edge_tab = edge_tab %>%
+  dplyr::select(node_1, node_2, length, gain, frequency) %>%
+  dplyr::arrange(dplyr::desc(is.na(frequency)), frequency, gain)
+
+write.csv(edge_tab, file = paste0(results_dir, "/mst_edges.csv"),
+          row.names = FALSE)
+
+datatable(edge_tab, rownames = FALSE, options = list(pageLength = 20))
+```
+
+`r if (nrow(edge_tab) == 0) "" else paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], if (boot_ok) paste0(", drawn in ", edge_tab$frequency[1], " percent of ", n_boot, " trees built from ", params$edge_boot_cells, " cells per node") else "", ", at a normalized gain of ", edge_tab$gain[1], ". ", sum(edge_tab$gain < 1), " of ", nrow(edge_tab), " edges have a gain below 1.", if (boot_ok) paste0(" ", sum(edge_tab$frequency < 50), " appear in under half the subsampled trees. The two measures answer different questions, so an edge that is weak on both is weak on the geometry and on the sampling alike.") else "")`
+
+```{r}
+if (!is.null(extra_tab) && nrow(extra_tab) > 0)
+  datatable(extra_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r if (is.null(extra_tab) || nrow(extra_tab) == 0) "" else paste0("**", nrow(extra_tab), " edge(s) appear in at least 10 percent of the subsampled trees without appearing in the tree above.** Where a competing edge is drawn nearly as often as the one that was kept, the two are interchangeable and the tree picked one of them.")`
+
 ## Node graph
 
 Pie charts give the library composition of each node, and the lower panel colors
 nodes by mean pseudotime.
+
+Edges carry their confidence. Width, color and the printed number all encode the
+same measure: the subsampling frequency where it was computed, the normalized
+gain otherwise. A thin red edge is one the tree could lose cheaply, so the
+connection it draws should not be read as structure.
+
+Edge length on this figure is meaningful. The layout is weighted by the real
+distance between nodes, so a long edge means the two nodes are far apart in the
+corrected space. Those distances are the `length` column of `mst_edges.csv`. The
+reproduction is not exact, because a tree in fifty dimensions cannot always be
+drawn faithfully in two, but it is close to a uniform rescale rather than
+arbitrary. If the message about a failed layout appears above, the figure fell
+back to an unweighted layout and edge lengths mean nothing.
 
 ```{r, fig.width=7, fig.height=7}
 sample_tally = pt_df %>%
@@ -1617,38 +1786,119 @@ mean_pseudo = pt_df %>%
   dplyr::rename(name = "node") %>%
   mutate(name = as.character(name))
 
+# Edge confidence onto the graph. igraph reports edges in a fixed order and
+# as_tbl_graph preserves it, so the column is assigned positionally from the
+# same edge list rather than matched back by name.
+e_ig = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
+  dplyr::mutate(key = edge_key(from, to)) %>%
+  dplyr::left_join(edge_tab %>%
+                     dplyr::mutate(key = edge_key(node_1, node_2)) %>%
+                     dplyr::select(key, frequency), by = "key")
+
+# frequency where the subsampling ran, because "drawn in 38 percent of
+# subsampled trees" reads without the legend. Gain stays in the table either way.
+use_freq   = boot_ok && !anyNA(e_ig$frequency)
+e_ig$conf  = if (use_freq) as.numeric(e_ig$frequency) else e_ig$gain
+conf_name  = if (use_freq) "% of subsampled\ntrees" else "edge gain"
+conf_fmt   = function(v) if (use_freq) sprintf("%d%%", round(v)) else sprintf("%.2f", v)
+
 gr = as_tbl_graph(pseudo$mst) %>%
   activate(nodes) %>%
   left_join(node_meta, by = "name") %>%
-  left_join(mean_pseudo, by = "name")
+  left_join(mean_pseudo, by = "name") %>%
+  activate(edges) %>%
+  mutate(conf = e_ig$conf)
 
-layout_data = create_layout(gr, layout = "stress")
+# Layout by real distance. The stress layout ignores edge weights by default and
+# draws every edge at roughly the same length, so the picture says nothing about
+# how far apart nodes are. graphlayouts treats weights as similarities, not
+# distances, so the reciprocal is what is passed: a long edge then has a weak
+# pull and is drawn long. On test trees this reproduces the true edge lengths to
+# a near-uniform scale factor, correlation 0.999. It also survives a tree split
+# into components, which a distance-matrix layout does not.
+layout_by_distance = function(graph, lengths) {
+  w = as.numeric(lengths)
+  w[!is.finite(w) | w <= 0] = min(w[is.finite(w) & w > 0], na.rm = TRUE) / 1000
+  out = try(create_layout(graph, layout = "stress", weights = 1 / w), silent = TRUE)
+  if (inherits(out, "try-error")) {
+    message("distance-weighted layout failed; falling back to plain stress, ",
+            "so edge lengths on the figure will not be meaningful")
+    out = create_layout(graph, layout = "stress")
+  }
+  out
+}
+
+set.seed(1)
+layout_data = layout_by_distance(gr, e_ig$weight)
+
+# edge midpoints for the numeric labels, from the layout rather than through a
+# ggraph label aesthetic, whose arguments vary between versions
+e_ig$x = (layout_data$x[match(e_ig$from, layout_data$name)] +
+          layout_data$x[match(e_ig$to,   layout_data$name)]) / 2
+e_ig$y = (layout_data$y[match(e_ig$from, layout_data$name)] +
+          layout_data$y[match(e_ig$to,   layout_data$name)]) / 2
+stopifnot(!anyNA(e_ig$x))
+
+
+# A distance-faithful layout packs tightly related nodes close together, so the
+# glyphs have to be sized to the layout rather than fixed. Radius comes from the
+# closest pair, with a floor so a very tight pair does not shrink everything to
+# nothing. Overlap that remains is informative: those nodes really are that close.
+lay_d = as.matrix(dist(as.matrix(layout_data[, c("x", "y")])))
+diag(lay_d) = Inf
+lay_span = max(diff(range(layout_data$x)), diff(range(layout_data$y)))
+layout_data$r = max(min(lay_d) * 0.42, lay_span * 0.012)
+pt_size = max(2, min(9, 55 * min(lay_d) / lay_span))
+
+gain_lab = geom_label(data = e_ig, aes(x, y, label = conf_fmt(conf)),
+                      inherit.aes = FALSE, size = 2.1, colour = "grey15",
+                      fill = "white", label.padding = unit(.1, "lines"),
+                      label.size = NA)
+
+edge_aes = list(
+  geom_edge_link(aes(edge_colour = conf, edge_width = conf)),
+  scale_edge_colour_gradient(low = "#d6604d", high = "#2166ac", name = conf_name),
+  scale_edge_width(range = c(.4, 2.2), guide = "none"))
 
 gr_pie =
   ggraph(layout_data) +
-  geom_edge_link() +
-  geom_scatterpie(aes(x, y), cols = names(lib_cols), data = layout_data,
-                  colour = NA, pie_scale = 1.5) +
+  edge_aes +
+  gain_lab +
+  geom_scatterpie(aes(x, y, r = r), cols = names(lib_cols), data = layout_data,
+                  colour = NA) +
   scale_fill_manual(name = "Library", values = lib_cols) +
-  geom_node_text(aes(label = name), color = "black", size = 2.6) +
+  geom_text_repel(data = layout_data, aes(x, y, label = name), inherit.aes = FALSE,
+                  size = 2.6, min.segment.length = 0, segment.size = .2,
+                  box.padding = .5, max.overlaps = Inf, seed = 1) +
   theme_void(base_size = 8) +
   theme(legend.position = "left") +
   labs(tag = "A")
 
 gr_pseudo =
   ggraph(layout_data) +
-  geom_edge_link() +
-  geom_node_point(aes(color = mean_pseudo), size = 9) +
+  edge_aes +
+  geom_node_point(aes(color = mean_pseudo), size = pt_size) +
+  gain_lab +
   scale_color_viridis_c() +
-  geom_node_text(aes(label = name), vjust = .75, size = 2.6, color = "red") +
+  geom_text_repel(data = layout_data, aes(x, y, label = name), inherit.aes = FALSE,
+                  size = 2.6, colour = "grey20", min.segment.length = 0,
+                  segment.size = .2, box.padding = .5, max.overlaps = Inf, seed = 1) +
   scale_x_continuous(expand = expansion(mult = 0.15)) +
   scale_y_continuous(expand = expansion(mult = 0.15)) +
   theme_void(base_size = 8) +
   theme(legend.position = "left") +
   labs(tag = "B")
 
-(gr_pie + coord_fixed()) / (gr_pseudo + coord_fixed())
-ggsave(file = paste0(results_dir, "/tscan_node_graph.pdf"), width = 7, height = 7)
+p_node_graph = (gr_pie + coord_fixed()) / (gr_pseudo + coord_fixed())
+
+p_node_graph
+
+# saved explicitly rather than relying on the last plot, and in both formats:
+# pdf for figure assembly, png for slides and email
+ggsave(p_node_graph, file = paste0(results_dir, "/tscan_node_graph.pdf"),
+       width = 7, height = 7)
+ggsave(p_node_graph, file = paste0(results_dir, "/tscan_node_graph.png"),
+       width = 7, height = 7, dpi = 300)
 ```
 
 ## What the ordering tracks
@@ -1875,6 +2125,77 @@ write.csv(cell_out, file = paste0(results_dir, "/pseudotime_per_cell.csv"),
 ```
 
 Per-cell pseudotime is written to `pseudotime_per_cell.csv`.
+
+## Everything written by this document
+
+Built by listing the results directory and looking each file up, rather than by
+keeping a list by hand. A file with no description, or a description with no
+file, is reported below instead of passing unnoticed.
+
+```{r}
+file_notes = c(
+  "pseudotime_per_cell.csv" = "One row per cell: library, stage, cluster, node, pseudotime and UMAP coordinates. The file every other document reads.",
+  "cluster_composition.csv" = "Cells per cluster, split by cell type and library, before any subclustering.",
+  "node_composition.csv"    = "Cells per node, split by library.",
+  "root_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
+  "mst_edges.csv"           = "Every edge of the tree with its length and its normalized gain. A gain below 1 marks an edge the tree could lose cheaply.",
+  "node_identity_scores.csv" = "Each node against all marker sets, somatic ones included, with a contained_in flag where one set sits inside another.",
+  "node_marker_expression.csv" = "The per-gene values behind the node identity plot: percent expressing and mean log expression for every marker gene in every node.",
+  "subcluster_marker_genes.csv" = "Markers of each node against the other nodes of this lineage. A within-lineage comparison, so it cannot see programs the nodes share.",
+  "subcluster_marker_GO_overlaps.csv" = "Genes shared between each node marker list and each GO term.",
+  "subcluster_marker_GO_pvalues.csv"  = "Enrichment of GO terms in each node marker list.",
+  "tscan_pseudotime_genes.csv"        = "Genes whose expression changes along the ordering.",
+  "tscan_pseudotime_GO_overlaps.csv"  = "Genes shared between the pseudotime gene list and each GO term.",
+  "tscan_pseudotime_GO_pvalues.csv"   = "Enrichment of GO terms among the pseudotime-associated genes.",
+  "somatic_check_set_scores.csv"      = "Every node of the annotated run scored on all marker sets, computed before any cell is removed.",
+  "somatic_check_gene_expression.csv" = "The per-gene values behind the somatic check bubble plot.",
+  "annotated_run_depth_and_technical.csv" = "Depth, genes detected, percent mitochondrial, rRNA and ribosomal per node of the annotated run.",
+  "node_depth_and_technical.csv"      = "The same four measures for this run's nodes.",
+  "subcluster_depth_tests.csv"        = "Kruskal-Wallis of each measure across the subclusters, with the fold range in median depth.",
+  "subcluster_downsample_check.csv"   = "Subclusters recomputed after downsampling every cell to a common depth, with the ARI against the original. A low ARI means the split was depth.",
+  "pseudotime_vs_technical.csv"       = "Pseudotime regressed on each technical measure, pooled and within each library. A pooled result much larger than the within-library ones is a between-library difference.",
+  "subcluster_stability.csv"          = "The ARI sweep over sub_k_range. Only written when subclusters are recomputed.",
+  "subcluster_k_choice.csv"           = "Each candidate k with the subcluster count it returned and its ARI. Only written when subclusters are recomputed.",
+  "subcluster_annotation_map.csv"     = "Every old-new subcluster pair with shared cell counts and Jaccard. Only written when subclusters are recomputed.",
+  "subcluster_overlap_grid.csv"       = "The same overlap as percentages of the new subcluster, the old one and the union. Only written when subclusters are recomputed.",
+  "tscan_trajectory_umap.png"         = "UMAP colored by node and by pseudotime, with the tree drawn over it.",
+  "tscan_node_graph.png"              = "The tree itself: library composition per node as pie charts, and nodes colored by mean pseudotime.",
+  "tscan_node_graph.pdf"              = "The node graph as a vector file, for figure assembly.",
+  "tscan_pseudotime_by_node.png"      = "Pseudotime distribution per node and per library.",
+  "node_identity_scores.png"          = "Marker expression per node, one dot per gene.",
+  "somatic_check_bubble.png"          = "Marker expression per node of the annotated run, one dot per gene.",
+  "annotated_run_depth_and_technical.png" = "Depth and technical content per node of the annotated run.",
+  "node_depth_and_technical.png"      = "Depth and technical content per node of this run.",
+  "pseudotime_vs_technical.png"       = "Each technical measure against pseudotime, with one curve per library.",
+  "subcluster_overlap.png"            = "Old against new subclusters as percentages, three panels. Only written when subclusters are recomputed.")
+
+on_disk = sort(setdiff(list.files(results_dir), "Robjects"))
+on_disk = on_disk[!grepl("^tscan_heatmap_", on_disk)]
+
+export_tab = data.frame(
+  file = on_disk,
+  size = sapply(file.path(results_dir, on_disk),
+                function(f) format(structure(file.size(f), class = "object_size"),
+                                   units = "auto")),
+  what = ifelse(on_disk %in% names(file_notes),
+                unname(file_notes[on_disk]), "**no description**"),
+  stringsAsFactors = FALSE)
+
+undescribed = on_disk[!on_disk %in% names(file_notes)]
+missing     = setdiff(names(file_notes), on_disk)
+
+datatable(export_tab, rownames = FALSE, escape = FALSE,
+          options = list(pageLength = 40, dom = "tp",
+                         columnDefs = list(list(width = "260px", targets = 0))))
+```
+
+`r n_heat = length(list.files(results_dir, pattern = "^tscan_heatmap_")); if (n_heat > 0) paste0("Plus ", n_heat, " heatmap image(s) named tscan_heatmap_<path>.png, one per path through the tree.") else ""`
+
+`r if (length(undescribed) > 0) paste0("**", length(undescribed), " file(s) in the directory have no description here:** ", paste(undescribed, collapse = ", "), ". Add them to file_notes.") else ""`
+
+`r if (length(missing) > 0) paste0("Described but not written on this run: ", paste(missing, collapse = ", "), ". That is expected for anything the run skipped, such as the subclustering outputs when the subclusters were reused.") else ""`
+
+`r paste0("Cached intermediates are in ", results_dir, "/Robjects and are not listed. They are rebuilt when their signature changes.")`
 
 # Summary
 
