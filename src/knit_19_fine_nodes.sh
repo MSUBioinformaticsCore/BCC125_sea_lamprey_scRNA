@@ -48,9 +48,11 @@ LINEAGE="${LINEAGE:-all}"
 ATLAS_SUFFIX="${ATLAS_SUFFIX:-}"
 SUB_K="${SUB_K:-10}"
 MIN_NODE="${MIN_NODE:-30}"
-DIST="${DIST:-mnn}"
+DIST="${DIST:-simple}"
 MNN_K="${MNN_K:-50}"
 OUTGROUP="${OUTGROUP:-FALSE}"
+EDGE_BOOT="${EDGE_BOOT:-100}"
+EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
 OUT_DIR="${PROJECT_DIR}/html"
 
 if [[ -z "${PREV_NODES+x}" ]]; then
@@ -121,6 +123,8 @@ Rscript -e "
                          dist_method     = '${DIST}',
                          mnn_k           = ${MNN_K},
                          outgroup        = ${OUTGROUP},
+                         edge_boot       = ${EDGE_BOOT},
+                         edge_boot_cells = ${EDGE_BOOT_CELLS},
                          prev_nodes_file = '${PREV_NODES}'),
     envir         = new.env()
   )

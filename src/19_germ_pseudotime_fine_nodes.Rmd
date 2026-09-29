@@ -20,7 +20,9 @@ params:
     all_clusters: "5,15,16,17,18"
     sub_k: 10
     min_node_cells: 30
-    dist_method: "mnn"
+    dist_method: "simple"
+    edge_boot: 100
+    edge_boot_cells: 100
     mnn_k: 50
     outgroup: FALSE
     root_rule: "max:Primordial germ cells"
@@ -407,18 +409,61 @@ n_comp  = igraph::count_components(pseudo$mst)
 
 ## Edge confidence
 
-`createClusterMST` records a `gain` on every edge: the extra distance the tree
-would need if that edge were removed, divided by the edge's own length. A small
-gain means the edge is arbitrary, because an almost equally short path exists
-without it. This is the tree's own statement about which connections to trust.
+An MST always returns a tree. It connects every node whether or not the data
+supports the connection, so the shape on its own says nothing about how much of
+it is real.
+
+`edge_boot` times, `edge_boot_cells` cells are drawn from each node, the centroids
+are recomputed and the tree is rebuilt. An edge drawn in a small fraction of those
+trees is one a different sample of the same cells would not have drawn.
+
+The count is fixed per node rather than proportional. A node of 5,000 cells has a
+centroid so precisely estimated that dropping a fifth of them moves it almost not
+at all, so a proportional subsample returns close to 100 percent for every edge
+including the arbitrary ones. Drawing the same number from every node probes each
+equally.
+
+Read it as a stress test rather than as a p-value.
 
 ```{r}
+edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
+
 edge_tab = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
   dplyr::rename(node_1 = from, node_2 = to) %>%
   dplyr::mutate(length = signif(weight, 3),
-                gain   = signif(gain, 3)) %>%
-  dplyr::select(node_1, node_2, length, gain) %>%
-  dplyr::arrange(gain)
+                key = edge_key(node_1, node_2))
+
+n_boot  = as.integer(params$edge_boot)
+boot_ok = n_boot > 0
+
+if (boot_ok) {
+  co_b    = reducedDim(merged, "corrected")
+  nd_b    = as.character(merged$node)
+  by_node = split(seq_along(nd_b), nd_b)
+
+  tally = table(unlist(lapply(seq_len(n_boot), function(i) {
+    set.seed(1000 + i)
+    keep = unlist(lapply(by_node, function(ix)
+      sample(ix, min(length(ix), max(2L, as.integer(params$edge_boot_cells))))))
+    m = try(TrajectoryUtils::createClusterMST(
+              co_b[keep, , drop = FALSE], clusters = nd_b[keep],
+              dist.method = as.character(params$dist_method),
+              mnn.k = params$mnn_k, outgroup = params$outgroup),
+            silent = TRUE)
+    if (inherits(m, "try-error")) return(NULL)
+    e = igraph::as_data_frame(m, what = "edges")
+    unique(edge_key(e$from, e$to))
+  })))
+
+  edge_tab$frequency = round(100 * as.integer(tally[edge_tab$key]) / n_boot)
+  edge_tab$frequency[is.na(edge_tab$frequency)] = 0
+} else {
+  edge_tab$frequency = NA_integer_
+}
+
+edge_tab = edge_tab %>%
+  dplyr::select(node_1, node_2, length, frequency) %>%
+  dplyr::arrange(dplyr::desc(is.na(frequency)), frequency, length)
 
 write.csv(edge_tab, file = paste0(results_dir, "/mst_edges.csv"),
           row.names = FALSE)
@@ -426,7 +471,7 @@ write.csv(edge_tab, file = paste0(results_dir, "/mst_edges.csv"),
 datatable(edge_tab, rownames = FALSE, options = list(pageLength = 15))
 ```
 
-`r if (nrow(edge_tab) == 0) "" else paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], " at a normalized gain of ", edge_tab$gain[1], ". ", sum(edge_tab$gain < 1), " of ", nrow(edge_tab), " edges have a gain below 1, meaning removing them would lengthen the tree by less than their own length.")`
+`r if (!boot_ok || nrow(edge_tab) == 0) "The subsampling check is off. Set edge_boot to a positive number to run it." else paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], ", drawn in ", edge_tab$frequency[1], " percent of ", n_boot, " trees built from ", params$edge_boot_cells, " cells per node. ", sum(edge_tab$frequency < 50), " of ", nrow(edge_tab), " edges appear in under half of them, and ", sum(edge_tab$frequency == 100), " in all of them.")`
 
 ```{r, fig.width=13, fig.height=5}
 by_node = aggregateAcrossCells(
@@ -454,9 +499,9 @@ The tree on its own, laid out by its own structure rather than on the UMAP. With
 many small nodes the shape of the tree is the thing to read, and a UMAP can put
 adjacent nodes far apart. Nodes are sized by cell count, colored by mean
 pseudotime in the first panel and by the annotation holding the most cells in the
-second. Edge width and color both encode the normalized `gain` from the table
-above, so a thin red edge is one the tree could lose cheaply. With this many
-nodes the numbers are omitted; they are in `mst_edges.csv`.
+second. Edge color is the percentage of subsampled trees containing that edge. The
+numbers are omitted with this many nodes; they are in `mst_edges.csv`. Edges are
+drawn plain grey when the subsampling is switched off.
 
 Edge length on this figure is meaningful. The layout is weighted by the real
 distance between nodes, so a long edge means the two nodes are far apart in the
@@ -477,9 +522,18 @@ node_stats = as.data.frame(colData(merged)) %>%
   dplyr::rename(name = node) %>%
   dplyr::mutate(name = as.character(name))
 
+e_ig = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
+  dplyr::mutate(key = edge_key(from, to)) %>%
+  dplyr::left_join(edge_tab %>%
+                     dplyr::mutate(key = edge_key(node_1, node_2)) %>%
+                     dplyr::select(key, frequency), by = "key")
+use_freq  = boot_ok && !anyNA(e_ig$frequency)
+
 gr = as_tbl_graph(pseudo$mst) %>%
   activate(nodes) %>%
-  left_join(node_stats, by = "name")
+  left_join(node_stats, by = "name") %>%
+  activate(edges) %>%
+  mutate(conf = if (use_freq) as.numeric(e_ig$frequency) else NA_real_)
 
 # Layout by real distance. The stress layout ignores edge weights by default and
 # draws every edge at roughly the same length, so the picture says nothing about
@@ -500,23 +554,23 @@ layout_by_distance = function(graph, lengths) {
   out
 }
 
-e_len = igraph::as_data_frame(pseudo$mst, what = "edges")$weight
 set.seed(1)
-lay = layout_by_distance(gr, e_len)
+lay = layout_by_distance(gr, e_ig$weight)
 
-# edges carry their normalized gain: width and colour both encode it, so an edge
-# the tree could lose cheaply reads as thin and red
+# edge colour is the subsampling frequency, so an edge a different sample would
+# not have drawn reads as red
 lay_d = as.matrix(dist(as.matrix(lay[, c("x", "y")])))
 diag(lay_d) = Inf
 lay_span = max(diff(range(lay$x)), diff(range(lay$y)))
 # node sizes scaled to how tightly the distance-faithful layout packs them
 size_hi = max(2.5, min(9, 55 * min(lay_d) / lay_span))
 
+# colour alone; width carried no information colour was not already carrying
 edge_aes = list(
-  geom_edge_link(aes(edge_colour = gain, edge_width = gain)),
-  scale_edge_colour_gradient(low = "#d6604d", high = "#2166ac",
-                             name = "edge gain"),
-  scale_edge_width(range = c(.3, 1.8), guide = "none"))
+  if (use_freq) geom_edge_link(aes(edge_colour = conf), edge_width = .9)
+    else geom_edge_link(edge_colour = "grey55", edge_width = .9),
+  if (use_freq) scale_edge_colour_gradient(low = "#d6604d", high = "#2166ac",
+                  name = "% of subsampled trees", limits = c(0, 100)) else NULL)
 
 g_pt = ggraph(lay) +
   edge_aes +
@@ -525,7 +579,7 @@ g_pt = ggraph(lay) +
   scale_colour_viridis_c() +
   scale_size_continuous(range = c(max(1, size_hi / 4), size_hi)) +
   theme_void(base_size = 9) +
-  labs(colour = "mean pseudotime", size = "cells", tag = "A")
+  coord_fixed() + labs(colour = "mean pseudotime", size = "cells")
 
 g_an = ggraph(lay) +
   edge_aes +
@@ -533,9 +587,16 @@ g_an = ggraph(lay) +
   geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
   scale_size_continuous(range = c(max(1, size_hi / 4), size_hi)) +
   theme_void(base_size = 9) +
-  labs(colour = "most common annotation", size = "cells", tag = "B")
+  coord_fixed() + labs(colour = "most common annotation", size = "cells")
 
-p_node_graph = (g_pt + coord_fixed()) / (g_an + coord_fixed())
+p_node_graph = (g_pt / g_an) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(tag_levels = "A") &
+  theme(legend.position = "right", legend.box = "vertical",
+        legend.key.size = unit(.4, "cm"),
+        legend.title = element_text(size = 8),
+        legend.text  = element_text(size = 7),
+        plot.tag     = element_text(size = 11, face = "bold"))
 
 p_node_graph
 
@@ -737,7 +798,7 @@ file_notes = c(
   "node_composition.csv"      = "Cells per node and the cluster each node came from.",
   "node_by_annotation.csv"    = "Annotation composition of every node, as counts and fractions. The evidence behind panel B of the node graph.",
   "node_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
-  "mst_edges.csv"             = "Every edge of the tree with its length and its normalized gain. A gain below 1 marks an edge the tree could lose cheaply.",
+  "mst_edges.csv"             = "Every edge of the tree, its length in the corrected space, and the percentage of subsampled trees containing it.",
   "annotation_pseudotime.csv" = "Median and quartiles of pseudotime for each annotation. The ordering claim in numbers.",
   "marker_sets_vs_pseudotime.csv" = "Spearman correlation of each germ marker set against pseudotime. Independent of both the node cuts and the labels.",
   "pseudotime_vs_technical.csv"   = "Pseudotime regressed on depth, mitochondrial, rRNA and ribosomal content, pooled and within each library.",

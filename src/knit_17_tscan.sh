@@ -48,11 +48,12 @@ PROJECT_DIR="/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125
 RESULTS_DATE="${RESULTS_DATE:-20260813}"
 LINEAGE="${LINEAGE:-all}"
 ATLAS_SUFFIX="${ATLAS_SUFFIX:-}"
-DIST="${DIST:-mnn}"
+DIST="${DIST:-simple}"
 MNN_K="${MNN_K:-50}"
 OUTGROUP="${OUTGROUP:-FALSE}"
 EDGE_BOOT="${EDGE_BOOT:-100}"
 EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
+GRAPH_LABELS="${GRAPH_LABELS:-FALSE}"
 DROP="${DROP:-}"
 OUT_DIR="${PROJECT_DIR}/html"
 
@@ -125,6 +126,7 @@ Rscript -e "
                          outgroup        = ${OUTGROUP},
                          edge_boot       = ${EDGE_BOOT},
                          edge_boot_cells = ${EDGE_BOOT_CELLS},
+                         graph_edge_labels = ${GRAPH_LABELS},
                          drop_annotations = '${DROP}',
                          prev_nodes_file = '${PREV_NODES}'),
     envir         = new.env()
