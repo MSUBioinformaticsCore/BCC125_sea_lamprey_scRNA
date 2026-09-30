@@ -301,6 +301,11 @@ drop_anno = drop_anno[nzchar(drop_anno)]
 prev_file = as.character(params$prev_nodes_file)
 have_prev = nzchar(prev_file) && file.exists(prev_file)
 
+# The somatic check exists to put expression behind a removal. With
+# drop_annotations empty nothing is removed, and its tables would repeat Node
+# identity on the same cells, so the whole section is skipped.
+do_somatic = have_prev && length(drop_anno) > 0
+
 drop_cells    = character(0)
 drop_cell_tab = NULL
 # kept so the somatic check can score the removed cells alongside the ones
@@ -352,7 +357,9 @@ datatable(comp_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 
 `r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ".")`
 
-## Somatic check
+```{r, results="asis"}
+if (do_somatic) cat(
+"## Somatic check
 
 The cells named by `drop_annotations` are removed above on the strength of the
 label they were given. This section scores them before they go. The removal then
@@ -366,23 +373,23 @@ stands whatever the subclustering returns.
 
 The nodes being removed are placed first on the axis. A node that carries a
 somatic set and none of the germ sets is the pattern that supports dropping it.
+") else cat(
+"## Somatic check
 
-```{r}
-if (nrow(set_containment) > 0)
-  datatable(set_containment, rownames = FALSE,
-            options = list(dom = "t", paging = FALSE))
+", if (!have_prev)
+"`prev_nodes_file` is not set, so the annotated run's nodes cannot be scored here."
+else
+"`drop_annotations` is empty, so no cell is removed on the strength of its label
+and there is nothing here to justify. Every node is scored against all the
+marker sets under Node identity, on the same cells.", "\n")
 ```
-
-`r if (nrow(set_containment) > 0) paste0("**", nrow(set_containment), " marker set(s) sit entirely inside another set.** A node scoring high on one of these is also scoring high on the set that contains it. The two cannot be read as separate evidence. Judge these from the per-gene plot rather than the set score. The contained_in column on the score tables carries the same flag.") else "No marker set sits entirely inside another. Each set score is its own measurement."`
 
 ```{r}
 somatic_scores = NULL
 somatic_bubble = NULL
 somatic_levels = character(0)
 
-# runs whenever the annotated run is available, so the nodes can be examined in
-# her numbering whether or not any of them is being removed
-if (have_prev) {
+if (do_somatic) {
   chk_list = lapply(all.sce, function(x) {
     keep = intersect(colnames(x), predrop_barcodes)
     if (length(keep) == 0) NULL else x[, keep]
@@ -486,9 +493,7 @@ if (have_prev) {
 }
 ```
 
-`r if (!have_prev) "prev_nodes_file is not set, so the annotated run's nodes cannot be examined here." else if (length(drop_cells) == 0) "No cell is removed. The nodes are still scored below, so the evidence is on the page either way." else ""`
-
-`r if (!have_prev) "" else if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found.** Only the ", dplyr::n_distinct(s1_sets$CellTypeMarkerSet), " sets in ", params$marker_file, " are scored here. If a node is being removed as a cell type that file was meant to cover, this check cannot speak to it.") else if (have_extra) paste0("Scored against ", dplyr::n_distinct(all_sets$CellTypeMarkerSet), " sets, of which ", paste(sort(setdiff(unique(all_sets$CellTypeMarkerSet), unique(s1_sets$CellTypeMarkerSet))), collapse = ", "), " come from ", extra_file, ".") else ""`
+`r if (!do_somatic) "" else if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found.** Only the ", dplyr::n_distinct(s1_sets$CellTypeMarkerSet), " sets in ", params$marker_file, " are scored here. If a node is being removed as a cell type that file was meant to cover, this check cannot speak to it.") else if (have_extra) paste0("Scored against ", dplyr::n_distinct(all_sets$CellTypeMarkerSet), " sets, of which ", paste(sort(setdiff(unique(all_sets$CellTypeMarkerSet), unique(s1_sets$CellTypeMarkerSet))), collapse = ", "), " come from ", extra_file, ".") else ""`
 
 ```{r}
 if (!is.null(drop_cell_tab))
@@ -837,7 +842,15 @@ if (length(node_levels) < 2)
 
 ## Annotation
 
-The collaborators annotated the nodes of an earlier run of this document. The
+```{r, results="asis"}
+if (reuse_sub) cat(
+"The collaborators annotated the nodes of an earlier run of this document.
+`subcluster_source` is set to `prev`, so this run takes those subclusters by
+barcode rather than deriving new ones. Every node already carries the annotated
+numbering and each label attaches by name. Nothing is matched by overlap, so the
+matching tables are skipped and only the node table below is printed.
+") else cat(
+"The collaborators annotated the nodes of an earlier run of this document. The
 subclusters of cluster 5 are recomputed here, in a space that no longer contains
 12_transformer, so their numbers need not match the ones that were annotated.
 Nodes that are whole clusters keep their names and carry their annotation
@@ -849,6 +862,8 @@ similarity measure. Each new subcluster takes the annotation of the old
 subcluster it shares the most cells with, and the Jaccard for that pair is
 reported. A pair below `min_map_jaccard`, a split or a merge stops the
 annotation rather than assigning a label the overlap does not support.
+")
+```
 
 ```{r}
 parse_pairs = function(x) {
@@ -1300,15 +1315,30 @@ for (cl in names(ds_res)) {
 
 ## Node identity
 
-Every node is scored against **all** the marker sets available, somatic ones
-included, rather than only the germ sets the root rule uses. The cells that were
-removed are not here. Those are scored under Somatic check, before the removal.
-This table is the check on what is left. A node scoring high on a somatic set and
-low on every germ set is not a germ cell state.
+```{r, results="asis"}
+cat(
+"Every node is scored against **all** the marker sets available, somatic ones
+included, rather than only the germ sets the root rule uses. ",
+if (do_somatic)
+"The cells that were removed are not here. Those are scored under Somatic check,
+before the removal. This table is the check on what is left."
+else
+"No cell is removed in this run, so every cell of the lineage is scored here.",
+" A node scoring high on a somatic set and low on every germ set is not a germ
+cell state.\n")
+```
 
 `extra_marker_file` adds sets that the collaborators' Supplementary Table 1 does
 not carry. It is read the same way. Sets from it are marked in the `origin`
 column, so a set from it is never mistaken for one from the table.
+
+```{r}
+if (nrow(set_containment) > 0)
+  datatable(set_containment, rownames = FALSE,
+            options = list(dom = "t", paging = FALSE))
+```
+
+`r if (nrow(set_containment) > 0) paste0("**", nrow(set_containment), " marker set(s) sit entirely inside another set.** A node scoring high on one of these is also scoring high on the set that contains it. The two cannot be read as separate evidence. Judge these from the per-gene plot rather than the set score. The contained_in column on the score tables carries the same flag.") else "No marker set sits entirely inside another. Each set score is its own measurement."`
 
 ```{r}
 id_genes = all_sets %>%
@@ -1679,9 +1709,24 @@ ordered by distance. An edge between mutual nearest neighbors reads 1 and 1.
 A high rank on either side is an edge the tree drew because every node has to
 join it, not because the two nodes are close.
 
-`separation` is the distance between the two centroids over the mean distance
-from a cell to its own centroid. Below 1 the nodes sit closer together than
-their own cells sit to their own centers.
+`separation` is the distance between the two centroids in standard deviations of
+the within-node spread. A 2 means the two centers sit two standard deviations
+apart. Below about 1 the clouds overlap so heavily that the boundary between the
+two nodes is a line drawn through one continuous population. On a trajectory
+that is the expected reading for consecutive waypoints. It is the reading to
+question where the two nodes carry annotations for distinct cell types.
+
+The two columns separate cases that look alike on the figure.
+
+| `separation` | `nn_rank` | reading |
+|---|---|---|
+| low | 1 and 1 | one continuous population, joined at its closest point |
+| low | high | overlapping nodes, joined the long way round |
+| high | 1 and 1 | two distinct groups with a genuine link between them |
+| high | high | a long edge to a node that sits near nothing |
+
+Neither column says whether a low `separation` means the annotation is wrong or
+the subclustering was cut too fine. That comes from the marker sets.
 
 ```{r}
 edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
@@ -1722,8 +1767,8 @@ edge_tab$pct_of_cut = if (is.na(og_cut)) NA_real_ else
 #
 #   nn_rank_1   where node_2 sits in node_1's list of nodes ordered by distance
 #   nn_rank_2   where node_1 sits in node_2's
-#   separation  centroid distance over the mean spread of cells within the two
-#               nodes, so below 1 the nodes overlap
+#   separation  centroid distance in standard deviations of the within-node
+#               spread, so 2 means the centroids sit 2 SD apart
 #
 # Both are Euclidean, which is what dist.method = "simple" uses. Under any other
 # dist.method they describe the corrected space rather than the distances the
@@ -1733,11 +1778,16 @@ nd_all = as.character(merged$node)
 cnt    = table(nd_all)
 cent   = rowsum(co_all, nd_all)[names(cnt), , drop = FALSE] / as.vector(cnt)
 
-# mean distance from a cell to its own node centroid
-node_radius = vapply(rownames(cent), function(g) {
+# Per-dimension within-node standard deviation, pooled over the dimensions of
+# the corrected space. The distance from a cell to its own centroid is not used
+# as the denominator: it grows as the square root of the dimension count while
+# the centroid distance does not, so the ratio would shrink as dimensions are
+# added. Two nodes four standard deviations apart score 0.56 on that version in
+# fifty dimensions and 4 on this one.
+node_sd = vapply(rownames(cent), function(g) {
   ix = which(nd_all == g)
-  mean(sqrt(rowSums((co_all[ix, , drop = FALSE] -
-                     matrix(cent[g, ], length(ix), ncol(cent), byrow = TRUE))^2)))
+  if (length(ix) < 2) NA_real_ else
+    sqrt(mean(apply(co_all[ix, , drop = FALSE], 2, var)))
 }, numeric(1))
 
 node_dist = as.matrix(dist(cent))
@@ -1748,7 +1798,7 @@ edge_tab$nn_rank_1 = node_rank[cbind(edge_tab$node_1, edge_tab$node_2)]
 edge_tab$nn_rank_2 = node_rank[cbind(edge_tab$node_2, edge_tab$node_1)]
 edge_tab$separation = round(
   node_dist[cbind(edge_tab$node_1, edge_tab$node_2)] /
-  ((node_radius[edge_tab$node_1] + node_radius[edge_tab$node_2]) / 2), 2)
+  ((node_sd[edge_tab$node_1] + node_sd[edge_tab$node_2]) / 2), 2)
 
 n_boot = as.integer(params$edge_boot)
 boot_ok = n_boot > 0
@@ -1805,7 +1855,7 @@ datatable(edge_tab, rownames = FALSE, options = list(pageLength = 20))
 
 `r if (is.na(og_cut)) "" else { over = edge_tab %>% dplyr::filter(pct_of_cut > 100); paste0("The outgroup threshold for this tree is ", signif(og_cut, 3), ", which is 1.5 times the median edge length. ", if (nrow(over) == 0) "No edge is longer than that, so outgroup = TRUE returns this same single tree." else paste0(nrow(over), " of ", nrow(edge_tab), " edges are longer: ", paste0(over$node_1, " to ", over$node_2, " at ", over$pct_of_cut, " percent", collapse = ", "), ". Under outgroup = TRUE the tree is rebuilt with the artificial node present, so the pieces are not guaranteed to be this tree minus those edges.")) }`
 
-`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::filter(pmax(nn_rank_1, nn_rank_2) > 2); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "No edge reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest: ", paste0(far$node_1, " to ", far$node_2, " at ranks ", far$nn_rank_1, " and ", far$nn_rank_2, collapse = ", "), "."), " ", if (nrow(ov) == 0) "Every pair is separated by more than the spread of its own cells." else paste0(nrow(ov), " pair(s) have a separation below 1: ", paste0(ov$node_1, " to ", ov$node_2, " at ", ov$separation, collapse = ", "), ".")) }`
+`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::filter(pmax(nn_rank_1, nn_rank_2) > 2); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "No edge reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest: ", paste0(far$node_1, " to ", far$node_2, " at ranks ", far$nn_rank_1, " and ", far$nn_rank_2, collapse = ", "), "."), " ", if (nrow(ov) == 0) "Every pair sits at least one standard deviation apart." else paste0(nrow(ov), " pair(s) sit under one standard deviation apart: ", paste0(ov$node_1, " to ", ov$node_2, " at ", ov$separation, collapse = ", "), ".")) }`
 
 ```{r}
 if (!is.null(extra_tab) && nrow(extra_tab) > 0)
@@ -2045,93 +2095,6 @@ stage_r2 = if (dplyr::n_distinct(pt_df$stage) > 1)
 
 `r if (is.na(lib_r2)) "All cells come from one library, so library cannot explain pseudotime." else paste0("Library explains ", round(100 * lib_r2, 1), "% of the variance in pseudotime", if (!is.na(stage_r2)) paste0(", and stage explains ", round(100 * stage_r2, 1), "%") else "", ".")`
 
-Mitochondrial and ribosomal genes are kept in this analysis, because their
-variation across these cell types is not separable from the biology. What can be
-checked is whether the ordering is explained by them. A trajectory that is mostly
-a depth or a mitochondrial gradient will show a high figure below whatever the
-marker genes say.
-
-Each measure is regressed on pseudotime twice. Once across all cells, and once
-within each library. The pooled figure counts a difference between libraries as
-a trend, because the libraries occupy different parts of the tree. The
-within-library figures cannot do that. A pooled result that disappears within
-libraries is a between-library difference wearing the shape of a gradient.
-
-```{r}
-# pt_df comes from colData(merged), in colnames(merged) order, and qc carries
-# its own barcodes. Joined rather than bound, so a reordering cannot go unseen.
-conf = pt_df
-conf$barcode = colnames(merged)
-conf = conf %>%
-  dplyr::left_join(qc %>% dplyr::select(-node), by = "barcode")
-stopifnot(!anyNA(conf$total))
-
-conf_measures = c("total", "detected", "pct_mito", "pct_rrna", "pct_ribo")
-
-# Pooled across libraries, a trend can be nothing more than the libraries
-# sitting at different ends of the tree. Computed within each library as well,
-# where that explanation is unavailable.
-conf_stats = function(d, label) {
-  if (nrow(d) < 20) return(NULL)
-  dplyr::bind_rows(lapply(conf_measures, function(v) {
-    ok = is.finite(d[[v]]) & is.finite(d$pseudotime)
-    if (sum(ok) < 20) return(NULL)
-    x = if (v %in% c("total", "detected")) log10(d[[v]][ok]) else d[[v]][ok]
-    if (stats::sd(x) == 0) return(NULL)
-    ct = suppressWarnings(cor.test(x, d$pseudotime[ok], method = "spearman"))
-    data.frame(within  = label,
-               measure = v,
-               n_cells = sum(ok),
-               scale   = if (v %in% c("total", "detected")) "log10" else "percent",
-               r2      = signif(summary(lm(d$pseudotime[ok] ~ x))$r.squared, 3),
-               spearman_rho = signif(unname(ct$estimate), 3),
-               p       = signif(ct$p.value, 3),
-               stringsAsFactors = FALSE)
-  }))
-}
-
-conf_tab = dplyr::bind_rows(
-  conf_stats(conf, "all cells"),
-  dplyr::bind_rows(lapply(sort(unique(as.character(conf$library))), function(lb)
-    conf_stats(conf[as.character(conf$library) == lb, , drop = FALSE], lb))))
-
-write.csv(conf_tab, file = paste0(results_dir, "/pseudotime_vs_technical.csv"),
-          row.names = FALSE)
-
-datatable(conf_tab, rownames = FALSE, filter = "top",
-          options = list(pageLength = 15))
-```
-
-```{r, fig.width=13, fig.height=4}
-conf_long = conf %>%
-  tidyr::pivot_longer(dplyr::all_of(conf_measures),
-                      names_to = "measure", values_to = "value") %>%
-  dplyr::mutate(measure = factor(measure, levels = conf_measures,
-                  labels = c("total counts", "genes detected",
-                             "percent mitochondrial", "percent 28S/18S rRNA",
-                             "percent ribosomal protein")))
-
-p_conf = ggplot(conf_long, aes(x = pseudotime, y = value, colour = library)) +
-  geom_point(size = .2, alpha = .25) +
-  geom_smooth(method = "loess", se = FALSE, linewidth = .7) +
-  geom_smooth(aes(colour = NULL), method = "loess", se = FALSE,
-              linewidth = .7, colour = "grey20", linetype = "22") +
-  facet_wrap(~ measure, scales = "free_y", nrow = 1) +
-  scale_y_continuous(trans = "log1p") +
-  scale_colour_manual(values = lib_cols) +
-  guides(colour = guide_legend(override.aes = list(size = 3, alpha = 1))) +
-  theme_bw() +
-  labs(x = "pseudotime", y = NULL, colour = NULL,
-       title = "Depth and technical content along the ordering",
-       subtitle = "one loess per library; the dashed grey line pools them")
-
-p_conf
-ggsave(p_conf, file = paste0(results_dir, "/pseudotime_vs_technical.png"),
-       width = 13, height = 3.2, dpi = 300)
-```
-
-`r if (!exists("conf_tab") || is.null(conf_tab) || nrow(conf_tab) == 0) "" else { pooled = conf_tab %>% dplyr::filter(within == "all cells"); top = pooled[which.max(pooled$r2), ]; wit = conf_tab %>% dplyr::filter(within != "all cells", measure == top$measure); paste0("Pooled across libraries, the strongest of these is ", top$measure, ", explaining ", round(100 * top$r2, 1), " percent of the variance in pseudotime (Spearman rho ", top$spearman_rho, ", p ", top$p, "). Library on its own explains ", round(100 * lib_r2, 1), " percent.", if (nrow(wit) == 0) "" else paste0(" Within each library the same measure gives ", paste0(wit$within, " ", round(100 * wit$r2, 1), " percent", collapse = ", "), ". A pooled figure much larger than the within-library ones is the libraries sitting at different ends of the tree rather than a gradient along it.")) }`
-
 # Pseudotime-associated genes
 
 Genes changing along each path, tested on uncorrected log counts. All genes at
@@ -2204,14 +2167,26 @@ for (s in names(top_by_path)) {
 }
 ```
 
-```{r, fig.width=7, fig.height=5, results="asis"}
+```{r, results="asis"}
 for (s in names(heatmaps)) {
-  cat("\n\n### ", s, "\n\n", sep = "")
+  # The heading starts with a word. Pandoc builds anchor ids by dropping
+  # everything before the first letter, so a heading of "15.up" becomes the id
+  # "up", every path collides, and the table of contents shows a column of
+  # "up" and "down" with no path named.
+  cat("\n\n### Path ", sub("[.](up|down)$", "", s), ", ",
+      sub("^.*[.]", "", s), "\n\n", sep = "")
+
   hp = (heatmaps[[s]][[1]] / heatmaps[[s]][[2]]) + plot_layout(heights = c(0.03, 1))
-  print(hp)
-  ggsave(hp, file = paste0(results_dir, "/tscan_heatmap_",
-                           gsub("[^A-Za-z0-9]+", "_", s), ".png"),
-         width = 7, height = 5)
+  f  = paste0(results_dir, "/tscan_heatmap_",
+              gsub("[^A-Za-z0-9]+", "_", s), ".png")
+  ggsave(hp, file = f, width = 7, height = 5, dpi = 300)
+
+  # The file is written first and then referenced as markdown, rather than
+  # printed to the knitr device. In an asis chunk knitr interleaves device
+  # output with cat output, and a figure can land under the wrong heading or be
+  # dropped. A markdown link is part of the text stream, so the pairing is
+  # fixed. Pandoc embeds the file, so the html stays self-contained.
+  cat("![](", f, ")\n\n", sep = "")
 }
 ```
 
@@ -2271,7 +2246,7 @@ file_notes = c(
   "cluster_composition.csv" = "Cells per cluster, split by cell type and library, before any subclustering.",
   "node_composition.csv"    = "Cells per node, split by library.",
   "root_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
-  "mst_edges.csv"           = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance over the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
+  "mst_edges.csv"           = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance in standard deviations of the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
   "node_identity_scores.csv" = "Each node against all marker sets, somatic ones included, with a contained_in flag where one set sits inside another.",
   "node_marker_expression.csv" = "The per-gene values behind the node identity plot: percent expressing and mean log expression for every marker gene in every node.",
   "subcluster_marker_genes.csv" = "Markers of each node against the other nodes of this lineage. A within-lineage comparison, so it cannot see programs the nodes share.",
@@ -2280,13 +2255,12 @@ file_notes = c(
   "tscan_pseudotime_genes.csv"        = "Genes whose expression changes along the ordering.",
   "tscan_pseudotime_GO_overlaps.csv"  = "Genes shared between the pseudotime gene list and each GO term.",
   "tscan_pseudotime_GO_pvalues.csv"   = "Enrichment of GO terms among the pseudotime-associated genes.",
-  "somatic_check_set_scores.csv"      = "Every node of the annotated run scored on all marker sets, computed before any cell is removed.",
-  "somatic_check_gene_expression.csv" = "The per-gene values behind the somatic check bubble plot.",
-  "annotated_run_depth_and_technical.csv" = "Depth, genes detected, percent mitochondrial, rRNA and ribosomal per node of the annotated run.",
+  "somatic_check_set_scores.csv"      = "Every node of the annotated run scored on all marker sets, computed before any cell is removed. Only written when drop_annotations names something.",
+  "somatic_check_gene_expression.csv" = "The per-gene values behind the somatic check bubble plot. Only written when drop_annotations names something.",
+  "annotated_run_depth_and_technical.csv" = "Depth, genes detected, percent mitochondrial, rRNA and ribosomal per node of the annotated run. Only written when drop_annotations names something.",
   "node_depth_and_technical.csv"      = "The same four measures for this run's nodes.",
   "subcluster_depth_tests.csv"        = "Kruskal-Wallis of each measure across the subclusters, with the fold range in median depth.",
   "subcluster_downsample_check.csv"   = "Subclusters recomputed after downsampling every cell to a common depth, with the ARI against the original. A low ARI means the split was depth.",
-  "pseudotime_vs_technical.csv"       = "Pseudotime regressed on each technical measure, pooled and within each library. A pooled result much larger than the within-library ones is a between-library difference.",
   "subcluster_stability.csv"          = "The ARI sweep over sub_k_range. Only written when subclusters are recomputed.",
   "subcluster_k_choice.csv"           = "Each candidate k with the subcluster count it returned and its ARI. Only written when subclusters are recomputed.",
   "subcluster_annotation_map.csv"     = "Every old-new subcluster pair with shared cell counts and Jaccard. Only written when subclusters are recomputed.",
@@ -2298,10 +2272,9 @@ file_notes = c(
   "tscan_node_graph_marker_sets.pdf"  = "The marker set panels as a vector file.",
   "tscan_pseudotime_by_node.png"      = "Pseudotime distribution per node and per library.",
   "node_identity_scores.png"          = "Marker expression per node, one dot per gene.",
-  "somatic_check_bubble.png"          = "Marker expression per node of the annotated run, one dot per gene.",
-  "annotated_run_depth_and_technical.png" = "Depth and technical content per node of the annotated run.",
+  "somatic_check_bubble.png"          = "Marker expression per node of the annotated run, one dot per gene. Only written when drop_annotations names something.",
+  "annotated_run_depth_and_technical.png" = "Depth and technical content per node of the annotated run. Only written when drop_annotations names something.",
   "node_depth_and_technical.png"      = "Depth and technical content per node of this run.",
-  "pseudotime_vs_technical.png"       = "Each technical measure against pseudotime, with one curve per library.",
   "subcluster_overlap.png"            = "Old against new subclusters as percentages, three panels. Only written when subclusters are recomputed.")
 
 on_disk = sort(setdiff(list.files(results_dir), "Robjects"))

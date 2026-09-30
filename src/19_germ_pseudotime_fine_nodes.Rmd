@@ -434,9 +434,24 @@ ordered by distance. An edge between mutual nearest neighbors reads 1 and 1.
 A high rank on either side is an edge the tree drew because every node has to
 join it, not because the two nodes are close.
 
-`separation` is the distance between the two centroids over the mean distance
-from a cell to its own centroid. Below 1 the nodes sit closer together than
-their own cells sit to their own centers.
+`separation` is the distance between the two centroids in standard deviations of
+the within-node spread. A 2 means the two centers sit two standard deviations
+apart. Below about 1 the clouds overlap so heavily that the boundary between the
+two nodes is a line drawn through one continuous population. On a trajectory
+that is the expected reading for consecutive waypoints. It is the reading to
+question where the two nodes carry annotations for distinct cell types.
+
+The two columns separate cases that look alike on the figure.
+
+| `separation` | `nn_rank` | reading |
+|---|---|---|
+| low | 1 and 1 | one continuous population, joined at its closest point |
+| low | high | overlapping nodes, joined the long way round |
+| high | 1 and 1 | two distinct groups with a genuine link between them |
+| high | high | a long edge to a node that sits near nothing |
+
+Neither column says whether a low `separation` means the annotation is wrong or
+the subclustering was cut too fine. That comes from the marker sets.
 
 ```{r}
 edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
@@ -476,8 +491,8 @@ edge_tab$pct_of_cut = if (is.na(og_cut)) NA_real_ else
 #
 #   nn_rank_1   where node_2 sits in node_1's list of nodes ordered by distance
 #   nn_rank_2   where node_1 sits in node_2's
-#   separation  centroid distance over the mean spread of cells within the two
-#               nodes, so below 1 the nodes overlap
+#   separation  centroid distance in standard deviations of the within-node
+#               spread, so 2 means the centroids sit 2 SD apart
 #
 # Both are Euclidean, which is what dist.method = "simple" uses. Under any other
 # dist.method they describe the corrected space rather than the distances the
@@ -487,11 +502,16 @@ nd_all = as.character(merged$node)
 cnt    = table(nd_all)
 cent   = rowsum(co_all, nd_all)[names(cnt), , drop = FALSE] / as.vector(cnt)
 
-# mean distance from a cell to its own node centroid
-node_radius = vapply(rownames(cent), function(g) {
+# Per-dimension within-node standard deviation, pooled over the dimensions of
+# the corrected space. The distance from a cell to its own centroid is not used
+# as the denominator: it grows as the square root of the dimension count while
+# the centroid distance does not, so the ratio would shrink as dimensions are
+# added. Two nodes four standard deviations apart score 0.56 on that version in
+# fifty dimensions and 4 on this one.
+node_sd = vapply(rownames(cent), function(g) {
   ix = which(nd_all == g)
-  mean(sqrt(rowSums((co_all[ix, , drop = FALSE] -
-                     matrix(cent[g, ], length(ix), ncol(cent), byrow = TRUE))^2)))
+  if (length(ix) < 2) NA_real_ else
+    sqrt(mean(apply(co_all[ix, , drop = FALSE], 2, var)))
 }, numeric(1))
 
 node_dist = as.matrix(dist(cent))
@@ -502,7 +522,7 @@ edge_tab$nn_rank_1 = node_rank[cbind(edge_tab$node_1, edge_tab$node_2)]
 edge_tab$nn_rank_2 = node_rank[cbind(edge_tab$node_2, edge_tab$node_1)]
 edge_tab$separation = round(
   node_dist[cbind(edge_tab$node_1, edge_tab$node_2)] /
-  ((node_radius[edge_tab$node_1] + node_radius[edge_tab$node_2]) / 2), 2)
+  ((node_sd[edge_tab$node_1] + node_sd[edge_tab$node_2]) / 2), 2)
 
 n_boot  = as.integer(params$edge_boot)
 boot_ok = n_boot > 0
@@ -547,7 +567,7 @@ datatable(edge_tab, rownames = FALSE, options = list(pageLength = 15))
 
 `r if (is.na(og_cut)) "" else { over = edge_tab %>% dplyr::filter(pct_of_cut > 100); paste0("The outgroup threshold for this tree is ", signif(og_cut, 3), ", which is 1.5 times the median edge length. ", if (nrow(over) == 0) "No edge is longer than that, so outgroup = TRUE returns this same single tree." else paste0(nrow(over), " of ", nrow(edge_tab), " edges are longer: ", paste0(over$node_1, " to ", over$node_2, " at ", over$pct_of_cut, " percent", collapse = ", "), ". Under outgroup = TRUE the tree is rebuilt with the artificial node present, so the pieces are not guaranteed to be this tree minus those edges.")) }`
 
-`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::filter(pmax(nn_rank_1, nn_rank_2) > 2); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "No edge reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest: ", paste0(far$node_1, " to ", far$node_2, " at ranks ", far$nn_rank_1, " and ", far$nn_rank_2, collapse = ", "), "."), " ", if (nrow(ov) == 0) "Every pair is separated by more than the spread of its own cells." else paste0(nrow(ov), " pair(s) have a separation below 1: ", paste0(ov$node_1, " to ", ov$node_2, " at ", ov$separation, collapse = ", "), ".")) }`
+`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::filter(pmax(nn_rank_1, nn_rank_2) > 2); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "No edge reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest: ", paste0(far$node_1, " to ", far$node_2, " at ranks ", far$nn_rank_1, " and ", far$nn_rank_2, collapse = ", "), "."), " ", if (nrow(ov) == 0) "Every pair sits at least one standard deviation apart." else paste0(nrow(ov), " pair(s) sit under one standard deviation apart: ", paste0(ov$node_1, " to ", ov$node_2, " at ", ov$separation, collapse = ", "), ".")) }`
 
 ```{r, fig.width=13, fig.height=5}
 by_node = aggregateAcrossCells(
@@ -874,7 +894,7 @@ file_notes = c(
   "node_composition.csv"      = "Cells per node and the cluster each node came from.",
   "node_by_annotation.csv"    = "Annotation composition of every node, as counts and fractions. The evidence behind panel B of the node graph.",
   "node_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
-  "mst_edges.csv"             = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance over the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
+  "mst_edges.csv"             = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance in standard deviations of the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
   "annotation_pseudotime.csv" = "Median and quartiles of pseudotime for each annotation. The ordering claim in numbers.",
   "marker_sets_vs_pseudotime.csv" = "Spearman correlation of each germ marker set against pseudotime. Independent of both the node cuts and the labels.",
   "pseudotime_vs_technical.csv"   = "Pseudotime regressed on depth, mitochondrial, rRNA and ribosomal content, pooled and within each library.",
