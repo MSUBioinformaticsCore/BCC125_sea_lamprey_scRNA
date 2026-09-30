@@ -43,6 +43,7 @@ params:
     edge_boot: 100
     edge_boot_cells: 100
     graph_edge_labels: FALSE
+    graph_marker_sets: "Primordial germ cells,Migrating germ cells,Spermatocytes,Oocyte"
     mnn_k: 50
     outgroup: FALSE
     on_merge: "combine"
@@ -1669,6 +1670,19 @@ equally.
 
 Read it as a stress test rather than as a p-value.
 
+`pct_of_cut` is each edge's length as a percentage of the outgroup threshold,
+reported whether or not `outgroup` is switched on. An edge over 100 percent is
+one that outgroup splitting would remove.
+
+`nn_rank_1` and `nn_rank_2` place each partner in the other's list of nodes
+ordered by distance. An edge between mutual nearest neighbors reads 1 and 1.
+A high rank on either side is an edge the tree drew because every node has to
+join it, not because the two nodes are close.
+
+`separation` is the distance between the two centroids over the mean distance
+from a cell to its own centroid. Below 1 the nodes sit closer together than
+their own cells sit to their own centers.
+
 ```{r}
 edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
 
@@ -1677,6 +1691,64 @@ edge_tab = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
   dplyr::mutate(length = signif(weight, 3),
                 key = edge_key(node_1, node_2)) %>%
   dplyr::select(node_1, node_2, key, length)
+
+# The outgroup rule, reported whether or not it is switched on. With
+# outgroup = TRUE, createClusterMST puts an artificial node 1.5 times the median
+# edge length away from every real node. An edge longer than that is beaten by a
+# pair of edges through the outgroup, and deleting the outgroup leaves the tree
+# in pieces. The median is taken from the tree built without an outgroup, which
+# is the reference the package itself uses.
+og_cut = if (is.numeric(params$outgroup)) {
+  as.numeric(params$outgroup)
+} else {
+  ref = if (!isTRUE(params$outgroup)) edge_tab$length else {
+    m0 = try(TrajectoryUtils::createClusterMST(
+               reducedDim(merged, "corrected"),
+               clusters    = as.character(merged$node),
+               dist.method = as.character(params$dist_method),
+               mnn.k       = params$mnn_k, outgroup = FALSE), silent = TRUE)
+    if (inherits(m0, "try-error")) NULL else
+      igraph::as_data_frame(m0, what = "edges")$weight
+  }
+  if (length(ref) == 0) NA_real_ else 1.5 * stats::median(ref)
+}
+
+# under 100 the edge survives outgroup splitting, over 100 it is cut
+edge_tab$pct_of_cut = if (is.na(og_cut)) NA_real_ else
+  round(100 * edge_tab$length / og_cut)
+
+# Two reads on each edge that need no threshold, both from the node centroids of
+# the corrected space.
+#
+#   nn_rank_1   where node_2 sits in node_1's list of nodes ordered by distance
+#   nn_rank_2   where node_1 sits in node_2's
+#   separation  centroid distance over the mean spread of cells within the two
+#               nodes, so below 1 the nodes overlap
+#
+# Both are Euclidean, which is what dist.method = "simple" uses. Under any other
+# dist.method they describe the corrected space rather than the distances the
+# tree was built from.
+co_all = reducedDim(merged, "corrected")
+nd_all = as.character(merged$node)
+cnt    = table(nd_all)
+cent   = rowsum(co_all, nd_all)[names(cnt), , drop = FALSE] / as.vector(cnt)
+
+# mean distance from a cell to its own node centroid
+node_radius = vapply(rownames(cent), function(g) {
+  ix = which(nd_all == g)
+  mean(sqrt(rowSums((co_all[ix, , drop = FALSE] -
+                     matrix(cent[g, ], length(ix), ncol(cent), byrow = TRUE))^2)))
+}, numeric(1))
+
+node_dist = as.matrix(dist(cent))
+diag(node_dist) = Inf
+node_rank = t(apply(node_dist, 1, rank, ties.method = "min"))
+
+edge_tab$nn_rank_1 = node_rank[cbind(edge_tab$node_1, edge_tab$node_2)]
+edge_tab$nn_rank_2 = node_rank[cbind(edge_tab$node_2, edge_tab$node_1)]
+edge_tab$separation = round(
+  node_dist[cbind(edge_tab$node_1, edge_tab$node_2)] /
+  ((node_radius[edge_tab$node_1] + node_radius[edge_tab$node_2]) / 2), 2)
 
 n_boot = as.integer(params$edge_boot)
 boot_ok = n_boot > 0
@@ -1719,7 +1791,8 @@ if (boot_ok) {
 }
 
 edge_tab = edge_tab %>%
-  dplyr::select(node_1, node_2, length, frequency) %>%
+  dplyr::select(node_1, node_2, length, nn_rank_1, nn_rank_2, separation,
+                pct_of_cut, frequency) %>%
   dplyr::arrange(dplyr::desc(is.na(frequency)), frequency, length)
 
 write.csv(edge_tab, file = paste0(results_dir, "/mst_edges.csv"),
@@ -1729,6 +1802,10 @@ datatable(edge_tab, rownames = FALSE, options = list(pageLength = 20))
 ```
 
 `r if (!boot_ok || nrow(edge_tab) == 0) "The subsampling check is off. Set edge_boot to a positive number to run it." else paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], ", drawn in ", edge_tab$frequency[1], " percent of ", n_boot, " trees built from ", params$edge_boot_cells, " cells per node. ", sum(edge_tab$frequency < 50), " of ", nrow(edge_tab), " edges appear in under half of them, and ", sum(edge_tab$frequency == 100), " in all of them.")`
+
+`r if (is.na(og_cut)) "" else { over = edge_tab %>% dplyr::filter(pct_of_cut > 100); paste0("The outgroup threshold for this tree is ", signif(og_cut, 3), ", which is 1.5 times the median edge length. ", if (nrow(over) == 0) "No edge is longer than that, so outgroup = TRUE returns this same single tree." else paste0(nrow(over), " of ", nrow(edge_tab), " edges are longer: ", paste0(over$node_1, " to ", over$node_2, " at ", over$pct_of_cut, " percent", collapse = ", "), ". Under outgroup = TRUE the tree is rebuilt with the artificial node present, so the pieces are not guaranteed to be this tree minus those edges.")) }`
+
+`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::filter(pmax(nn_rank_1, nn_rank_2) > 2); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "No edge reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest: ", paste0(far$node_1, " to ", far$node_2, " at ranks ", far$nn_rank_1, " and ", far$nn_rank_2, collapse = ", "), "."), " ", if (nrow(ov) == 0) "Every pair is separated by more than the spread of its own cells." else paste0(nrow(ov), " pair(s) have a separation below 1: ", paste0(ov$node_1, " to ", ov$node_2, " at ", ov$separation, collapse = ", "), ".")) }`
 
 ```{r}
 if (!is.null(extra_tab) && nrow(extra_tab) > 0)
@@ -1873,7 +1950,7 @@ gr_pie =
 gr_pseudo =
   ggraph(layout_data) +
   edge_aes +
-  geom_node_point(aes(color = mean_pseudo), size = max(3.5, pt_size)) +
+  geom_node_point(aes(color = mean_pseudo), size = max(6, pt_size * 1.6)) +
   scale_color_viridis_c(name = "mean pseudotime") +
   node_lab + edge_lab +
   coord_fixed() +
@@ -1897,6 +1974,65 @@ ggsave(p_node_graph, file = paste0(results_dir, "/tscan_node_graph.pdf"),
 ggsave(p_node_graph, file = paste0(results_dir, "/tscan_node_graph.png"),
        width = 7, height = 7, dpi = 300)
 ```
+
+## Marker sets on the tree
+
+The same tree, once per germ cell marker set. Color is the set's mean log
+expression scaled to its own maximum, so the panels show where each program sits
+rather than how the programs compare with one another. Size is the percentage of
+cells in the node detecting the set.
+
+Each panel title carries the set's absolute maximum. A panel whose maximum is
+near zero is showing noise stretched across the full color range, so read the
+title before the colors. The unscaled values are in `root_marker_set_scores.csv`.
+
+```{r, fig.width=11, fig.height=9}
+graph_sets = trimws(strsplit(as.character(params$graph_marker_sets), ",")[[1]])
+graph_sets = intersect(graph_sets[nzchar(graph_sets)], unique(set_scores$set))
+
+set_panel = function(s) {
+  sc = set_scores %>% dplyr::filter(set == s)
+  mx = suppressWarnings(max(sc$mean_logexpr, na.rm = TRUE))
+  ld = layout_data
+  ld$rel = if (is.finite(mx) && mx > 0)
+    sc$mean_logexpr[match(ld$name, as.character(sc$node))] / mx else NA_real_
+  ld$pct = sc$pct_detected[match(ld$name, as.character(sc$node))]
+
+  ggraph(ld) +
+    edge_aes +
+    geom_node_point(aes(colour = rel, size = pct)) +
+    scale_colour_viridis_c(name = "expression, relative\nto the set maximum",
+                           limits = c(0, 1)) +
+    scale_size_continuous(name = "% of cells detecting",
+                          range = c(1.5, 7), limits = c(0, 100)) +
+    geom_text_repel(data = ld, aes(x, y, label = name), inherit.aes = FALSE,
+                    size = 2.2, colour = "grey25", min.segment.length = 0,
+                    segment.size = .2, segment.colour = "grey70",
+                    box.padding = .35, max.overlaps = Inf, seed = 1) +
+    coord_fixed() +
+    theme_void(base_size = 8) +
+    ggtitle(sprintf("%s  (max %.2f)", s, mx)) +
+    theme(plot.title = element_text(size = 8, hjust = .5))
+}
+
+if (length(graph_sets) > 0) {
+  p_set_graph = patchwork::wrap_plots(lapply(graph_sets, set_panel),
+                                      ncol = min(2, length(graph_sets))) +
+    patchwork::plot_layout(guides = "collect") &
+    theme(legend.position = "right", legend.box = "vertical",
+          legend.key.size = unit(.35, "cm"),
+          legend.title = element_text(size = 7),
+          legend.text  = element_text(size = 6))
+
+  print(p_set_graph)
+  ggsave(p_set_graph, file = paste0(results_dir, "/tscan_node_graph_marker_sets.png"),
+         width = 11, height = 9, dpi = 300)
+  ggsave(p_set_graph, file = paste0(results_dir, "/tscan_node_graph_marker_sets.pdf"),
+         width = 11, height = 9)
+}
+```
+
+`r if (length(graph_sets) == 0) "No marker set named in graph_marker_sets is present in the scores." else ""`
 
 ## What the ordering tracks
 
@@ -2135,7 +2271,7 @@ file_notes = c(
   "cluster_composition.csv" = "Cells per cluster, split by cell type and library, before any subclustering.",
   "node_composition.csv"    = "Cells per node, split by library.",
   "root_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
-  "mst_edges.csv"           = "Every edge of the tree, its length in the corrected space, and the percentage of subsampled trees containing it.",
+  "mst_edges.csv"           = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance over the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
   "node_identity_scores.csv" = "Each node against all marker sets, somatic ones included, with a contained_in flag where one set sits inside another.",
   "node_marker_expression.csv" = "The per-gene values behind the node identity plot: percent expressing and mean log expression for every marker gene in every node.",
   "subcluster_marker_genes.csv" = "Markers of each node against the other nodes of this lineage. A within-lineage comparison, so it cannot see programs the nodes share.",
@@ -2158,6 +2294,8 @@ file_notes = c(
   "tscan_trajectory_umap.png"         = "UMAP colored by node and by pseudotime, with the tree drawn over it.",
   "tscan_node_graph.png"              = "The tree itself: library composition per node as pie charts, and nodes colored by mean pseudotime.",
   "tscan_node_graph.pdf"              = "The node graph as a vector file, for figure assembly.",
+  "tscan_node_graph_marker_sets.png"  = "The same tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
+  "tscan_node_graph_marker_sets.pdf"  = "The marker set panels as a vector file.",
   "tscan_pseudotime_by_node.png"      = "Pseudotime distribution per node and per library.",
   "node_identity_scores.png"          = "Marker expression per node, one dot per gene.",
   "somatic_check_bubble.png"          = "Marker expression per node of the annotated run, one dot per gene.",
