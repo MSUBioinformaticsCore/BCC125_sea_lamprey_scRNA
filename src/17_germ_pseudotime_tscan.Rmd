@@ -57,7 +57,12 @@ params:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+# html_document renders inline figures at knitr's 72 dpi doubled by
+# fig.retina, so 144, while every ggsave here writes at 300. Rendering inline
+# at 300 as well puts the figure in the document at the resolution of the file
+# on disk. fig.retina is set to 1 so the two are not multiplied.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      dpi = 300, fig.retina = 1)
 ```
 
 <style>
