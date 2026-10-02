@@ -41,6 +41,37 @@ params:
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
+<style>
+/* html_document leaves pandoc's markdown tables unstyled: no padding, no row
+   rules, cells aligned on their last line. Selected as direct children of a
+   section, which a DT widget's table never is, so the interactive tables keep
+   their own styling. */
+div.section > table, div.main-container > table {
+  border-collapse: collapse;
+  margin: 1.1em 0;
+  font-size: 0.93em;
+  line-height: 1.35;
+}
+div.section > table th, div.main-container > table th,
+div.section > table td, div.main-container > table td {
+  vertical-align: top;
+  text-align: left;
+  padding: 7px 16px 7px 0;
+  border-top: 1px solid #e3e3e3;
+}
+div.section > table th, div.main-container > table th {
+  border-top: none;
+  border-bottom: 2px solid #b0b0b0;
+  font-weight: 600;
+}
+div.section > table code, div.main-container > table code {
+  white-space: nowrap;
+  background: none;
+  padding: 0;
+  color: #333;
+}
+</style>
+
 ```{r, echo=FALSE, results="asis"}
 cat("\n")
 cat("#### Lab:", params$lab, " \n")
@@ -417,11 +448,11 @@ Five columns describe each edge from a different direction.
 
 | column | what it is | low | high |
 |---|---|---|---|
-| `length` | distance between the two node centroids, in the units of the corrected space | the two nodes sit close together | the two nodes are far apart |
-| `nn_rank_1`, `nn_rank_2` | where each node sits in the other's list of nodes ordered by distance | 1 and 1 are mutual nearest neighbors | the edge reaches past nearer nodes to make the connection |
-| `separation` | centroid distance in standard deviations of the within-node spread | below about 1 the two nodes are one continuous population | two groups distinct enough to tell apart |
-| `pct_of_cut` | the length as a percentage of the outgroup threshold | the edge survives outgroup splitting | over 100, outgroup splitting removes it |
-| `frequency` | percentage of subsampled trees containing the edge | a different sample of the same cells would not have drawn this edge | the edge is drawn whatever the sample |
+| `length` | distance between the node centroids | nodes sit close together | nodes are far apart |
+| `nn_rank_1`, `nn_rank_2` | each node's place in the other's distance-ordered list | 1 and 1: mutual nearest neighbors | the edge reaches past nearer nodes |
+| `separation` | centroid distance in within-node standard deviations | under 1: one continuous population | two distinguishable groups |
+| `pct_of_cut` | length as a percentage of the outgroup threshold | the edge survives outgroup splitting | over 100: outgroup splitting removes it |
+| `frequency` | percentage of subsampled trees holding the edge | another sample would not have drawn it | drawn whatever the sample |
 
 `frequency` comes from drawing `edge_boot_cells` cells from each node
 `edge_boot` times, recomputing the centroids and rebuilding the tree. The count
@@ -905,26 +936,29 @@ file_notes = c(
   "pseudotime_by_annotation.png" = "Pseudotime distribution per annotation and per library.",
   "marker_sets_vs_pseudotime.png" = "Each germ marker set against pseudotime.")
 
-on_disk = sort(setdiff(list.files(results_dir), "Robjects"))
+in_dir  = sort(setdiff(list.files(results_dir), "Robjects"))
+
+# The table describes what this document writes. The results directory also
+# holds whatever earlier runs left behind, and those are named below rather
+# than given rows with no description.
+on_disk = intersect(names(file_notes), in_dir)
+unknown = setdiff(in_dir, names(file_notes))
+missing = setdiff(names(file_notes), in_dir)
 
 export_tab = data.frame(
   file = on_disk,
   size = sapply(file.path(results_dir, on_disk),
                 function(f) format(structure(file.size(f), class = "object_size"),
                                    units = "auto")),
-  what = ifelse(on_disk %in% names(file_notes),
-                unname(file_notes[on_disk]), "**no description**"),
+  what = unname(file_notes[on_disk]),
   stringsAsFactors = FALSE)
-
-undescribed = on_disk[!on_disk %in% names(file_notes)]
-missing     = setdiff(names(file_notes), on_disk)
 
 datatable(export_tab, rownames = FALSE, escape = FALSE,
           options = list(pageLength = 30, dom = "tp",
                          columnDefs = list(list(width = "240px", targets = 0))))
 ```
 
-`r if (length(undescribed) > 0) paste0("**", length(undescribed), " file(s) in the directory have no description here:** ", paste(undescribed, collapse = ", "), ". Add them to file_notes.") else ""`
+`r if (length(unknown) > 0) paste0(length(unknown), " file(s) in the directory are not written by this document and are left out of the table: ", paste(unknown, collapse = ", "), ". Either an earlier version wrote them, or they are new and need a line in file_notes.") else ""`
 
 `r if (length(missing) > 0) paste0("Described but not written on this run: ", paste(missing, collapse = ", "), ".") else ""`
 

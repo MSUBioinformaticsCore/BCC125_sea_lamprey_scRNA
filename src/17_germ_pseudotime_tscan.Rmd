@@ -60,6 +60,37 @@ params:
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 ```
 
+<style>
+/* html_document leaves pandoc's markdown tables unstyled: no padding, no row
+   rules, cells aligned on their last line. Selected as direct children of a
+   section, which a DT widget's table never is, so the interactive tables keep
+   their own styling. */
+div.section > table, div.main-container > table {
+  border-collapse: collapse;
+  margin: 1.1em 0;
+  font-size: 0.93em;
+  line-height: 1.35;
+}
+div.section > table th, div.main-container > table th,
+div.section > table td, div.main-container > table td {
+  vertical-align: top;
+  text-align: left;
+  padding: 7px 16px 7px 0;
+  border-top: 1px solid #e3e3e3;
+}
+div.section > table th, div.main-container > table th {
+  border-top: none;
+  border-bottom: 2px solid #b0b0b0;
+  font-weight: 600;
+}
+div.section > table code, div.main-container > table code {
+  white-space: nowrap;
+  background: none;
+  padding: 0;
+  color: #333;
+}
+</style>
+
 ```{r, echo=FALSE, results="asis"}
 cat("\n")
 cat("#### Lab:", params$lab, " \n")
@@ -816,7 +847,11 @@ if (length(node_levels) < 2)
 
 ```
 
-## Annotation
+```{r, results="asis"}
+# Nothing in this section applies where the subclusters are reused: the nodes
+# already carry the annotated numbering and nothing is matched.
+if (!reuse_sub) cat("## Annotation\n")
+```
 
 ```{r, results="asis"}
 # Nothing is printed where the subclusters are reused. The note below names the
@@ -861,7 +896,7 @@ have_prev     = do_anno && nzchar(prev_file) && file.exists(prev_file)
 sub_nodes_now = node_levels[grepl("\\.", node_levels)]
 ```
 
-`r if (!do_anno) paste0("**No annotation is applied to the ", lineage, " lineage.** annotate_lineages is ", params$annotate_lineages, ".") else if (length(anno_map) == 0) "**No annotation is applied.** The node_annotation parameter is empty." else if (reuse_sub) paste0("The subclusters were taken from ", basename(prev_src), ", so the nodes already carry that run's numbering and every label attaches by name. No overlap matching is needed, and no merge or split can arise.") else if (length(sub_nodes_now) > 0 && !have_prev) paste0("**Subclusters cannot be annotated.** ", if (nzchar(prev_file)) paste0(prev_file, " was not found.") else "prev_nodes_file is not set.", " Set it to the pseudotime_per_cell.csv of the run the annotation came from. Whole-cluster nodes are still annotated by name.") else ""`
+`r if (!do_anno) paste0("**No annotation is applied to the ", lineage, " lineage.** annotate_lineages is ", params$annotate_lineages, ".") else if (length(anno_map) == 0) "**No annotation is applied.** The node_annotation parameter is empty." else if (length(sub_nodes_now) > 0 && !have_prev) paste0("**Subclusters cannot be annotated.** ", if (nzchar(prev_file)) paste0(prev_file, " was not found.") else "prev_nodes_file is not set.", " Set it to the pseudotime_per_cell.csv of the run the annotation came from. Whole-cluster nodes are still annotated by name.") else ""`
 
 ```{r}
 map_tab = NULL
@@ -1666,11 +1701,11 @@ Five columns describe each edge from a different direction.
 
 | column | what it is | low | high |
 |---|---|---|---|
-| `length` | distance between the two node centroids, in the units of the corrected space | the two nodes sit close together | the two nodes are far apart |
-| `nn_rank_1`, `nn_rank_2` | where each node sits in the other's list of nodes ordered by distance | 1 and 1 are mutual nearest neighbors | the edge reaches past nearer nodes to make the connection |
-| `separation` | centroid distance in standard deviations of the within-node spread | below about 1 the two nodes are one continuous population | two groups distinct enough to tell apart |
-| `pct_of_cut` | the length as a percentage of the outgroup threshold | the edge survives outgroup splitting | over 100, outgroup splitting removes it |
-| `frequency` | percentage of subsampled trees containing the edge | a different sample of the same cells would not have drawn this edge | the edge is drawn whatever the sample |
+| `length` | distance between the node centroids | nodes sit close together | nodes are far apart |
+| `nn_rank_1`, `nn_rank_2` | each node's place in the other's distance-ordered list | 1 and 1: mutual nearest neighbors | the edge reaches past nearer nodes |
+| `separation` | centroid distance in within-node standard deviations | under 1: one continuous population | two distinguishable groups |
+| `pct_of_cut` | length as a percentage of the outgroup threshold | the edge survives outgroup splitting | over 100: outgroup splitting removes it |
+| `frequency` | percentage of subsampled trees holding the edge | another sample would not have drawn it | drawn whatever the sample |
 
 `frequency` comes from drawing `edge_boot_cells` cells from each node
 `edge_boot` times, recomputing the centroids and rebuilding the tree. The count
@@ -2254,20 +2289,23 @@ file_notes = c(
   "node_depth_and_technical.png"      = "Depth and technical content per node of this run.",
   "subcluster_overlap.png"            = "Old against new subclusters as percentages, three panels. Only written when subclusters are recomputed.")
 
-on_disk = sort(setdiff(list.files(results_dir), "Robjects"))
-on_disk = on_disk[!grepl("^tscan_heatmap_", on_disk)]
+in_dir  = sort(setdiff(list.files(results_dir), "Robjects"))
+in_dir  = in_dir[!grepl("^tscan_heatmap_", in_dir)]
+
+# The table describes what this document writes. The results directory also
+# holds whatever earlier runs left behind, and those are named below rather
+# than given rows with no description.
+on_disk = intersect(names(file_notes), in_dir)
+unknown = setdiff(in_dir, names(file_notes))
+missing = setdiff(names(file_notes), in_dir)
 
 export_tab = data.frame(
   file = on_disk,
   size = sapply(file.path(results_dir, on_disk),
                 function(f) format(structure(file.size(f), class = "object_size"),
                                    units = "auto")),
-  what = ifelse(on_disk %in% names(file_notes),
-                unname(file_notes[on_disk]), "**no description**"),
+  what = unname(file_notes[on_disk]),
   stringsAsFactors = FALSE)
-
-undescribed = on_disk[!on_disk %in% names(file_notes)]
-missing     = setdiff(names(file_notes), on_disk)
 
 datatable(export_tab, rownames = FALSE, escape = FALSE,
           options = list(pageLength = 40, dom = "tp",
@@ -2276,7 +2314,7 @@ datatable(export_tab, rownames = FALSE, escape = FALSE,
 
 `r n_heat = length(list.files(results_dir, pattern = "^tscan_heatmap_")); if (n_heat > 0) paste0("Plus ", n_heat, " heatmap image(s) named tscan_heatmap_<path>.png, one per path through the tree.") else ""`
 
-`r if (length(undescribed) > 0) paste0("**", length(undescribed), " file(s) in the directory have no description here:** ", paste(undescribed, collapse = ", "), ". Add them to file_notes.") else ""`
+`r if (length(unknown) > 0) paste0(length(unknown), " file(s) in the directory are not written by this document and are left out of the table: ", paste(unknown, collapse = ", "), ". Either an earlier version wrote them, or they are new and need a line in file_notes.") else ""`
 
 `r if (length(missing) > 0) paste0("Described but not written on this run: ", paste(missing, collapse = ", "), ". That is expected for anything the run skipped, such as the subclustering outputs when the subclusters were reused.") else ""`
 
