@@ -413,35 +413,27 @@ An MST always returns a tree. It connects every node whether or not the data
 supports the connection, so the shape on its own says nothing about how much of
 it is real.
 
-`edge_boot` times, `edge_boot_cells` cells are drawn from each node, the centroids
-are recomputed and the tree is rebuilt. An edge drawn in a small fraction of those
-trees is one a different sample of the same cells would not have drawn.
+Five columns describe each edge from a different direction.
 
-The count is fixed per node rather than proportional. A node of 5,000 cells has a
-centroid so precisely estimated that dropping a fifth of them moves it almost not
-at all, so a proportional subsample returns close to 100 percent for every edge
-including the arbitrary ones. Drawing the same number from every node probes each
-equally.
+| column | what it is | low | high |
+|---|---|---|---|
+| `length` | distance between the two node centroids, in the units of the corrected space | the two nodes sit close together | the two nodes are far apart |
+| `nn_rank_1`, `nn_rank_2` | where each node sits in the other's list of nodes ordered by distance | 1 and 1 are mutual nearest neighbors | the edge reaches past nearer nodes to make the connection |
+| `separation` | centroid distance in standard deviations of the within-node spread | below about 1 the two nodes are one continuous population | two groups distinct enough to tell apart |
+| `pct_of_cut` | the length as a percentage of the outgroup threshold | the edge survives outgroup splitting | over 100, outgroup splitting removes it |
+| `frequency` | percentage of subsampled trees containing the edge | a different sample of the same cells would not have drawn this edge | the edge is drawn whatever the sample |
 
-Read it as a stress test rather than as a p-value.
+`frequency` comes from drawing `edge_boot_cells` cells from each node
+`edge_boot` times, recomputing the centroids and rebuilding the tree. The count
+is fixed per node rather than proportional. A node of 5,000 cells has a centroid
+so precisely estimated that dropping a fifth of them moves it almost not at all,
+so a proportional subsample returns close to 100 percent for every edge
+including the arbitrary ones. Read it as a stress test rather than as a p-value.
 
-`pct_of_cut` is each edge's length as a percentage of the outgroup threshold,
-reported whether or not `outgroup` is switched on. An edge over 100 percent is
-one that outgroup splitting would remove.
-
-`nn_rank_1` and `nn_rank_2` place each partner in the other's list of nodes
-ordered by distance. An edge between mutual nearest neighbors reads 1 and 1.
-A high rank on either side is an edge the tree drew because every node has to
-join it, not because the two nodes are close.
-
-`separation` is the distance between the two centroids in standard deviations of
-the within-node spread. A 2 means the two centers sit two standard deviations
-apart. Below about 1 the clouds overlap so heavily that the boundary between the
-two nodes is a line drawn through one continuous population. On a trajectory
-that is the expected reading for consecutive waypoints. It is the reading to
-question where the two nodes carry annotations for distinct cell types.
-
-The two columns separate cases that look alike on the figure.
+A low `separation` is expected between consecutive waypoints on a trajectory.
+It is the reading to question where the two nodes carry annotations for distinct
+cell types. Combined with the ranks it separates cases that look alike on the
+figure.
 
 | `separation` | `nn_rank` | reading |
 |---|---|---|
@@ -450,8 +442,8 @@ The two columns separate cases that look alike on the figure.
 | high | 1 and 1 | two distinct groups with a genuine link between them |
 | high | high | a long edge to a node that sits near nothing |
 
-Neither column says whether a low `separation` means the annotation is wrong or
-the subclustering was cut too fine. That comes from the marker sets.
+No column says whether a low `separation` means the annotation is wrong or the
+subclustering was cut too fine. That comes from the marker sets.
 
 ```{r}
 edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
@@ -560,7 +552,14 @@ edge_tab = edge_tab %>%
 write.csv(edge_tab, file = paste0(results_dir, "/mst_edges.csv"),
           row.names = FALSE)
 
-datatable(edge_tab, rownames = FALSE, options = list(pageLength = 15))
+# eight narrow columns: no paging unless the tree is large, numbers right
+# aligned, and horizontal scroll rather than wrapped headers
+datatable(edge_tab, rownames = FALSE, class = "compact stripe hover",
+          options = list(dom = if (nrow(edge_tab) > 25) "tp" else "t",
+                         paging = nrow(edge_tab) > 25, pageLength = 25,
+                         scrollX = TRUE, autoWidth = FALSE,
+                         columnDefs = list(list(className = "dt-right",
+                                                targets = 2:7))))
 ```
 
 `r if (!boot_ok || nrow(edge_tab) == 0) "The subsampling check is off. Set edge_boot to a positive number to run it." else paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], ", drawn in ", edge_tab$frequency[1], " percent of ", n_boot, " trees built from ", params$edge_boot_cells, " cells per node. ", sum(edge_tab$frequency < 50), " of ", nrow(edge_tab), " edges appear in under half of them, and ", sum(edge_tab$frequency == 100), " in all of them.")`
