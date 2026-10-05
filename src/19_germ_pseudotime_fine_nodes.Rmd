@@ -26,6 +26,7 @@ params:
     mnn_k: 50
     outgroup: FALSE
     root_rule: "max:Primordial germ cells"
+    graph_marker_sets: "Primordial germ cells,Migrating germ cells,Spermatocytes,Oocyte"
     root_node: ""
     min_detect_pct: 5
     marker_file: canonical_markers_S1_only_2026-08-14.csv
@@ -361,8 +362,23 @@ set_genes = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
 set_scores = score_marker_sets(combined, merged$node, set_genes) %>%
   dplyr::rename(node = group)
 
-write.csv(set_scores, file = paste0(results_dir, "/node_marker_set_scores.csv"),
+# one row per node, two columns per set, which reads better than the long form
+set_table = set_scores %>%
+  dplyr::mutate(set          = factor(set, levels = germ_sets),
+                node         = factor(node, levels = node_levels),
+                mean_logexpr = signif(mean_logexpr, 3),
+                pct_detected = round(pct_detected, 1)) %>%
+  dplyr::arrange(set, node) %>%
+  tidyr::pivot_wider(id_cols = c(node, n_cells), names_from = set,
+                     values_from = c(mean_logexpr, pct_detected),
+                     names_glue = "{set}: {.value}") %>%
+  dplyr::arrange(node)
+
+write.csv(set_table, file = paste0(results_dir, "/node_marker_set_scores.csv"),
           row.names = FALSE)
+
+datatable(set_table, rownames = FALSE, filter = "top",
+          options = list(pageLength = 15, scrollX = TRUE))
 
 root_req = as.character(params$root_node)
 if (nzchar(root_req)) {
@@ -743,6 +759,62 @@ ggsave(p_node_graph, file = paste0(results_dir, "/node_graph.pdf"),
 
 `r paste0("Panel B labels each node by whichever annotation holds the most of its cells. That is a summary, not a claim about the node: a node can be 51 percent one annotation and still be mixed. The full composition is in the stacked bar above and in node_by_annotation.csv.")`
 
+## Marker sets on the tree
+
+The same tree, once per germ cell marker set. Color is the set's mean log
+expression scaled to its own maximum, so the panels show where each program sits
+rather than how the programs compare with one another. Size is the percentage of
+cells in the node detecting the set.
+
+Each panel title carries the set's absolute maximum. A panel whose maximum is
+near zero is showing noise stretched across the full color range, so read the
+title before the colors. The unscaled values are in `node_marker_set_scores.csv`.
+
+```{r, fig.width=11, fig.height=9}
+graph_sets = trimws(strsplit(as.character(params$graph_marker_sets), ",")[[1]])
+graph_sets = intersect(graph_sets[nzchar(graph_sets)], unique(set_scores$set))
+
+set_panel = function(st) {
+  sc = set_scores %>% dplyr::filter(set == st)
+  mx = suppressWarnings(max(sc$mean_logexpr, na.rm = TRUE))
+  ld = lay
+  ld$rel = if (is.finite(mx) && mx > 0)
+    sc$mean_logexpr[match(ld$name, as.character(sc$node))] / mx else NA_real_
+  ld$pct = sc$pct_detected[match(ld$name, as.character(sc$node))]
+
+  ggraph(ld) +
+    edge_aes +
+    geom_node_point(aes(colour = rel, size = pct)) +
+    geom_node_text(aes(label = name), size = 1.9, repel = TRUE) +
+    scale_colour_viridis_c(name = "expression, relative\nto the set maximum",
+                           limits = c(0, 1)) +
+    scale_size_continuous(name = "% of cells detecting",
+                          range = c(1.2, 6), limits = c(0, 100)) +
+    coord_fixed() +
+    theme_void(base_size = 8) +
+    ggtitle(sprintf("%s  (max %.2f)", st, mx)) +
+    theme(plot.title = element_text(size = 8, hjust = .5))
+}
+
+if (length(graph_sets) > 0) {
+  p_set_graph = patchwork::wrap_plots(lapply(graph_sets, set_panel),
+                                      ncol = min(2, length(graph_sets))) +
+    patchwork::plot_layout(guides = "collect") &
+    theme(legend.position = "right", legend.box = "vertical",
+          legend.key.size = unit(.35, "cm"),
+          legend.title = element_text(size = 7),
+          legend.text  = element_text(size = 6))
+
+  p_set_graph
+  ggsave(p_set_graph, file = paste0(results_dir, "/node_graph_marker_sets.png"),
+         width = 11, height = 9, dpi = 300)
+  ggsave(p_set_graph, file = paste0(results_dir, "/node_graph_marker_sets.pdf"),
+         width = 11, height = 9)
+}
+```
+
+`r if (length(graph_sets) == 0) "No set named in graph_marker_sets was scored." else ""`
+
 # What the ordering says
 
 This is where the trajectory is interpreted, and it is done from the cells
@@ -946,6 +1018,8 @@ file_notes = c(
   "node_graph.pdf"            = "The node graph as a vector file, for figure assembly.",
   "node_by_annotation.png"    = "Annotation composition of each node as stacked bars.",
   "pseudotime_by_annotation.png" = "Pseudotime distribution per annotation and per library.",
+  "node_graph_marker_sets.png" = "The tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
+  "node_graph_marker_sets.pdf" = "The marker set panels as a vector file.",
   "marker_sets_vs_pseudotime.png" = "Each germ marker set against pseudotime.")
 
 in_dir  = sort(setdiff(list.files(results_dir), "Robjects"))
