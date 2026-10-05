@@ -63,6 +63,10 @@ params:
 # on disk. fig.retina is set to 1 so the two are not multiplied.
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       dpi = 300, fig.retina = 1)
+
+# Compute nodes have no X11, and the default png device asks for it. Cairo
+# renders off screen.
+if (isTRUE(capabilities("cairo"))) options(bitmapType = "cairo")
 ```
 
 <style>

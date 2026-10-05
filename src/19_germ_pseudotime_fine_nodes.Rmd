@@ -44,6 +44,10 @@ params:
 # on disk. fig.retina is set to 1 so the two are not multiplied.
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       dpi = 300, fig.retina = 1)
+
+# Compute nodes have no X11, and the default png device asks for it. Cairo
+# renders off screen.
+if (isTRUE(capabilities("cairo"))) options(bitmapType = "cairo")
 ```
 
 <style>
@@ -882,7 +886,10 @@ have_pt = sum(!is.na(merged$pseudotime)) > 20
 ```
 
 ```{r, eval=have_pt}
-pt_res = testPseudotime(merged, pseudotime = merged$pseudotime)
+# Uncorrected log counts, as in 17. merged is the fastMNN output and carries
+# reconstructed rather than logcounts, so it cannot be tested directly.
+stopifnot(identical(colnames(combined), colnames(merged)))
+pt_res = testPseudotime(combined, pseudotime = merged$pseudotime)
 pt_tab = as.data.frame(pt_res) %>%
   tibble::rownames_to_column("Gene") %>%
   dplyr::filter(!is.na(FDR), FDR < params$fdr_cut) %>%
