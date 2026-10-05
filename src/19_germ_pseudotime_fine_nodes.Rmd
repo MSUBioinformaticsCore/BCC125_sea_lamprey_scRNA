@@ -455,13 +455,18 @@ if (file.exists(pseudo_file) && file.exists(pseudo_sig_file) &&
   writeLines(pseudo_sig, pseudo_sig_file)
 }
 
+# One column per path, kept so the gene test and the heatmaps can work path by
+# path. The average over a cell's paths is a single number per cell, which the
+# node graph and the technical checks need and the gene test should not use.
+pseudo_mat = pathStat(pseudo$ordering)
+
 merged$pseudotime   = averagePseudotime(pseudo$ordering)
 combined$pseudotime = merged$pseudotime
 n_paths = ncol(pseudo$ordering)
 n_comp  = igraph::count_components(pseudo$mst)
 ```
 
-`r paste0(n_paths, " path", if (n_paths == 1) "" else "s", " from the root. The tree has ", n_comp, " component", if (n_comp == 1) "" else "s", if (n_comp > 1) paste0(", so outgroup splitting separated ", n_comp - 1, " group(s) from the main tree.") else ".", " ", sum(is.na(merged$pseudotime)), " cells have no pseudotime.")`
+`r paste0(n_paths, " path", if (n_paths == 1) "" else "s", " from the root: ", paste(colnames(pseudo_mat), collapse = ", "), ". The tree has ", n_comp, " component", if (n_comp == 1) "" else "s", if (n_comp > 1) paste0(", so outgroup splitting separated ", n_comp - 1, " group(s) from the main tree.") else ".", " ", sum(is.na(merged$pseudotime)), " cells have no pseudotime.")`
 
 ## Edge confidence
 
@@ -708,7 +713,7 @@ layout_by_distance = function(graph, lengths) {
 set.seed(1)
 lay = layout_by_distance(gr, e_ig$weight)
 
-# edge colour is the subsampling frequency, so an edge a different sample would
+# edge color is the subsampling frequency, so an edge a different sample would
 # not have drawn reads as red
 lay_d = as.matrix(dist(as.matrix(lay[, c("x", "y")])))
 diag(lay_d) = Inf
@@ -716,7 +721,7 @@ lay_span = max(diff(range(lay$x)), diff(range(lay$y)))
 # node sizes scaled to how tightly the distance-faithful layout packs them
 size_hi = max(2.5, min(9, 55 * min(lay_d) / lay_span))
 
-# colour alone; width carried no information colour was not already carrying
+# color alone; width carried no information color was not already carrying
 edge_aes = list(
   if (use_freq) geom_edge_link(aes(edge_colour = conf), edge_width = .9)
     else geom_edge_link(edge_colour = "grey55", edge_width = .9),
@@ -861,44 +866,6 @@ write.csv(anno_order, file = paste0(results_dir, "/annotation_pseudotime.csv"),
 datatable(anno_order, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-## Marker sets along the ordering
-
-Independent of both the node cuts and the annotation. If the ordering is
-developmental, the germ marker sets should move along it.
-
-```{r, fig.width=12, fig.height=4}
-mk_long = dplyr::bind_rows(lapply(germ_sets, function(s) {
-  g = intersect(unique(set_genes$gene[set_genes$set == s]), rownames(combined))
-  if (length(g) == 0) return(NULL)
-  m = as.matrix(logcounts(combined)[g, , drop = FALSE])
-  data.frame(set = s, pseudotime = merged$pseudotime,
-             score = colMeans(m), stringsAsFactors = FALSE)
-})) %>% dplyr::filter(!is.na(pseudotime))
-
-mk_stats = mk_long %>%
-  dplyr::group_by(set) %>%
-  dplyr::summarise(rho = signif(suppressWarnings(
-                     cor(pseudotime, score, method = "spearman")), 3),
-                   p = signif(suppressWarnings(
-                     cor.test(pseudotime, score, method = "spearman")$p.value), 3),
-                   .groups = "drop")
-
-write.csv(mk_stats, file = paste0(results_dir, "/marker_sets_vs_pseudotime.csv"),
-          row.names = FALSE)
-
-p_mk = ggplot(mk_long, aes(x = pseudotime, y = score)) +
-  geom_point(size = .15, alpha = .2) +
-  geom_smooth(method = "loess", se = FALSE, colour = "#b2182b", linewidth = .7) +
-  facet_wrap(~ set, scales = "free_y", nrow = 1) +
-  theme_bw() + labs(x = "pseudotime", y = "mean log expression")
-
-p_mk
-ggsave(p_mk, file = paste0(results_dir, "/marker_sets_vs_pseudotime.png"),
-       width = 12, height = 4, dpi = 300)
-
-datatable(mk_stats, rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
 ## What else the ordering tracks
 
 Pooled across libraries, a trend can be the libraries sitting at different ends
@@ -959,15 +926,22 @@ have_pt = sum(!is.na(merged$pseudotime)) > 20
 
 ```{r, eval=have_pt}
 # Uncorrected log counts, as in 17. merged is the fastMNN output and carries
-# reconstructed rather than logcounts, so it cannot be tested directly.
+# reconstructed rather than logcounts, so it cannot be tested directly. Passing
+# the path matrix rather than one vector tests each path on its own cells.
 stopifnot(identical(colnames(combined), colnames(merged)))
-pt_res = testPseudotime(combined, pseudotime = merged$pseudotime)
-pt_tab = as.data.frame(pt_res) %>%
-  tibble::rownames_to_column("Gene") %>%
+pt_res = testPseudotime(combined, pseudotime = pseudo_mat)
+
+pt_tab = dplyr::bind_rows(lapply(seq_along(pt_res), function(i) {
+  as.data.frame(pt_res[[i]]) %>%
+    tibble::rownames_to_column("Gene") %>%
+    dplyr::mutate(Path = names(pt_res)[i])
+})) %>%
   dplyr::filter(!is.na(FDR), FDR < params$fdr_cut) %>%
   dplyr::left_join(gene_description, by = "Gene") %>%
-  dplyr::arrange(FDR) %>%
-  dplyr::select(Gene, WangGeneID, description, logFC, p.value, FDR)
+  dplyr::mutate(Direction = ifelse(logFC > 0, "up", "down")) %>%
+  dplyr::arrange(Path, FDR) %>%
+  dplyr::select(Path, Direction, Gene, WangGeneID, description,
+                logFC, p.value, FDR)
 
 write.csv(pt_tab, file = paste0(results_dir, "/pseudotime_genes.csv"),
           row.names = FALSE)
@@ -977,7 +951,54 @@ datatable(pt_tab %>% dplyr::mutate(dplyr::across(where(is.numeric),
           rownames = FALSE, filter = "top", options = list(pageLength = 15))
 ```
 
-`r if (!have_pt) "Too few cells have a pseudotime for gene testing." else paste0(nrow(pt_tab), " genes change along the ordering at FDR < ", params$fdr_cut, ".")`
+`r if (!have_pt) "Too few cells have a pseudotime for gene testing." else paste0(nrow(pt_tab), " gene-path results at FDR < ", params$fdr_cut, ", over ", dplyr::n_distinct(pt_tab$Path), " path(s).")`
+
+## Heatmaps
+
+The 25 most significant genes in each direction along each path. Cells are
+restricted to that path and ordered by their position on it, so a cell on two
+paths appears in both panels at the place each path puts it.
+
+```{r, results="asis", eval=have_pt}
+for (pth in colnames(pseudo_mat)) {
+  on_path = rownames(pseudo_mat)[!is.na(pseudo_mat[, pth])]
+  if (length(on_path) < 20) next
+
+  # the bar is scaled within the path, so ordering and color both describe this
+  # path rather than the average over all of them
+  pv  = pseudo_mat[on_path, pth]
+  rng = range(pv, na.rm = TRUE)
+  combined$pseudotime_scaled = NA_real_
+  combined$pseudotime_scaled[match(on_path, colnames(combined))] =
+    if (diff(rng) > 0) (pv - rng[1]) / diff(rng) else 0
+
+  for (dir in c("up", "down")) {
+    top = pt_tab %>%
+      dplyr::filter(Path == pth, Direction == dir) %>%
+      dplyr::arrange(FDR, dplyr::desc(abs(logFC))) %>%
+      dplyr::slice_head(n = 25)
+    # hclust on the gene rows needs at least two of them
+    if (nrow(top) < 2) next
+
+    labs_wang = ifelse(is.na(top$WangGeneID), top$Gene, top$WangGeneID)
+    hm = plot_pseudotime_heatmap(combined, top$Gene, labs_wang, on_path,
+                                 pseudotime_column = "pseudotime_scaled")
+    # guides = "collect" is what the function sets; rebuilding to change the
+    # heights would drop it and clip the pseudotime legend title away
+    hp = (hm[[1]] / hm[[2]]) +
+      plot_layout(heights = c(0.03, 1), guides = "collect")
+
+    f = paste0(results_dir, "/pseudotime_heatmap_",
+               gsub("[^A-Za-z0-9]+", "_", pth), "_", dir, ".png")
+    ggsave(hp, file = f, width = 7, height = 5, dpi = 300)
+
+    # the heading starts with a word: pandoc drops everything before the first
+    # letter when it builds anchor ids, so "5.1, up" would become "up"
+    cat("\n\n### Path ", pth, ", ", dir, "\n\n", sep = "")
+    cat("![](", f, ")\n\n", sep = "")
+  }
+}
+```
 
 # Export
 
@@ -1010,9 +1031,8 @@ file_notes = c(
   "node_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
   "mst_edges.csv"             = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance in standard deviations of the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
   "annotation_pseudotime.csv" = "Median and quartiles of pseudotime for each annotation. The ordering claim in numbers.",
-  "marker_sets_vs_pseudotime.csv" = "Spearman correlation of each germ marker set against pseudotime. Independent of both the node cuts and the labels.",
   "pseudotime_vs_technical.csv"   = "Pseudotime regressed on depth, mitochondrial, rRNA and ribosomal content, pooled and within each library.",
-  "pseudotime_genes.csv"      = "Genes whose expression changes along the ordering.",
+  "pseudotime_genes.csv"      = "Genes whose expression changes along each path, one row per gene per path with its direction.",
   "trajectory_umap.png"       = "UMAP colored by annotation and by pseudotime, with the tree drawn over it.",
   "node_graph.png"            = "The tree laid out by its own structure: nodes sized by cell count, colored by mean pseudotime and by most common annotation.",
   "node_graph.pdf"            = "The node graph as a vector file, for figure assembly.",
@@ -1020,9 +1040,10 @@ file_notes = c(
   "pseudotime_by_annotation.png" = "Pseudotime distribution per annotation and per library.",
   "node_graph_marker_sets.png" = "The tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
   "node_graph_marker_sets.pdf" = "The marker set panels as a vector file.",
-  "marker_sets_vs_pseudotime.png" = "Each germ marker set against pseudotime.")
+)
 
 in_dir  = sort(setdiff(list.files(results_dir), "Robjects"))
+in_dir  = in_dir[!grepl("^pseudotime_heatmap_", in_dir)]
 
 # The table describes what this document writes. The results directory also
 # holds whatever earlier runs left behind, and those are named below rather
@@ -1043,6 +1064,8 @@ datatable(export_tab, rownames = FALSE, escape = FALSE,
           options = list(pageLength = 30, dom = "tp",
                          columnDefs = list(list(width = "240px", targets = 0))))
 ```
+
+`r n_heat = length(list.files(results_dir, pattern = "^pseudotime_heatmap_")); if (n_heat > 0) paste0("Plus ", n_heat, " heatmap image(s) named pseudotime_heatmap_<path>_<direction>.png.") else ""`
 
 `r if (length(unknown) > 0) paste0(length(unknown), " file(s) in the directory are not written by this document and are left out of the table: ", paste(unknown, collapse = ", "), ". Either an earlier version wrote them, or they are new and need a line in file_notes.") else ""`
 
