@@ -299,7 +299,9 @@ colnames(go_names) = c("GOID", "GOName")
 `r if (!have_go) paste0("**GO enrichment is skipped throughout.** The GO files were not found under ", params$genome_dir, ".") else ""`
 
 # Cells
-(clusters, cell_labels$final_label)
+
+```{r}
+absent = setdiff(clusters, cell_labels$final_label)
 if (length(absent) > 0)
   stop("cluster(s) ", paste(absent, collapse = ", "), " are not in ", label_file,
        ". Labels present: ",
