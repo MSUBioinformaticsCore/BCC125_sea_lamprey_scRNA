@@ -1984,7 +1984,7 @@ lay_span = max(diff(range(layout_data$x)), diff(range(layout_data$y)))
 layout_data$r = max(min(lay_d) * 0.42, lay_span * 0.012)
 pt_size = max(2, min(9, 55 * min(lay_d) / lay_span))
 
-# Confidence is carried by edge colour alone. Encoding it as width and colour and
+# Confidence is carried by edge color alone. Encoding it as width and color and
 # a printed number as well cost two more things to read for no more information.
 # The values are in mst_edges.csv and graph_edge_labels puts them back on.
 edge_aes = list(
