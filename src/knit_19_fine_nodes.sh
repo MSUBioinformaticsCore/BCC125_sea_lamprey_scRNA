@@ -53,6 +53,7 @@ MNN_K="${MNN_K:-50}"
 OUTGROUP="${OUTGROUP:-FALSE}"
 EDGE_BOOT="${EDGE_BOOT:-100}"
 EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
+GRAPH_SETS="${GRAPH_SETS:-Primordial germ cells,Migrating germ cells,Spermatocytes,Oocyte}"
 OUT_DIR="${PROJECT_DIR}/html"
 
 if [[ -z "${PREV_NODES+x}" ]]; then
@@ -125,6 +126,7 @@ Rscript -e "
                          outgroup        = ${OUTGROUP},
                          edge_boot       = ${EDGE_BOOT},
                          edge_boot_cells = ${EDGE_BOOT_CELLS},
+                         graph_marker_sets = '${GRAPH_SETS}',
                          prev_nodes_file = '${PREV_NODES}'),
     envir         = new.env()
   )
