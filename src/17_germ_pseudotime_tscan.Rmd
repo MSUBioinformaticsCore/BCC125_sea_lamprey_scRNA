@@ -61,8 +61,17 @@ params:
 # fig.retina, so 144, while every ggsave here writes at 300. Rendering inline
 # at 300 as well puts the figure in the document at the resolution of the file
 # on disk. fig.retina is set to 1 so the two are not multiplied.
+# Figures are vector by default. A raster figure in html_document is rendered
+# at a fixed pixel size and then scaled to the page, so it is only ever as sharp
+# as that size; svg has no resolution to run out of. The chunks that draw one
+# mark per cell set dev = "png" individually, because an svg of forty thousand
+# tiles is tens of megabytes where the png is a couple of hundred kilobytes.
+# dpi applies to those, and fig.retina is 1 so it is not doubled again.
+# svglite if it is installed, otherwise the grDevices svg device, which needs
+# the cairo capability enabled below
+vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      dpi = 300, fig.retina = 1)
+                      dev = vec_dev, dpi = 300, fig.retina = 1)
 
 # Compute nodes have no X11, and the default png device asks for it. Cairo
 # renders off screen.
@@ -554,7 +563,7 @@ if (exists("old_qc_tab"))
   datatable(old_qc_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-```{r, fig.width=11, fig.height=11}
+```{r, fig.width=11, fig.height=11, dev = "png", dpi = 600}
 if (exists("old_qc")) {
   old_qc_long = old_qc %>%
     tidyr::pivot_longer(c(total, detected, pct_mito, pct_rrna, pct_ribo),
@@ -1198,7 +1207,7 @@ write.csv(qc_tab, file = paste0(results_dir, "/node_depth_and_technical.csv"),
 datatable(qc_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-```{r, fig.width=11, fig.height=11}
+```{r, fig.width=11, fig.height=11, dev = "png", dpi = 600}
 qc_long = qc %>%
   dplyr::mutate(node = factor(node, levels = node_levels)) %>%
   tidyr::pivot_longer(c(total, detected, pct_mito, pct_rrna, pct_ribo),
@@ -1645,7 +1654,7 @@ n_paths = ncol(pseudo$ordering)
 
 `r paste0(n_paths, " path", if (n_paths == 1) "" else "s", " from the root: ", paste(colnames(pseudo$ordering), collapse = ", "), ". The tree is fitted on node centroids in the corrected space and drawn below on the UMAP of that space.")`
 
-```{r, fig.width=12, fig.height=5}
+```{r, fig.width=12, fig.height=5, dev = "png", dpi = 600}
 by_node = aggregateAcrossCells(
   merged, ids = merged$node,
   use.assay.type = if ("reconstructed" %in% assayNames(merged)) "reconstructed" else "logcounts")
@@ -1665,7 +1674,7 @@ ggsave(p_node | p_pt, file = paste0(results_dir, "/tscan_trajectory_umap.png"),
        width = 12, height = 5)
 ```
 
-```{r, fig.width=12, fig.height=4}
+```{r, fig.width=12, fig.height=4, dev = "png", dpi = 600}
 pt_df = as.data.frame(colData(merged))
 
 p_box_node = ggplot(pt_df, aes(x = node, y = pseudotime)) +
@@ -2189,7 +2198,7 @@ for (s in names(heatmaps)) {
     plot_layout(heights = c(0.03, 1), guides = "collect")
   f  = paste0(results_dir, "/tscan_heatmap_",
               gsub("[^A-Za-z0-9]+", "_", s), ".png")
-  ggsave(hp, file = f, width = 7, height = 5, dpi = 300)
+  ggsave(hp, file = f, width = 7, height = 5, dpi = 600)
 
   # The file is written first and then referenced as markdown, rather than
   # printed to the knitr device. In an asis chunk knitr interleaves device

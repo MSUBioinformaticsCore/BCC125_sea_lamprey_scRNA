@@ -45,8 +45,17 @@ params:
 # fig.retina, so 144, while every ggsave here writes at 300. Rendering inline
 # at 300 as well puts the figure in the document at the resolution of the file
 # on disk. fig.retina is set to 1 so the two are not multiplied.
+# Figures are vector by default. A raster figure in html_document is rendered
+# at a fixed pixel size and then scaled to the page, so it is only ever as sharp
+# as that size; svg has no resolution to run out of. The chunks that draw one
+# mark per cell set dev = "png" individually, because an svg of forty thousand
+# tiles is tens of megabytes where the png is a couple of hundred kilobytes.
+# dpi applies to those, and fig.retina is 1 so it is not doubled again.
+# svglite if it is installed, otherwise the grDevices svg device, which needs
+# the cairo capability enabled below
+vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
-                      dpi = 300, fig.retina = 1)
+                      dev = vec_dev, dpi = 300, fig.retina = 1)
 
 # Compute nodes have no X11, and the default png device asks for it. Cairo
 # renders off screen.
@@ -527,7 +536,7 @@ datatable(qc_tab, rownames = FALSE, filter = "top",
           options = list(pageLength = 15, scrollX = TRUE))
 ```
 
-```{r, fig.width=11, fig.height=11}
+```{r, fig.width=11, fig.height=11, dev = "png", dpi = 600}
 qc_long = qc %>%
   dplyr::mutate(node = factor(node, levels = node_levels)) %>%
   tidyr::pivot_longer(c(total, detected, pct_mito, pct_rrna, pct_ribo),
@@ -998,7 +1007,7 @@ datatable(edge_tab, rownames = FALSE, class = "compact stripe hover",
 
 `r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::filter(pmax(nn_rank_1, nn_rank_2) > 2); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "No edge reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest: ", paste0(far$node_1, " to ", far$node_2, " at ranks ", far$nn_rank_1, " and ", far$nn_rank_2, collapse = ", "), "."), " ", if (nrow(ov) == 0) "Every pair sits at least one standard deviation apart." else paste0(nrow(ov), " pair(s) sit under one standard deviation apart: ", paste0(ov$node_1, " to ", ov$node_2, " at ", ov$separation, collapse = ", "), ".")) }`
 
-```{r, fig.width=13, fig.height=5}
+```{r, fig.width=13, fig.height=5, dev = "png", dpi = 600}
 by_node = aggregateAcrossCells(
   merged, ids = merged$node,
   use.assay.type = if ("reconstructed" %in% assayNames(merged))
@@ -1195,7 +1204,7 @@ This is where the trajectory is interpreted, and it is done from the cells
 rather than from node names. The annotation is the collaborators' expert call
 carried by barcode, so its distribution along pseudotime is the claim.
 
-```{r, fig.width=12, fig.height=5}
+```{r, fig.width=12, fig.height=5, dev = "png", dpi = 600}
 pt_df = as.data.frame(colData(merged))
 pt_df$barcode = colnames(merged)
 
@@ -1347,7 +1356,7 @@ for (pth in colnames(pseudo_mat)) {
 
     f = paste0(results_dir, "/pseudotime_heatmap_",
                gsub("[^A-Za-z0-9]+", "_", pth), "_", dir, ".png")
-    ggsave(hp, file = f, width = 7, height = 5, dpi = 300)
+    ggsave(hp, file = f, width = 7, height = 5, dpi = 600)
 
     # the heading starts with a word: pandoc drops everything before the first
     # letter when it builds anchor ids, so "5.1, up" would become "up"
@@ -1434,8 +1443,7 @@ file_notes = c(
   "node_depth_and_technical.png" = "Depth and technical content per node.",
   "node_identity_scores.png"  = "Marker expression per node, one dot per gene, every set.",
   "node_graph_marker_sets.png" = "The tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
-  "node_graph_marker_sets.pdf" = "The marker set panels as a vector file.",
-)
+  "node_graph_marker_sets.pdf" = "The marker set panels as a vector file.")
 
 in_dir  = sort(setdiff(list.files(results_dir), "Robjects"))
 in_dir  = in_dir[!grepl("^pseudotime_heatmap_", in_dir)]
