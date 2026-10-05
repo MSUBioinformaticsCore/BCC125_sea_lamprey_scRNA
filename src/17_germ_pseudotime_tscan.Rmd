@@ -588,24 +588,6 @@ if (exists("old_qc")) {
 
 `r if (!exists("old_qc_tab")) "" else { d = old_qc_tab %>% dplyr::arrange(dplyr::desc(median_pct_mito)); s = old_qc_tab %>% dplyr::arrange(median_total); paste0("The most mitochondrial node is ", d$node[1], " at ", d$median_pct_mito[1], " percent, with a median of ", format(d$median_total[1], big.mark = ","), " counts. The shallowest is ", s$node[1], " at ", format(s$median_total[1], big.mark = ","), " counts, against ", format(max(old_qc_tab$median_total), big.mark = ","), " for the deepest. A node that tops both lists is the one to treat with suspicion.") }`
 
-# Corrected space
-
-Libraries contributing fewer than `r params$min_library_cells` cells are dropped.
-With more than one library left, the space is `fastMNN` output computed on these
-cells alone. With one library, it is PCA on that library.
-
-Mitochondrial and ribosomal genes are identified here, and they are kept. Their
-expression is not separable from cell state in a gonad series. Oocytes accumulate
-mitochondria and spermatids shed them, so a real mitochondrial gradient should
-run through this lineage in opposite directions by sex. Ribosome content tracks
-proliferation, which is a property of the early stages. Removing these genes
-would remove that signal along with whatever quality variation rides on it. They
-are measured instead, and the sections below report whether the clustering and
-the ordering follow them.
-
-
-`r paste0(format(length(mito_ids), big.mark = ","), " mitochondrial and ", format(length(ribo_ids), big.mark = ","), " ribosomal genes are identified from the annotation. They enter the highly variable set and every test here on the same footing as any other gene.")`
-
 ```{r}
 obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
 obj_sig_file = paste0(Robject_out_dir, "/lineage_objects_signature.txt")
@@ -1717,11 +1699,14 @@ Five columns describe each edge from a different direction.
 | `frequency` | percentage of subsampled trees holding the edge | another sample would not have drawn it | drawn whatever the sample |
 
 `frequency` comes from drawing `edge_boot_cells` cells from each node
-`edge_boot` times, recomputing the centroids and rebuilding the tree. The count
-is fixed per node rather than proportional. A node of 5,000 cells has a centroid
-so precisely estimated that dropping a fifth of them moves it almost not at all,
-so a proportional subsample returns close to 100 percent for every edge
-including the arbitrary ones. Read it as a stress test rather than as a p-value.
+`edge_boot` times, with replacement, recomputing the centroids and rebuilding
+the tree. The count is fixed per node rather than proportional. A node of 5,000
+cells has a centroid so precisely estimated that dropping a fifth of them moves
+it almost not at all, so a proportional subsample returns close to 100 percent
+for every edge including the arbitrary ones. Replacement matters for the small
+nodes: drawn without it, a node holding fewer cells than `edge_boot_cells` is
+taken whole every time and its centroid cannot move. Read it as a stress test
+rather than as a p-value.
 
 A low `separation` is expected between consecutive waypoints on a trajectory.
 It is the reading to question where the two nodes carry annotations for distinct
@@ -1821,8 +1806,12 @@ if (boot_ok) {
   tally = table(unlist(lapply(seq_len(n_boot), function(i) {
     set.seed(1000 + i)
     # stratified, so no node can vanish and change the node set
+    # with replacement: a draw without it takes a node of 100 or fewer cells
+    # whole every time, so its centroid never moves and its edges read 100 by
+    # construction. Drawing with replacement gives every node the same centroid
+    # precision whatever its size.
     keep = unlist(lapply(by_node, function(ix)
-      sample(ix, min(length(ix), max(2L, as.integer(params$edge_boot_cells))))))
+      sample(ix, max(2L, as.integer(params$edge_boot_cells)), replace = TRUE)))
     m = try(TrajectoryUtils::createClusterMST(
               co[keep, , drop = FALSE], clusters = nd[keep],
               dist.method = as.character(params$dist_method),
