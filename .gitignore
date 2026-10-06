@@ -57,6 +57,7 @@ data/*
 # text files; tracked with the code that depends on them.
 !data/canonical_markers_*.csv
 !data/neural_crest_markers_*.csv
+!data/immediate_early_markers_*.csv
 !data/S1*.csv
 !data/yasmin_PRJNA749754_sample_groups.csv
 results/
