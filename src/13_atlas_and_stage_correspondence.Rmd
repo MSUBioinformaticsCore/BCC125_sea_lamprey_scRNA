@@ -19,10 +19,23 @@ params:
     lfc_thresh: 1
     genome_dir: /mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus
     marker_file: canonical_markers_S1_only_2026-08-14.csv
+    ieg_marker_file: immediate_early_markers_2026-10-06.csv
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+# Figures are vector by default. A raster figure in html_document is rendered at
+# a fixed pixel size and then scaled to the page, so it is only ever as sharp as
+# that size; svg has no resolution to run out of. The chunks that draw one mark
+# per cell set dev = "png" individually, because an svg of fifteen thousand
+# points is tens of megabytes where the png is a few hundred kilobytes. dpi
+# applies to those, and fig.retina is 1 so it is not doubled again.
+vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      dev = vec_dev, dpi = 300, fig.retina = 1)
+
+# Compute nodes have no X11, and the default png device asks for it. Cairo
+# renders off screen.
+if (isTRUE(capabilities("cairo"))) options(bitmapType = "cairo")
 ```
 
 ```{r, echo=FALSE, results="asis"}
@@ -378,7 +391,7 @@ stopifnot(identical(colnames(combined.sce), colnames(merged.sce)))
 
 `r paste0("The atlas holds ", format(ncol(merged.sce), big.mark = ","), " cells in ", nlevels(colData(merged.sce)$label), " clusters.")`
 
-```{r, fig.width=6, fig.height=6}
+```{r, fig.width=6, fig.height=6, dev = "png", dpi = 600}
 plotTSNE(merged.sce, colour_by = "label", text_by = "label",
          text_colour = "red", point_size = .05) +
   guides(color = guide_legend(override.aes = list(size = 5)))
@@ -457,7 +470,7 @@ datatable(qc_summary, rownames = FALSE,
           options = list(dom = "t", paging = FALSE))
 ```
 
-```{r, fig.width=9, fig.height=4}
+```{r, fig.width=9, fig.height=4, dev = "png", dpi = 600}
 p_genes = ggplot(cluster_qc, aes(x = cluster, y = detected)) +
   geom_violin(fill = "grey85", colour = NA, scale = "width") +
   geom_boxplot(width = .15, outlier.size = .2) +
@@ -468,7 +481,7 @@ ggsave(p_genes, file = paste0(results_dir, "/cluster_qc_genes.png"),
        width = 9, height = 4)
 ```
 
-```{r, fig.width=9, fig.height=4}
+```{r, fig.width=9, fig.height=4, dev = "png", dpi = 600}
 p_counts = ggplot(cluster_qc, aes(x = cluster, y = sum)) +
   geom_violin(fill = "grey85", colour = NA, scale = "width") +
   geom_boxplot(width = .15, outlier.size = .2) +
@@ -480,7 +493,7 @@ ggsave(p_counts, file = paste0(results_dir, "/cluster_qc_counts.png"),
        width = 9, height = 4)
 ```
 
-```{r, fig.width=9, fig.height=4, eval=have_mito}
+```{r, fig.width=9, fig.height=4, eval=have_mito, dev = "png", dpi = 600}
 p_mito = ggplot(cluster_qc, aes(x = cluster, y = mito_percent)) +
   geom_violin(fill = "grey85", colour = NA, scale = "width") +
   geom_boxplot(width = .15, outlier.size = .2) +
@@ -1523,6 +1536,91 @@ ggsave(p_bubble, file = paste0(results_dir, "/canonical_marker_bubble_all_cluste
 The underlying values are written to
 `canonical_marker_expression_per_cluster.csv`, one row per gene per cluster with
 the percentage expressing and the mean log expression.
+
+# Dissociation response
+
+Enzymatic dissociation at 37 degrees induces the AP-1 and immediate-early genes.
+Expression of them reports how the tissue was handled rather than what the cell
+was doing in the animal, so a cluster carrying them is a candidate for being an
+artifact of the protocol. The genes are listed in `r params$ieg_marker_file`.
+
+This is a description, not a correction. Some immediate-early expression is
+expected everywhere, and the question is whether any cluster carries much more
+than the rest.
+
+```{r}
+ieg_path = paste0(data_dir, "/", params$ieg_marker_file)
+have_ieg = nzchar(as.character(params$ieg_marker_file)) && file.exists(ieg_path)
+
+ieg_genes = if (!have_ieg) character(0) else
+  read.csv(ieg_path, stringsAsFactors = FALSE) %>%
+    mutate(loc_id = trimws(loc_id)) %>%
+    filter(loc_id %in% rownames(combined.sce)) %>%
+    dplyr::select(Gene = loc_id, WangGeneID = symbol) %>%
+    distinct()
+
+ieg_tab = NULL
+ieg_h   = max(4, round(0.22 * nrow(ieg_genes) + 2))
+if (have_ieg && nrow(ieg_genes) > 0) {
+  ieg_mat = as.matrix(logcounts(combined.sce)[ieg_genes$Gene, , drop = FALSE])
+  ieg_lab = cell_key$final_label
+  stopifnot(length(ieg_lab) == ncol(ieg_mat))
+
+  ieg_bubble = purrr::map_dfr(levels(final_label), function(k) {
+    sub = ieg_mat[, ieg_lab == k, drop = FALSE]
+    data.frame(cluster        = k,
+               Gene           = ieg_genes$Gene,
+               n_cells        = ncol(sub),
+               pct_expressing = 100 * rowMeans(sub > 0),
+               mean_logexpr   = rowMeans(sub),
+               stringsAsFactors = FALSE)
+  }) %>%
+    left_join(ieg_genes, by = "Gene") %>%
+    mutate(cluster = factor(cluster, levels = levels(final_label)))
+
+  write.csv(ieg_bubble,
+            file = paste0(results_dir, "/dissociation_response_per_cluster.csv"),
+            row.names = FALSE)
+
+  # the set as one number per cluster, so clusters can be ranked against
+  # each other rather than read gene by gene
+  ieg_tab = ieg_bubble %>%
+    group_by(cluster) %>%
+    summarise(n_cells      = first(n_cells),
+              n_genes      = dplyr::n(),
+              mean_logexpr = signif(mean(mean_logexpr), 3),
+              pct_detected = round(mean(pct_expressing), 1),
+              .groups = "drop") %>%
+    arrange(desc(mean_logexpr))
+
+  write.csv(ieg_tab,
+            file = paste0(results_dir, "/dissociation_response_by_cluster.csv"),
+            row.names = FALSE)
+
+  datatable(ieg_tab, rownames = FALSE, options = list(pageLength = 20))
+}
+```
+
+`r if (!have_ieg) paste0("**", params$ieg_marker_file, " was not found in data/.** The check is skipped.") else if (is.null(ieg_tab)) "None of the immediate-early genes is in the data." else { top = ieg_tab[1, ]; nxt = ieg_tab[2, ]; paste0(nrow(ieg_genes), " of the immediate-early genes are in the data. The highest scoring cluster is ", top$cluster, " at ", top$mean_logexpr, " mean log expression, detected in ", top$pct_detected, " percent of its cells on average, against ", nxt$mean_logexpr, " for ", nxt$cluster, ". A cluster well clear of the rest here is one to look at before it is given a cell type.") }`
+
+```{r, fig.width=10, fig.height=ieg_h}
+if (!is.null(ieg_tab)) {
+  p_ieg = ggplot(ieg_bubble,
+                 aes(x = cluster, y = WangGeneID,
+                     size = pct_expressing, colour = mean_logexpr)) +
+    geom_point() +
+    scale_colour_viridis_c() +
+    scale_size_continuous(range = c(0.4, 5)) +
+    theme_bw(base_size = 9) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+    labs(x = NULL, y = NULL, size = "% of cells", colour = "mean log expression",
+         title = "Immediate-early gene expression by cluster")
+
+  print(p_ieg)
+  ggsave(p_ieg, file = paste0(results_dir, "/dissociation_response.png"),
+         width = 10, height = ieg_h, dpi = 300)
+}
+```
 
 # Cell type annotation
 
