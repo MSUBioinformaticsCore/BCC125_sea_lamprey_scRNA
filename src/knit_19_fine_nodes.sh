@@ -54,10 +54,18 @@ OUTGROUP="${OUTGROUP:-FALSE}"
 EDGE_BOOT="${EDGE_BOOT:-100}"
 EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
 GRAPH_SETS="${GRAPH_SETS:-Primordial germ cells,Migrating germ cells,Spermatocytes,Oocyte}"
+# nodes to remove, by node id, after the evidence section reports what each
+# node expresses. Empty removes nothing.
+DROP="${DROP:-}"
+EXTRA="${EXTRA:-neural_crest_markers_2026-09-25.csv,immediate_early_markers_2026-10-06.csv}"
+EVIDENCE="${EVIDENCE:-Dissociation response}"
 # A run that changes the tree keeps its own html and results directory, so two
-# settings can sit side by side. Defaults to "_outgroup" when OUTGROUP=TRUE.
+# settings can sit side by side, so an earlier run is never overwritten.
+# Built from DROP and OUTGROUP unless RUN_SUFFIX is set directly.
 if [[ -z "${RUN_SUFFIX+x}" ]]; then
-  if [[ "${OUTGROUP}" == "TRUE" ]]; then RUN_SUFFIX="_outgroup"; else RUN_SUFFIX=""; fi
+  RUN_SUFFIX=""
+  [[ -n "${DROP}" ]]              && RUN_SUFFIX="${RUN_SUFFIX}_dropped"
+  [[ "${OUTGROUP}" == "TRUE" ]]   && RUN_SUFFIX="${RUN_SUFFIX}_outgroup"
 fi
 
 OUT_DIR="${PROJECT_DIR}/html"
@@ -67,6 +75,20 @@ if [[ -z "${PREV_NODES+x}" ]]; then
 fi
 
 mkdir -p "${PROJECT_DIR}/run" "${OUT_DIR}"
+
+# Nothing already on disk is overwritten without being asked for. Set
+# RUN_SUFFIX to keep both runs, or FORCE=1 to replace the earlier one.
+HTML_OUT="${OUT_DIR}/19_germ_pseudotime_fine_nodes_${LINEAGE}${RUN_SUFFIX}.html"
+RES_OUT="${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_fine_${LINEAGE}${ATLAS_SUFFIX}${RUN_SUFFIX}"
+if [[ "${FORCE:-0}" != "1" ]]; then
+  for p in "${HTML_OUT}" "${RES_OUT}"; do
+    if [[ -e "${p}" ]]; then
+      echo "refusing to overwrite ${p}" >&2
+      echo "RUN_SUFFIX=_something to keep both, or FORCE=1 to replace it." >&2
+      exit 1
+    fi
+  done
+fi
 
 set -euo pipefail
 
@@ -114,6 +136,7 @@ echo "atlas:      ${RESULTS_DATE}_atlas${ATLAS_SUFFIX}"
 echo "sub_k:      ${SUB_K}   min node: ${MIN_NODE}"
 echo "distance:   ${DIST}    mnn.k: ${MNN_K}    outgroup: ${OUTGROUP}"
 echo "prev nodes: ${PREV_NODES:-<none>}"
+echo "dropping:   ${DROP:-<nothing; read the Removal section, then set DROP>}"
 
 Rscript -e "
   rmarkdown::render(
@@ -134,6 +157,9 @@ Rscript -e "
                          edge_boot       = ${EDGE_BOOT},
                          edge_boot_cells = ${EDGE_BOOT_CELLS},
                          graph_marker_sets = '${GRAPH_SETS}',
+                         drop_nodes        = '${DROP}',
+                         extra_marker_file = '${EXTRA}',
+                         removal_evidence_sets = '${EVIDENCE}',
                          prev_nodes_file = '${PREV_NODES}'),
     envir         = new.env()
   )

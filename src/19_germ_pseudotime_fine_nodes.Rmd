@@ -31,9 +31,11 @@ params:
     root_node: ""
     min_detect_pct: 5
     marker_file: canonical_markers_S1_only_2026-08-14.csv
-    extra_marker_file: neural_crest_markers_2026-09-25.csv
+    extra_marker_file: "neural_crest_markers_2026-09-25.csv,immediate_early_markers_2026-10-06.csv"
     lfc_thresh: 1
     prev_nodes_file: ""
+    removal_evidence_sets: "Dissociation response"
+    drop_nodes: ""
     node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
     min_library_cells: 50
     fdr_cut: 0.01
@@ -209,14 +211,20 @@ s1_sets = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
                    stringsAsFactors = FALSE) %>%
   dplyr::mutate(loc_id = trimws(loc_id), origin = "S1 sheet")
 
-extra_file = as.character(params$extra_marker_file)
+# extra_marker_file takes a comma-separated list, so sets that did not come
+# from the S1 sheet can be added independently of one another.
+extra_file = trimws(strsplit(as.character(params$extra_marker_file), ",")[[1]])
+extra_file = extra_file[nzchar(extra_file)]
 extra_path = paste0(params$project_dir, "/data/", extra_file)
-have_extra = nzchar(extra_file) && file.exists(extra_path)
+extra_ok   = file.exists(extra_path)
+have_extra = any(extra_ok)
+extra_missing = extra_file[!extra_ok]
 
 all_sets = if (have_extra) {
   dplyr::bind_rows(s1_sets,
-                   read.csv(extra_path, stringsAsFactors = FALSE) %>%
-                     dplyr::mutate(loc_id = trimws(loc_id), origin = "extra"))
+                   dplyr::bind_rows(lapply(extra_path[extra_ok], function(p)
+                     read.csv(p, stringsAsFactors = FALSE) %>%
+                       dplyr::mutate(loc_id = trimws(loc_id), origin = "extra"))))
 } else s1_sets
 
 set_origin = all_sets %>%
@@ -325,7 +333,7 @@ if (length(absent) > 0)
 
 lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
 
-# the annotation, per cell, by barcode. Nothing is dropped on the strength of it.
+# the annotation, per cell, by barcode
 parse_pairs = function(x) {
   x = trimws(x)
   if (!nzchar(x)) return(character(0))
@@ -348,6 +356,7 @@ if (have_prev) {
 }
 lineage_key$annotation = ifelse(is.na(cell_anno), "unannotated", cell_anno)
 
+
 comp_tab = lineage_key %>%
   dplyr::count(final_label, annotation, name = "n") %>%
   tidyr::pivot_wider(names_from = annotation, values_from = n, values_fill = 0)
@@ -358,7 +367,7 @@ write.csv(comp_tab, file = paste0(results_dir, "/cluster_by_annotation.csv"),
 datatable(comp_tab, rownames = FALSE, options = list(dom = "t", scrollX = TRUE))
 ```
 
-`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ". No cell is removed, so 5.1 is present.", if (!have_prev) " **prev_nodes_file is not set**, so no annotation is carried and the trajectory cannot be read against it." else paste0(" ", format(sum(lineage_key$annotation != "unannotated"), big.mark = ","), " carry an annotation from ", basename(prev_file), "."))`
+`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ". Nothing is removed here: the subclustering runs on every cell, and whatever is removed is removed afterwards, on the strength of what the nodes turn out to express.", if (!have_prev) " **prev_nodes_file is not set**, so no annotation is carried and the trajectory cannot be read against it." else paste0(" ", format(sum(lineage_key$annotation != "unannotated"), big.mark = ","), " carry an annotation from ", basename(prev_file), "."))`
 
 ```{r}
 obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
@@ -396,6 +405,7 @@ datatable(lib_tab, rownames = FALSE, options = list(dom = "t"))
 ```
 
 `r paste0(format(ncol(merged), big.mark = ","), " cells from ", length(objs$kept_batches), " librar", if (length(objs$kept_batches) == 1) "y" else "ies", " are kept.")`
+
 
 # Fine nodes
 
@@ -650,7 +660,7 @@ datatable(id_table, rownames = FALSE, filter = "top",
           options = list(pageLength = 20, scrollX = TRUE))
 ```
 
-`r if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found**, so only the sets in ", params$marker_file, " are scored.") else ""`
+`r if (length(extra_missing) > 0) paste0("**Not found in data/: ", paste(extra_missing, collapse = ", "), ".** Those sets are not scored.") else ""`
 
 ```{r, fig.width=11, fig.height=13}
 id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
@@ -665,6 +675,71 @@ p_identity
 ggsave(p_identity, file = paste0(results_dir, "/node_identity_scores.png"),
        width = 11, height = 13, dpi = 300)
 ```
+
+# Removal
+
+Every node above was defined on every cell, with nothing taken out, and scored
+against every marker set. A node is removed here only on the strength of what it
+turned out to express. Removing on the strength of the label it was given would
+make the trajectory unable to say anything about that label.
+
+`removal_evidence_sets` names the sets drawn below. Dissociation response holds
+the AP-1 and immediate-early genes that enzymatic digestion induces, so a node
+carrying them is defined by how the tissue was handled rather than by the
+animal. `drop_nodes` names the nodes to remove, by node, after reading it.
+
+```{r, fig.width=9, fig.height=7}
+ev_sets = trimws(strsplit(as.character(params$removal_evidence_sets), ",")[[1]])
+ev_sets = intersect(ev_sets[nzchar(ev_sets)], unique(all_sets$CellTypeMarkerSet))
+
+drop_nodes = trimws(strsplit(as.character(params$drop_nodes), ",")[[1]])
+drop_nodes = drop_nodes[nzchar(drop_nodes)]
+absent = setdiff(drop_nodes, node_levels)
+if (length(absent) > 0)
+  stop("drop_nodes names node(s) that do not exist: ", paste(absent, collapse = ", "),
+       ". Nodes: ", paste(node_levels, collapse = ", "))
+
+# the nodes being removed first on the axis, so the comparison is immediate
+ev_levels = c(drop_nodes, setdiff(node_levels, drop_nodes))
+
+if (length(ev_sets) > 0) {
+  p_ev = marker_bubble_plot(
+    id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,
+    title    = paste(ev_sets, collapse = ", "),
+    subtitle = if (length(drop_nodes) == 0) "nothing is being removed" else
+      paste0("removed: ", paste(drop_nodes, collapse = ", ")))
+  print(p_ev)
+  ggsave(p_ev, file = paste0(results_dir, "/removal_evidence_bubble.png"),
+         width = 9, height = 7, dpi = 300)
+}
+```
+
+`r if (length(ev_sets) == 0) "" else { es = id_table %>% dplyr::filter(set %in% ev_sets) %>% dplyr::arrange(dplyr::desc(mean_logexpr)); paste0("The highest scoring node on ", es$set[1], " is ", es$node[1], " at ", signif(es$mean_logexpr[1], 3), ", detected in ", round(es$pct_detected[1], 1), " percent of its cells, against ", signif(es$mean_logexpr[2], 3), " for the next node. The per-node values are in node_identity_scores.csv.") }`
+
+```{r}
+drop_tab = NULL
+if (length(drop_nodes) > 0) {
+  drop_tab = data.frame(node = drop_nodes, stringsAsFactors = FALSE) %>%
+    dplyr::left_join(as.data.frame(table(node = as.character(merged$node)),
+                                   stringsAsFactors = FALSE) %>%
+                       dplyr::rename(cells = Freq), by = "node")
+
+  # The space and the node definitions are kept as they are. Rebuilding them
+  # without these cells would change every node, which is the thing this
+  # ordering was meant to avoid.
+  keep = !(as.character(merged$node) %in% drop_nodes)
+  merged   = merged[, keep]
+  combined = combined[, keep]
+  merged$node = droplevels(factor(as.character(merged$node),
+                                  levels = node_levels))
+  node_levels = levels(merged$node)
+  qc = qc %>% dplyr::filter(barcode %in% colnames(merged))
+
+  datatable(drop_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+}
+```
+
+`r if (length(drop_nodes) == 0) "No node is removed. drop_nodes is empty." else paste0(format(sum(drop_tab$cells), big.mark = ","), " cells in ", nrow(drop_tab), " node(s) are removed. ", length(node_levels), " nodes and ", format(ncol(merged), big.mark = ","), " cells go forward. The space and the node boundaries are the ones fitted above, so the nodes that remain are unchanged by the removal.")`
 
 # Root
 
@@ -1259,7 +1334,7 @@ the head node has many closer neighbors.
 This is the reading the edge frequency cannot give. A forced attachment is drawn
 in every resample, so it scores 100 percent there while showing red here.
 
-```{r, fig.width=11, fig.height=10}
+```{r, fig.width=13, fig.height=12}
 # Two directed edges per pair, each colored by how the node it points to ranks
 # among the neighbors of the node it leaves. Node positions are taken from the
 # layout above so the two figures can be read against each other.
@@ -1280,7 +1355,12 @@ g_rank = ggraph(lay_dir) +
   scale_edge_colour_gradient(low = "#2166ac", high = "#b2182b", trans = "log10",
                              name = "rank of the node\nthe arrow points to") +
   geom_node_point(size = max(1.5, size_hi * .5), colour = "grey30") +
-  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
+  geom_node_text(aes(label = name), size = 2.6, repel = TRUE,
+                 max.overlaps = Inf, box.padding = .5, point.padding = .25,
+                 min.segment.length = 0, segment.size = .15,
+                 segment.colour = "grey65", seed = 1) +
+  scale_x_continuous(expand = expansion(mult = .08)) +
+  scale_y_continuous(expand = expansion(mult = .08)) +
   coord_fixed() +
   theme_void(base_size = 9) +
   theme(legend.position = "right", legend.key.size = unit(.4, "cm"),
@@ -1288,9 +1368,9 @@ g_rank = ggraph(lay_dir) +
 
 g_rank
 ggsave(g_rank, file = paste0(results_dir, "/node_graph_ranks.png"),
-       width = 11, height = 10, dpi = 300)
+       width = 13, height = 12, dpi = 300)
 ggsave(g_rank, file = paste0(results_dir, "/node_graph_ranks.pdf"),
-       width = 11, height = 10)
+       width = 13, height = 12)
 ```
 
 ## Marker sets on the tree
@@ -1304,7 +1384,7 @@ Each panel title carries the set's absolute maximum. A panel whose maximum is
 near zero is showing noise stretched across the full color range, so read the
 title before the colors. The unscaled values are in `node_marker_set_scores.csv`.
 
-```{r, fig.width=11, fig.height=9}
+```{r, fig.width=14, fig.height=12}
 graph_sets = trimws(strsplit(as.character(params$graph_marker_sets), ",")[[1]])
 graph_sets = intersect(graph_sets[nzchar(graph_sets)], unique(set_scores$set))
 
@@ -1319,11 +1399,17 @@ set_panel = function(st) {
   ggraph(ld) +
     edge_aes +
     geom_node_point(aes(colour = rel, size = pct)) +
-    geom_node_text(aes(label = name), size = 1.9, repel = TRUE) +
+    geom_node_text(aes(label = name), size = 2.4, repel = TRUE,
+                   max.overlaps = Inf, box.padding = .45,
+                   point.padding = .2, min.segment.length = 0,
+                   segment.size = .15, segment.colour = "grey65",
+                   seed = 1) +
     scale_colour_viridis_c(name = "expression, relative\nto the set maximum",
                            limits = c(0, 1)) +
     scale_size_continuous(name = "% of cells detecting",
-                          range = c(1.2, 6), limits = c(0, 100)) +
+                          range = c(1, 4.5), limits = c(0, 100)) +
+    scale_x_continuous(expand = expansion(mult = .10)) +
+    scale_y_continuous(expand = expansion(mult = .10)) +
     coord_fixed() +
     theme_void(base_size = 8) +
     ggtitle(sprintf("%s  (max %.2f)", st, mx)) +
@@ -1343,9 +1429,9 @@ if (length(graph_sets) > 0) {
   # so a bare plot object in the middle of one draws nothing
   print(p_set_graph)
   ggsave(p_set_graph, file = paste0(results_dir, "/node_graph_marker_sets.png"),
-         width = 11, height = 9, dpi = 300)
+         width = 14, height = 12, dpi = 300)
   ggsave(p_set_graph, file = paste0(results_dir, "/node_graph_marker_sets.pdf"),
-         width = 11, height = 9)
+         width = 14, height = 12)
 }
 ```
 
@@ -1403,9 +1489,12 @@ Pooled across libraries, a trend can be the libraries sitting at different ends
 of the tree. The within-library figures cannot be that.
 
 ```{r}
-# qc is built under Depth and technical content; pseudotime is added here
+# qc is built under Depth and technical content, before any removal, so it is
+# joined by barcode rather than bound by position
 qc = qc %>%
-  dplyr::mutate(pseudotime = merged$pseudotime) %>%
+  dplyr::inner_join(data.frame(barcode = colnames(merged),
+                               pseudotime = merged$pseudotime,
+                               stringsAsFactors = FALSE), by = "barcode") %>%
   dplyr::filter(!is.na(pseudotime))
 
 conf_measures = c("total", "detected", "pct_mito", "pct_rrna", "pct_ribo")
@@ -1596,6 +1685,7 @@ file_notes = c(
   "node_identity_scores.csv"  = "Each node against all marker sets, somatic ones included, with a contained_in flag where one set sits inside another.",
   "pseudotime_by_node.png"    = "Pseudotime distribution per node and per library.",
   "node_depth_and_technical.png" = "Depth and technical content per node.",
+  "removal_evidence_bubble.png" = "The sets named by removal_evidence_sets, per node, with any node being removed first on the axis. The evidence behind a removal.",
   "node_identity_scores.png"  = "Marker expression per node, one dot per gene, every set.",
   "node_graph_ranks.png" = "The tree with two arrows per pair, each colored by how the node it points to ranks among the neighbors of the node it leaves.",
   "node_graph_ranks.pdf" = "The rank graph as a vector file.",
