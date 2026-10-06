@@ -266,7 +266,7 @@ datatable(df_all, rownames = FALSE, options = list(dom = "t"))
 
 Samples are merged with `fastMNN` and embedded with UMAP and t-SNE. 
 
-```{r}
+```{r atlas-correct}
 if (build_mnn) {
   if (file.exists(merged_file)) {
     # A clustered object already exists from an earlier run. fastMNN's corrected
@@ -397,7 +397,7 @@ generally more stable. `r if (best_k > min(stability$k) && best_k < max(stabilit
 The shared nearest neighbor graph is built on the corrected space at
 `k` = `r params$k`, and communities are found with Louvain.
 
-```{r}
+```{r atlas-cluster}
 if (build_merged) {
   set.seed(1)
   g <- buildSNNGraph(mnn.sce, use.dimred = "corrected", k = params$k)
@@ -1169,7 +1169,7 @@ datatable(outcome_tbl %>%
 
 **The split halves differ by stage, collection date, technical batch, animal and, where one side is a single transformer library, by sex as well.** All of those vary together and this design separates none of them. The split records that the two halves are not one population by marker evidence. It does not say what makes them different.
 
-```{r}
+```{r atlas-stage-split}
 # Each split cluster becomes two labels; every other cluster keeps its own, so
 # the marker computation later runs over one factor covering all cells and the
 # split halves compete against the same background as everything else.
