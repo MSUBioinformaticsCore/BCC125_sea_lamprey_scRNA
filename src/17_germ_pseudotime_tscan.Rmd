@@ -24,7 +24,7 @@ params:
     all_root_rule: "max:Primordial germ cells"
     min_detect_pct: 5
     marker_file: canonical_markers_S1_only_2026-08-14.csv
-    extra_marker_file: neural_crest_markers_2026-09-25.csv
+    extra_marker_file: "neural_crest_markers_2026-09-25.csv,immediate_early_markers_2026-10-06.csv"
     split_by_subcluster: "5"
     subcluster_source: "prev"
     sub_k: 0
@@ -38,7 +38,8 @@ params:
     prev_nodes_file: ""
     annotate_lineages: "all,male"
     node_annotation: "5.1=Migrating neural crest cells;5.2=Oogonia;5.3=Oocytes;5.4=Migrating female germ cells (FGC I);5.5=Granulosa;5.6=Migrating female germ cells (FGC II);5.7=Primordial germ cells (PGCs);5.8=Migrating PGCs;15=Spermatogonia;16=Spermatocytes I;17=Spermatocytes II;18=Spermatocytes III"
-    drop_annotations: ""
+    drop_nodes: ""
+    removal_evidence_sets: "Dissociation response"
     min_map_jaccard: 0.25
     dist_method: "simple"
     edge_boot: 100
@@ -214,20 +215,26 @@ have_mito_src = !inherits(mito_src, "try-error") && is.data.frame(mito_src) &&
 `r paste0(format(length(mito_ids), big.mark = ","), " mitochondrially encoded genes, ", length(rrna_ids), " cytoplasmic rRNA genes and ", format(length(ribo_ids), big.mark = ","), " ribosomal proteins are identified from the annotation. ", if (have_mito_src) "Percent mitochondrial is taken from subsets_Mito_percent in the per-library objects, which is the quantity the cells were filtered on upstream." else "**subsets_Mito_percent was not found in the per-library objects**, so percent mitochondrial is recomputed here from the annotation and may not match the filter applied upstream.", " Cytoplasmic 28S and 18S rRNA are counted separately, because they are not mitochondrial and are abundant enough to distort that fraction if folded into it.")`
 
 ```{r}
-# The marker sets are read here rather than at the point of use, because the
-# somatic check scores cells that are removed before the corrected space exists.
+# Every set, not only the germ ones. A node scoring on a somatic set, or on the
+# dissociation response, is what the removal below is decided on.
 s1_sets = read.csv(paste0(params$project_dir, "/data/", params$marker_file),
                    stringsAsFactors = FALSE) %>%
   dplyr::mutate(loc_id = trimws(loc_id), origin = "S1 sheet")
 
-extra_file = as.character(params$extra_marker_file)
+# extra_marker_file takes a comma-separated list, so sets that did not come
+# from the S1 sheet can be added independently of one another.
+extra_file = trimws(strsplit(as.character(params$extra_marker_file), ",")[[1]])
+extra_file = extra_file[nzchar(extra_file)]
 extra_path = paste0(params$project_dir, "/data/", extra_file)
-have_extra = nzchar(extra_file) && file.exists(extra_path)
+extra_ok   = file.exists(extra_path)
+have_extra = any(extra_ok)
+extra_missing = extra_file[!extra_ok]
 
 all_sets = if (have_extra) {
   dplyr::bind_rows(s1_sets,
-                   read.csv(extra_path, stringsAsFactors = FALSE) %>%
-                     dplyr::mutate(loc_id = trimws(loc_id), origin = "extra"))
+                   dplyr::bind_rows(lapply(extra_path[extra_ok], function(p)
+                     read.csv(p, stringsAsFactors = FALSE) %>%
+                       dplyr::mutate(loc_id = trimws(loc_id), origin = "extra"))))
 } else s1_sets
 
 set_origin = all_sets %>%
@@ -337,12 +344,9 @@ if (length(absent) > 0)
 
 lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
 
-# Cells the collaborators annotated as somatic are removed here, before the
-# corrected space is built, so they influence neither the embedding nor the
-# subclustering. They are identified by barcode from the run that was
-# annotated, so this does not depend on the new subclustering agreeing with the
-# old numbering. Every lineage holding those cells loses them, including the
-# ones whose own subclusters are never annotated.
+# No cell is removed here. The space and the nodes are built on everything, and
+# any removal happens afterwards, under Removal, on the strength of what the
+# nodes turn out to express.
 parse_pairs = function(x) {
   x = trimws(x)
   if (!nzchar(x)) return(character(0))
@@ -352,21 +356,8 @@ parse_pairs = function(x) {
 }
 
 anno_map  = parse_pairs(params$node_annotation)
-drop_anno = trimws(strsplit(as.character(params$drop_annotations), ";")[[1]])
-drop_anno = drop_anno[nzchar(drop_anno)]
 prev_file = as.character(params$prev_nodes_file)
 have_prev = nzchar(prev_file) && file.exists(prev_file)
-
-# The somatic check exists to put expression behind a removal. With
-# drop_annotations empty nothing is removed, and its tables would repeat Node
-# identity on the same cells, so the whole section is skipped.
-do_somatic = have_prev && length(drop_anno) > 0
-
-drop_cells    = character(0)
-drop_cell_tab = NULL
-# kept so the somatic check can score the removed cells alongside the ones
-# that stay
-predrop_barcodes = lineage_key$barcode
 
 # read whenever it is available, because the subclustering below uses it to set
 # the number of subclusters to look for, which does not depend on any drop
@@ -377,27 +368,6 @@ if (have_prev) {
   prev_nodes$node = as.character(prev_nodes$node)
 }
 
-if (!is.null(prev_nodes) && length(drop_anno) > 0) {
-  old_drop_nodes = names(anno_map)[anno_map %in% drop_anno]
-  absent = setdiff(old_drop_nodes, unique(prev_nodes$node))
-  if (length(absent) > 0)
-    stop("nodes named by drop_annotations are not in ", prev_file, ": ",
-         paste(absent, collapse = ", "), ". Nodes there: ",
-         paste(sort(unique(prev_nodes$node)), collapse = ", "))
-
-  drop_cells = prev_nodes$barcode[prev_nodes$node %in% old_drop_nodes]
-
-  drop_cell_tab = prev_nodes %>%
-    dplyr::filter(node %in% old_drop_nodes) %>%
-    dplyr::count(node, name = "cells_annotated") %>%
-    dplyr::mutate(annotation = unname(anno_map[node]),
-                  cells_here = vapply(node, function(nd)
-                    sum(lineage_key$barcode %in%
-                          prev_nodes$barcode[prev_nodes$node == nd]),
-                    integer(1)))
-
-  lineage_key = lineage_key %>% dplyr::filter(!(barcode %in% drop_cells))
-}
 
 comp_tab = lineage_key %>%
   dplyr::count(final_label, cell_type, library, name = "n") %>%
@@ -412,197 +382,6 @@ datatable(comp_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
 `r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ".")`
-
-```{r, results="asis"}
-if (do_somatic) cat(
-"## Somatic check
-
-The cells named by `drop_annotations` are removed above on the strength of the
-label they were given. This section scores them before they go. The removal then
-has expression behind it.
-
-Every node of the annotated run is scored against all the marker sets, somatic
-ones included. Grouping is by the node assignment in `prev_nodes_file`. The
-values are the depth-normalized ones in the per-library objects. Neither the new
-embedding nor the new subcluster numbering enters this. The table therefore
-stands whatever the subclustering returns.
-
-The nodes being removed are placed first on the axis. A node that carries a
-somatic set and none of the germ sets is the pattern that supports dropping it.
-")
-```
-
-```{r}
-somatic_scores = NULL
-somatic_bubble = NULL
-somatic_levels = character(0)
-
-if (do_somatic) {
-  chk_list = lapply(all.sce, function(x) {
-    keep = intersect(colnames(x), predrop_barcodes)
-    if (length(keep) == 0) NULL else x[, keep]
-  })
-  chk_list = chk_list[!vapply(chk_list, is.null, logical(1))]
-  # only the marker genes are scored here, so the rest are never materialized
-  chk_univ = intersect(Reduce(intersect, lapply(chk_list, rownames)),
-                       unique(all_sets$loc_id))
-  if (length(chk_univ) == 0)
-    stop("none of the marker genes in ", params$marker_file,
-         " are present in every library of this lineage.")
-
-  chk_lc = do.call(cbind, lapply(chk_list, function(x)
-    logcounts(x)[chk_univ, , drop = FALSE]))
-
-  chk_node = prev_nodes$node[match(colnames(chk_lc), prev_nodes$barcode)]
-  keep_chk = !is.na(chk_node)
-  chk_lc   = chk_lc[, keep_chk, drop = FALSE]
-  chk_node = chk_node[keep_chk]
-
-  # the removed nodes first, then the rest, subclusters before whole clusters
-  chk_drop = intersect(names(anno_map)[anno_map %in% drop_anno], chk_node)
-  chk_rest = setdiff(unique(chk_node), chk_drop)
-  chk_rest = c(sort(chk_rest[grepl("\\.", chk_rest)]),
-               sort(chk_rest[!grepl("\\.", chk_rest)]))
-  somatic_levels = c(chk_drop, chk_rest)
-
-  chk_sce = SingleCellExperiment(assays = list(logcounts = chk_lc))
-
-  somatic_scores = score_marker_sets(
-      chk_sce, chk_node,
-      all_sets %>% dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id) %>%
-        dplyr::distinct()) %>%
-    dplyr::rename(node = group) %>%
-    dplyr::left_join(set_origin, by = c("set" = "CellTypeMarkerSet")) %>%
-    dplyr::left_join(set_flag, by = "set") %>%
-    dplyr::mutate(node    = factor(node, levels = somatic_levels),
-                  removed = node %in% chk_drop,
-                  annotation = unname(anno_map[as.character(node)]),
-                  contained_in = tidyr::replace_na(contained_in, ""),
-                  mean_logexpr = signif(mean_logexpr, 3),
-                  pct_detected = round(pct_detected, 1)) %>%
-    dplyr::arrange(node, dplyr::desc(mean_logexpr)) %>%
-    dplyr::select(node, annotation, removed, set, origin, contained_in,
-                  n_genes, n_cells, mean_logexpr, pct_detected)
-
-  write.csv(somatic_scores,
-            file = paste0(results_dir, "/somatic_check_set_scores.csv"),
-            row.names = FALSE)
-  # Depth and technical content on the same nodes. Summed per library so the
-  # full counts matrix is never assembled, unlike the marker scoring above,
-  # which needs only the marker rows.
-  old_qc = dplyr::bind_rows(lapply(chk_list, function(x) {
-    ct = counts(x)
-    data.frame(barcode  = colnames(x),
-               total    = Matrix::colSums(ct),
-               detected = Matrix::colSums(ct > 0),
-               mito_g   = Matrix::colSums(ct[intersect(mito_ids, rownames(ct)), ,
-                                             drop = FALSE]),
-               rrna     = Matrix::colSums(ct[intersect(rrna_ids, rownames(ct)), ,
-                                             drop = FALSE]),
-               ribo     = Matrix::colSums(ct[intersect(ribo_ids, rownames(ct)), ,
-                                             drop = FALSE]),
-               stringsAsFactors = FALSE)
-  })) %>%
-    dplyr::mutate(pct_rrna = 100 * rrna / total,
-                  pct_ribo = 100 * ribo / total,
-                  node     = prev_nodes$node[match(barcode, prev_nodes$barcode)]) %>%
-    dplyr::filter(!is.na(node)) %>%
-    dplyr::mutate(node = factor(node, levels = somatic_levels))
-
-  old_qc = if (have_mito_src) {
-    old_qc %>% dplyr::left_join(mito_src, by = "barcode")
-  } else old_qc %>% dplyr::mutate(pct_mito = 100 * mito_g / total)
-
-  old_qc_tab = old_qc %>%
-    dplyr::group_by(node) %>%
-    dplyr::summarise(annotation      = unname(anno_map[as.character(node[1])]),
-                     removed         = as.character(node[1]) %in% chk_drop,
-                     n_cells         = dplyr::n(),
-                     median_total    = round(median(total)),
-                     median_detected = round(median(detected)),
-                     median_pct_mito = round(median(pct_mito), 1),
-                     median_pct_rrna = round(median(pct_rrna), 1),
-                     median_pct_ribo = round(median(pct_ribo), 1),
-                     .groups = "drop") %>%
-    dplyr::arrange(node)
-
-  write.csv(old_qc_tab,
-            file = paste0(results_dir, "/annotated_run_depth_and_technical.csv"),
-            row.names = FALSE)
-
-  somatic_bubble = marker_bubble_df(chk_lc, chk_node, all_sets)
-  write.csv(somatic_bubble,
-            file = paste0(results_dir, "/somatic_check_gene_expression.csv"),
-            row.names = FALSE)
-
-  datatable(somatic_scores, rownames = FALSE, filter = "top",
-            options = list(pageLength = 20))
-}
-```
-
-`r if (!do_somatic) "" else if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found.** Only the ", dplyr::n_distinct(s1_sets$CellTypeMarkerSet), " sets in ", params$marker_file, " are scored here. If a node is being removed as a cell type that file was meant to cover, this check cannot speak to it.") else if (have_extra) paste0("Scored against ", dplyr::n_distinct(all_sets$CellTypeMarkerSet), " sets, of which ", paste(sort(setdiff(unique(all_sets$CellTypeMarkerSet), unique(s1_sets$CellTypeMarkerSet))), collapse = ", "), " come from ", extra_file, ".") else ""`
-
-```{r}
-if (!is.null(drop_cell_tab))
-  datatable(drop_cell_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
-```{r, fig.width=11, fig.height=11}
-if (!is.null(somatic_bubble)) {
-  p_somatic = marker_bubble_plot(
-    somatic_bubble, somatic_levels,
-    title    = "Marker expression by node of the annotated run",
-    subtitle = paste0("removed: ",
-                      paste(paste0(chk_drop, " (", anno_map[chk_drop], ")"),
-                            collapse = ", ")))
-  print(p_somatic)
-  ggsave(p_somatic, file = paste0(results_dir, "/somatic_check_bubble.png"),
-         width = 11, height = 11, dpi = 300)
-}
-```
-
-```{r, results="asis"}
-if (do_somatic) cat("### Depth and technical content of the annotated nodes\n")
-```
-
-```{r}
-if (exists("old_qc_tab"))
-  datatable(old_qc_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
-
-```{r, fig.width=11, fig.height=11, dev = "png", dpi = 600}
-if (exists("old_qc")) {
-  old_qc_long = old_qc %>%
-    tidyr::pivot_longer(c(total, detected, pct_mito, pct_rrna, pct_ribo),
-                        names_to = "measure", values_to = "value") %>%
-    dplyr::mutate(measure = factor(measure,
-                    levels = c("total", "detected", "pct_mito", "pct_rrna",
-                               "pct_ribo"),
-                    labels = c("total counts", "genes detected",
-                               "percent mitochondrial", "percent 28S/18S rRNA",
-                               "percent ribosomal protein")),
-                  removed = as.character(node) %in% chk_drop)
-
-  p_old_qc = ggplot(old_qc_long, aes(x = node, y = value, fill = removed)) +
-    geom_violin(scale = "width", colour = NA) +
-    geom_boxplot(width = .18, outlier.size = .2, fill = "white") +
-    facet_wrap(~ measure, scales = "free_y", ncol = 2) +
-    scale_y_continuous(trans = "log1p") +
-    scale_fill_manual(values = c("FALSE" = "grey85", "TRUE" = "#f4a582")) +
-    theme_bw() +
-    theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
-    labs(x = NULL, y = NULL, fill = "removed",
-         title = "Depth and technical content by node of the annotated run",
-         subtitle = "log1p scale")
-
-  print(p_old_qc)
-  ggsave(p_old_qc,
-         file = paste0(results_dir, "/annotated_run_depth_and_technical.png"),
-         width = 11, height = 11, dpi = 300)
-}
-```
-
-`r if (!exists("old_qc_tab")) "" else { d = old_qc_tab %>% dplyr::arrange(dplyr::desc(median_pct_mito)); s = old_qc_tab %>% dplyr::arrange(median_total); paste0("The most mitochondrial node is ", d$node[1], " at ", d$median_pct_mito[1], " percent, with a median of ", format(d$median_total[1], big.mark = ","), " counts. The shallowest is ", s$node[1], " at ", format(s$median_total[1], big.mark = ","), " counts, against ", format(max(old_qc_tab$median_total), big.mark = ","), " for the deepest. A node that tops both lists is the one to treat with suspicion.") }`
 
 ```{r}
 obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
@@ -895,9 +674,6 @@ anno_lineages = trimws(strsplit(as.character(params$annotate_lineages), ",")[[1]
 do_anno       = lineage %in% anno_lineages
 
 anno_map      = if (do_anno) parse_pairs(params$node_annotation) else character(0)
-drop_anno     = if (do_anno)
-  trimws(strsplit(as.character(params$drop_annotations), ";")[[1]]) else character(0)
-drop_anno     = drop_anno[nzchar(drop_anno)]
 prev_file     = as.character(params$prev_nodes_file)
 have_prev     = do_anno && nzchar(prev_file) && file.exists(prev_file)
 sub_nodes_now = node_levels[grepl("\\.", node_levels)]
@@ -1033,9 +809,7 @@ if (!is.null(map_tab)) {
   # subclustered, so only old nodes with a subcluster number are at risk; whole
   # clusters carry their annotation by name and never enter the mapping.
   old_sub     = unique(pair_j$old[grepl("\\.", pair_j$old)])
-  droppable   = names(anno_map)[anno_map %in% drop_anno]
-  merged_away = setdiff(intersect(old_sub, names(anno_map)),
-                        c(map_tab$old, droppable))
+  merged_away = setdiff(intersect(old_sub, names(anno_map)), map_tab$old)
 
   # where the cells of an unmatched old subcluster ended up
   fate = function(olds) paste0(
@@ -1338,14 +1112,10 @@ for (cl in names(ds_res)) {
 ```{r, results="asis"}
 cat(
 "Every node is scored against **all** the marker sets available, somatic ones
-included, rather than only the germ sets the root rule uses. ",
-if (do_somatic)
-"The cells that were removed are not here. Those are scored under Somatic check,
-before the removal. This table is the check on what is left."
-else
-"No cell is removed in this run, so every cell of the lineage is scored here.",
-" A node scoring high on a somatic set and low on every germ set is not a germ
-cell state.\n")
+included, rather than only the germ sets the root rule uses. Every cell is still
+here: nothing has been removed at this point, and this table is what any removal
+below is decided on. A node scoring high on a somatic set and low on every germ
+set is not a germ cell state.\n")
 ```
 
 ```{r}
@@ -1383,7 +1153,7 @@ datatable(id_table, rownames = FALSE, filter = "top",
           options = list(pageLength = 20))
 ```
 
-`r if (!have_extra && nzchar(extra_file)) paste0("**", extra_path, " was not found**, so only the sets in ", params$marker_file, " are scored.") else ""`
+`r if (length(extra_missing) > 0) paste0("**Not found in data/: ", paste(extra_missing, collapse = ", "), ".** Those sets are not scored.") else ""`
 
 `r paste0(dplyr::n_distinct(id_genes$set), " marker sets are scored, covering ", format(dplyr::n_distinct(id_genes$gene), big.mark = ","), " genes present in this lineage.", if (have_extra) paste0(" Sets from ", extra_file, " are marked 'extra' in the origin column. That file records the symbol each gene was requested under, since several requested markers have no entry in this annotation and are stood in for by a lamprey paralog.") else "")`
 
@@ -1406,7 +1176,81 @@ ggsave(p_id, file = paste0(results_dir, "/node_identity_scores.png"),
        width = 11, height = 11, dpi = 300)
 ```
 
-## Root
+# Removal
+
+Every node above was defined on every cell and scored against every marker set.
+A node is removed here only on the strength of what it turned out to express.
+
+The annotation is not used to decide this, and that is deliberate. The labels
+are a hypothesis about these cells, and the trajectory is one of the things
+being used to test it. Removing cells because of the label they carry builds
+that hypothesis into the input, so whatever the ordering then shows about those
+labels is guaranteed rather than observed. Removing on a measured signature
+leaves the labels free to be right or wrong.
+
+The labels can also be wrong in a way that matters here. A node annotated as a
+cell type whose markers it does not express would be removed for a reason that
+is not true, even where removing it is the right call.
+
+`removal_evidence_sets` names the sets drawn below. Dissociation response holds
+the AP-1 and immediate-early genes that enzymatic digestion induces, so a node
+carrying them is defined by how the tissue was handled rather than by the
+animal. That is a property of the protocol, which is why it is a reason to
+remove a node and the annotation is not. `drop_nodes` names what to remove,
+by node, after reading it.
+
+```{r, fig.width=9, fig.height=7}
+ev_sets = trimws(strsplit(as.character(params$removal_evidence_sets), ",")[[1]])
+ev_sets = intersect(ev_sets[nzchar(ev_sets)], unique(all_sets$CellTypeMarkerSet))
+
+drop_nodes = trimws(strsplit(as.character(params$drop_nodes), ",")[[1]])
+drop_nodes = drop_nodes[nzchar(drop_nodes)]
+absent = setdiff(drop_nodes, node_levels)
+if (length(absent) > 0)
+  stop("drop_nodes names node(s) that do not exist: ", paste(absent, collapse = ", "),
+       ". Nodes: ", paste(node_levels, collapse = ", "))
+
+ev_levels = c(drop_nodes, setdiff(node_levels, drop_nodes))
+
+if (length(ev_sets) > 0) {
+  p_ev = marker_bubble_plot(
+    id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,
+    title    = paste(ev_sets, collapse = ", "),
+    subtitle = if (length(drop_nodes) == 0) "nothing is being removed" else
+      paste0("removed: ", paste(drop_nodes, collapse = ", ")))
+  print(p_ev)
+  ggsave(p_ev, file = paste0(results_dir, "/removal_evidence_bubble.png"),
+         width = 9, height = 7, dpi = 300)
+}
+```
+
+`r if (length(ev_sets) == 0) "" else { es = id_table %>% dplyr::filter(set %in% ev_sets) %>% dplyr::arrange(dplyr::desc(mean_logexpr)); paste0("The highest scoring node on ", es$set[1], " is ", es$node[1], " at ", signif(es$mean_logexpr[1], 3), ", detected in ", round(es$pct_detected[1], 1), " percent of its cells, against ", signif(es$mean_logexpr[2], 3), " for the next node. The per-node values are in node_identity_scores.csv.") }`
+
+```{r}
+drop_tab = NULL
+if (length(drop_nodes) > 0) {
+  drop_tab = data.frame(node = drop_nodes, stringsAsFactors = FALSE) %>%
+    dplyr::left_join(as.data.frame(table(node = as.character(merged$node)),
+                                   stringsAsFactors = FALSE) %>%
+                       dplyr::rename(cells = Freq), by = "node")
+
+  # The space and the node definitions are kept. Rebuilding them without these
+  # cells would change every node, which is what this ordering avoids.
+  keep = !(as.character(merged$node) %in% drop_nodes)
+  merged   = merged[, keep]
+  combined = combined[, keep]
+  merged$node = droplevels(factor(as.character(merged$node),
+                                  levels = node_levels))
+  node_levels = levels(merged$node)
+  qc = qc %>% dplyr::filter(barcode %in% colnames(merged))
+
+  datatable(drop_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+}
+```
+
+`r if (length(drop_nodes) == 0) "No node is removed. drop_nodes is empty." else paste0(format(sum(drop_tab$cells), big.mark = ","), " cells in ", nrow(drop_tab), " node(s) are removed. ", length(node_levels), " nodes and ", format(ncol(merged), big.mark = ","), " cells go forward. The space and the node boundaries are the ones fitted above, so the nodes that remain are unchanged by the removal.")`
+
+# Root
 
 Every node is scored on the germ cell marker sets from the collaborators' S1
 sheet: the mean log expression across each set's genes, and the mean percent of
@@ -2095,7 +1939,12 @@ g_rank = ggraph(lay_dir) +
   scale_edge_colour_gradient(low = "#2166ac", high = "#b2182b", trans = "log10",
                              name = "rank of the node\nthe arrow points to") +
   geom_node_point(size = max(1.5, pt_size * .5), colour = "grey30") +
-  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
+  geom_node_text(aes(label = name), size = 2.6, repel = TRUE,
+                 max.overlaps = Inf, box.padding = .5, point.padding = .25,
+                 min.segment.length = 0, segment.size = .15,
+                 segment.colour = "grey65", seed = 1) +
+  scale_x_continuous(expand = expansion(mult = .08)) +
+  scale_y_continuous(expand = expansion(mult = .08)) +
   coord_fixed() +
   theme_void(base_size = 9) +
   theme(legend.position = "right", legend.key.size = unit(.4, "cm"),
@@ -2137,11 +1986,14 @@ set_panel = function(s) {
     scale_colour_viridis_c(name = "expression, relative\nto the set maximum",
                            limits = c(0, 1)) +
     scale_size_continuous(name = "% of cells detecting",
-                          range = c(1.5, 7), limits = c(0, 100)) +
+                          range = c(1.2, 5.5), limits = c(0, 100)) +
     geom_text_repel(data = ld, aes(x, y, label = name), inherit.aes = FALSE,
-                    size = 2.2, colour = "grey25", min.segment.length = 0,
-                    segment.size = .2, segment.colour = "grey70",
-                    box.padding = .35, max.overlaps = Inf, seed = 1) +
+                    size = 2.4, colour = "grey25", min.segment.length = 0,
+                    segment.size = .15, segment.colour = "grey65",
+                    box.padding = .45, point.padding = .2,
+                    max.overlaps = Inf, seed = 1) +
+    scale_x_continuous(expand = expansion(mult = .10)) +
+    scale_y_continuous(expand = expansion(mult = .10)) +
     coord_fixed() +
     theme_void(base_size = 8) +
     ggtitle(sprintf("%s  (max %.2f)", s, mx)) +
@@ -2342,9 +2194,6 @@ file_notes = c(
   "tscan_pseudotime_genes.csv"        = "Genes whose expression changes along the ordering.",
   "tscan_pseudotime_GO_overlaps.csv"  = "Genes shared between the pseudotime gene list and each GO term.",
   "tscan_pseudotime_GO_pvalues.csv"   = "Enrichment of GO terms among the pseudotime-associated genes.",
-  "somatic_check_set_scores.csv"      = "Every node of the annotated run scored on all marker sets, computed before any cell is removed. Only written when drop_annotations names something.",
-  "annotated_run_depth_and_technical.csv" = "Depth, genes detected, percent mitochondrial, rRNA and ribosomal per node of the annotated run. Only written when drop_annotations names something.",
-  "somatic_check_gene_expression.csv" = "The per-gene values behind the somatic check bubble plot. Only written when drop_annotations names something.",
   "node_depth_and_technical.csv"      = "The same four measures for this run's nodes.",
   "subcluster_depth_tests.csv"        = "Kruskal-Wallis of each measure across the subclusters, with the fold range in median depth.",
   "subcluster_downsample_check.csv"   = "Subclusters recomputed after downsampling every cell to a common depth, with the ARI against the original. A low ARI means the split was depth.",
@@ -2361,8 +2210,7 @@ file_notes = c(
   "tscan_node_graph_marker_sets.pdf"  = "The marker set panels as a vector file.",
   "tscan_pseudotime_by_node.png"      = "Pseudotime distribution per node and per library.",
   "node_identity_scores.png"          = "Marker expression per node, one dot per gene.",
-  "somatic_check_bubble.png"          = "Marker expression per node of the annotated run, one dot per gene. Only written when drop_annotations names something.",
-  "annotated_run_depth_and_technical.png" = "Depth and technical content per node of the annotated run. Only written when drop_annotations names something.",
+  "removal_evidence_bubble.png"       = "The marker sets named by removal_evidence_sets, per node, with any node being removed first on the axis. The evidence behind a removal.",
   "node_depth_and_technical.png"      = "Depth and technical content per node of this run.",
   "subcluster_overlap.png"            = "Old against new subclusters as percentages, three panels. Only written when subclusters are recomputed.")
 
