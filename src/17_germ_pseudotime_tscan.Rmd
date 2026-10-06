@@ -504,7 +504,9 @@ datatable(reuse_tab, rownames = FALSE, options = list(pageLength = 15))
 k_range = as.integer(trimws(strsplit(as.character(params$sub_k_range), ",")[[1]]))
 stopifnot(length(k_range) > 0, !anyNA(k_range))
 
-sub_assign  = list()
+# sub_assign is filled above when the subclusters are reused, so it is only
+# reset where this chunk is going to fill it itself.
+if (!reuse_sub) sub_assign = list()
 stab_tabs   = list()
 search_tabs = list()
 chosen_ks   = integer(0)
@@ -1091,6 +1093,9 @@ if (have_split) {
                  stringsAsFactors = FALSE)
     }))
   }))
+  # every cluster returning NULL gives a 0-column frame rather than NULL
+  if (!"measure" %in% names(depth_tests)) depth_tests = NULL
+
   if (!is.null(depth_tests)) {
     depth_tests$fold_range[depth_tests$measure != "total"] = NA
     write.csv(depth_tests,
