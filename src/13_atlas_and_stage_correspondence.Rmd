@@ -1586,7 +1586,7 @@ if (have_ieg && nrow(ieg_genes) > 0) {
   # each other rather than read gene by gene
   ieg_tab = ieg_bubble %>%
     group_by(cluster) %>%
-    summarise(n_cells      = first(n_cells),
+    summarise(n_cells      = dplyr::first(n_cells),
               n_genes      = dplyr::n(),
               mean_logexpr = signif(mean(mean_logexpr), 3),
               pct_detected = round(mean(pct_expressing), 1),
