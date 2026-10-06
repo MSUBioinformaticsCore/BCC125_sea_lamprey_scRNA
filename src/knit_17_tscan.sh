@@ -56,6 +56,11 @@ EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
 GRAPH_LABELS="${GRAPH_LABELS:-FALSE}"
 # nodes to remove, by node id, after the Removal section reports what each
 # node expresses. Empty removes nothing.
+# "prev" reuses the annotated subclusters by barcode. "recluster" derives them
+# again, which is the only way to get the stability sweep, the k choice and the
+# old-to-new mapping. It renumbers the subclusters, so send it somewhere else
+# with RUN_SUFFIX rather than over the annotated run.
+SUB_SOURCE="${SUB_SOURCE:-prev}"
 DROP="${DROP:-}"
 EXTRA="${EXTRA:-neural_crest_markers_2026-09-25.csv,immediate_early_markers_2026-10-06.csv}"
 EVIDENCE="${EVIDENCE:-Dissociation response}"
@@ -135,6 +140,7 @@ echo "started:    $(date)"
 echo "lineage:    ${LINEAGE}"
 echo "atlas:      ${RESULTS_DATE}_atlas${ATLAS_SUFFIX}"
 echo "distance:   ${DIST}    mnn.k: ${MNN_K}    outgroup: ${OUTGROUP}"
+echo "subclusters: ${SUB_SOURCE}"
 echo "dropping:   ${DROP:-<nothing; read the Removal section, then set DROP>}"
 echo "prev nodes: ${PREV_NODES:-<none>}"
 
@@ -155,6 +161,7 @@ Rscript -e "
                          edge_boot       = ${EDGE_BOOT},
                          edge_boot_cells = ${EDGE_BOOT_CELLS},
                          graph_edge_labels = ${GRAPH_LABELS},
+                         subcluster_source = '${SUB_SOURCE}',
                          drop_nodes       = '${DROP}',
                          extra_marker_file = '${EXTRA}',
                          removal_evidence_sets = '${EVIDENCE}',

@@ -594,8 +594,46 @@ stab_tab = dplyr::bind_rows(stab_tabs)
 write.csv(stab_tab, file = paste0(results_dir, "/subcluster_stability.csv"),
           row.names = FALSE)
 
+chosen_df = data.frame(cluster = names(chosen_ks),
+                       k = as.integer(chosen_ks), stringsAsFactors = FALSE)
+stab_w = max(6, 2.6 * dplyr::n_distinct(stab_tab$cluster) + 2)
+
 datatable(stab_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+```{r, fig.width=stab_w, fig.height=5, eval=have_sweep}
+# Both halves of the choice in one figure: how reproducible each k is, and how
+# many subclusters it returns. A k with a high ARI that returns two subclusters
+# is reproducible and uninformative.
+stab_long = stab_tab %>%
+  tidyr::pivot_longer(c(mean_ari, min_ari, mean_n_clusters),
+                      names_to = "measure", values_to = "value") %>%
+  dplyr::mutate(
+    panel  = ifelse(measure == "mean_n_clusters",
+                    "subclusters returned", "pairwise ARI"),
+    series = ifelse(measure == "min_ari", "worst iteration", "mean"))
+
+p_stab = ggplot(stab_long, aes(x = k, y = value, linetype = series)) +
+  geom_line(colour = "#004488", linewidth = .7) +
+  geom_point(colour = "#004488", size = 1.4) +
+  geom_vline(data = chosen_df, aes(xintercept = k),
+             linetype = "dashed", colour = "grey45") +
+  facet_grid(panel ~ cluster, scales = "free_y", switch = "y",
+             labeller = labeller(cluster = function(x) paste("cluster", x))) +
+  scale_x_continuous(breaks = sort(unique(stab_tab$k))) +
+  scale_linetype_manual(values = c("mean" = "solid",
+                                   "worst iteration" = "22")) +
+  labs(x = "k", y = NULL, linetype = NULL,
+       title = "Subclustering stability over the k sweep",
+       subtitle = "dashed vertical line marks the k used") +
+  theme_bw(base_size = 9) +
+  theme(strip.placement = "outside", strip.background = element_blank(),
+        legend.position = "bottom")
+
+p_stab
+ggsave(p_stab, file = paste0(results_dir, "/subcluster_stability.png"),
+       width = stab_w, height = 5, dpi = 300)
 ```
 
 ```{r, eval=have_sweep}
@@ -2228,6 +2266,7 @@ file_notes = c(
   "node_depth_and_technical.csv"      = "The same four measures for this run's nodes.",
   "subcluster_depth_tests.csv"        = "Kruskal-Wallis of each measure across the subclusters, with the fold range in median depth.",
   "subcluster_downsample_check.csv"   = "Subclusters recomputed after downsampling every cell to a common depth, with the ARI against the original. A low ARI means the split was depth.",
+  "subcluster_stability.png"          = "Mean and worst-case pairwise ARI over the k sweep, with the subcluster count each k returns and the k used marked. Only written when subclusters are recomputed.",
   "subcluster_stability.csv"          = "The ARI sweep over sub_k_range. Only written when subclusters are recomputed.",
   "subcluster_k_choice.csv"           = "Each candidate k with the subcluster count it returned and its ARI. Only written when subclusters are recomputed.",
   "subcluster_annotation_map.csv"     = "Every old-new subcluster pair with shared cell counts and Jaccard. Only written when subclusters are recomputed.",
