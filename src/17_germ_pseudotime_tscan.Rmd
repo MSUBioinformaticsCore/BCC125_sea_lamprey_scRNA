@@ -14,6 +14,7 @@ params:
     lab: Weiming Li
     results_date: "20260813"
     atlas_suffix: ""
+    run_suffix: ""
     lineage: "female"
     female_clusters: "5"
     male_clusters: "15,16,17,18"
@@ -161,9 +162,15 @@ object_dir      = paste0(params$project_dir, "/results/", params$results_date,
 # atlas_suffix picks which atlas to read. "" is 13, "_no_technical_genes" is 13b.
 atlas_dir       = paste0(params$project_dir, "/results/", params$results_date,
                          "_atlas", params$atlas_suffix)
-results_dir     = paste0(params$project_dir, "/results/", params$results_date,
+base_dir        = paste0(params$project_dir, "/results/", params$results_date,
                          "_pseudotime_tscan_", lineage, params$atlas_suffix)
-Robject_out_dir = paste0(results_dir, "/Robjects")
+# run_suffix keeps the outputs of two settings side by side, for example a
+# run with outgroup = TRUE against one without.
+results_dir     = paste0(base_dir, params$run_suffix)
+# the cache stays on the unsuffixed path: the corrected space does not depend
+# on anything run_suffix varies, so it is built once and shared
+Robject_out_dir = paste0(base_dir, "/Robjects")
+if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
 if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
 
 label_file = paste0(atlas_dir, "/cell_cluster_labels.csv")
@@ -1703,7 +1710,7 @@ Five columns describe each edge from a different direction.
 |---|---|---|---|
 | `length` | distance between the node centroids | nodes sit close together | nodes are far apart |
 | `nn_rank_1`, `nn_rank_2` | each node's place in the other's distance-ordered list | 1 and 1: mutual nearest neighbors | the edge reaches past nearer nodes |
-| `separation` | centroid distance in within-node standard deviations | under 1: one continuous population | two distinguishable groups |
+| `separation` | centroid distance in within-node standard deviations, measured along the line joining them | under 1: one continuous population | two distinguishable groups |
 | `pct_of_cut` | length as a percentage of the outgroup threshold | the edge survives outgroup splitting | over 100: outgroup splitting removes it |
 | `frequency` | percentage of subsampled trees holding the edge | another sample would not have drawn it | drawn whatever the sample |
 
@@ -1782,17 +1789,23 @@ nd_all = as.character(merged$node)
 cnt    = table(nd_all)
 cent   = rowsum(co_all, nd_all)[names(cnt), , drop = FALSE] / as.vector(cnt)
 
-# Per-dimension within-node standard deviation, pooled over the dimensions of
-# the corrected space. The distance from a cell to its own centroid is not used
-# as the denominator: it grows as the square root of the dimension count while
-# the centroid distance does not, so the ratio would shrink as dimensions are
-# added. Two nodes four standard deviations apart score 0.56 on that version in
-# fifty dimensions and 4 on this one.
-node_sd = vapply(rownames(cent), function(g) {
-  ix = which(nd_all == g)
-  if (length(ix) < 2) NA_real_ else
-    sqrt(mean(apply(co_all[ix, , drop = FALSE], 2, var)))
-}, numeric(1))
+# Within-node spread measured along the line joining the two centroids, which is
+# the only direction the edge is about. Pooling the spread over all dimensions
+# instead inflates this badly in a PC space: variance decays steeply across the
+# dimensions, so an average over all fifty understates the spread along the few
+# that separate the nodes. On simulated PC-like data a true two standard
+# deviation gap reads 11.8 that way and 1.95 this way.
+edge_separation = function(a, b) {
+  ia = which(nd_all == a); ib = which(nd_all == b)
+  if (length(ia) < 2 || length(ib) < 2) return(NA_real_)
+  d = cent[b, ] - cent[a, ]
+  L = sqrt(sum(d^2))
+  if (!is.finite(L) || L == 0) return(NA_real_)
+  u  = d / L
+  va = stats::var(as.vector(co_all[ia, , drop = FALSE] %*% u))
+  vb = stats::var(as.vector(co_all[ib, , drop = FALSE] %*% u))
+  L / sqrt((va + vb) / 2)
+}
 
 node_dist = as.matrix(dist(cent))
 diag(node_dist) = Inf
@@ -1801,8 +1814,7 @@ node_rank = t(apply(node_dist, 1, rank, ties.method = "min"))
 edge_tab$nn_rank_1 = node_rank[cbind(edge_tab$node_1, edge_tab$node_2)]
 edge_tab$nn_rank_2 = node_rank[cbind(edge_tab$node_2, edge_tab$node_1)]
 edge_tab$separation = round(
-  node_dist[cbind(edge_tab$node_1, edge_tab$node_2)] /
-  ((node_sd[edge_tab$node_1] + node_sd[edge_tab$node_2]) / 2), 2)
+  mapply(edge_separation, edge_tab$node_1, edge_tab$node_2), 2)
 
 n_boot = as.integer(params$edge_boot)
 boot_ok = n_boot > 0
@@ -1868,9 +1880,9 @@ datatable(edge_tab, rownames = FALSE, class = "compact stripe hover",
 
 `r if (!boot_ok || nrow(edge_tab) == 0) "The subsampling check is off. Set edge_boot to a positive number to run it." else paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], ", drawn in ", edge_tab$frequency[1], " percent of ", n_boot, " trees built from ", params$edge_boot_cells, " cells per node. ", sum(edge_tab$frequency < 50), " of ", nrow(edge_tab), " edges appear in under half of them, and ", sum(edge_tab$frequency == 100), " in all of them.")`
 
-`r if (is.na(og_cut)) "" else { over = edge_tab %>% dplyr::filter(pct_of_cut > 100); paste0("The outgroup threshold for this tree is ", signif(og_cut, 3), ", which is 1.5 times the median edge length. ", if (nrow(over) == 0) "No edge is longer than that, so outgroup = TRUE returns this same single tree." else paste0(nrow(over), " of ", nrow(edge_tab), " edges are longer: ", paste0(over$node_1, " to ", over$node_2, " at ", over$pct_of_cut, " percent", collapse = ", "), ". Under outgroup = TRUE the tree is rebuilt with the artificial node present, so the pieces are not guaranteed to be this tree minus those edges.")) }`
+`r if (is.na(og_cut)) "" else { over = edge_tab %>% dplyr::filter(pct_of_cut > 100) %>% dplyr::arrange(dplyr::desc(pct_of_cut)); paste0("The outgroup threshold for this tree is ", signif(og_cut, 3), ", which is 1.5 times the median edge length. ", if (nrow(over) == 0) "No edge is longer than that, so outgroup = TRUE returns this same single tree." else paste0(nrow(over), " of ", nrow(edge_tab), " edges are longer, the longest being ", over$node_1[1], " to ", over$node_2[1], " at ", over$pct_of_cut[1], " percent. Under outgroup = TRUE the tree is rebuilt with the artificial node present, so the pieces are not guaranteed to be this tree minus those edges.")) }`
 
-`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::filter(pmax(nn_rank_1, nn_rank_2) > 2); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "No edge reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest: ", paste0(far$node_1, " to ", far$node_2, " at ranks ", far$nn_rank_1, " and ", far$nn_rank_2, collapse = ", "), "."), " ", if (nrow(ov) == 0) "Every pair sits at least one standard deviation apart." else paste0(nrow(ov), " pair(s) sit under one standard deviation apart: ", paste0(ov$node_1, " to ", ov$node_2, " at ", ov$separation, collapse = ", "), ".")) }`
+`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::mutate(worst = pmax(nn_rank_1, nn_rank_2)) %>% dplyr::filter(worst > 2) %>% dplyr::arrange(dplyr::desc(worst)); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "None reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest, the furthest being ", far$node_1[1], " to ", far$node_2[1], " at ranks ", far$nn_rank_1[1], " and ", far$nn_rank_2[1], "."), " ", if (nrow(ov) == 0) "Every pair sits at least one standard deviation apart." else paste0(nrow(ov), " pair(s) sit under one standard deviation apart, the closest being ", ov$node_1[which.min(ov$separation)], " to ", ov$node_2[which.min(ov$separation)], " at ", min(ov$separation), "."), " The per-edge values are in mst_edges.csv.") }`
 
 ```{r}
 if (!is.null(extra_tab) && nrow(extra_tab) > 0)
@@ -1926,7 +1938,8 @@ e_ig = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
   dplyr::mutate(key = edge_key(from, to)) %>%
   dplyr::left_join(edge_tab %>%
                      dplyr::mutate(key = edge_key(node_1, node_2)) %>%
-                     dplyr::select(key, frequency), by = "key")
+                     dplyr::select(key, frequency, pct_of_cut),
+                   by = "key")
 
 # frequency where the subsampling ran, because "drawn in 38 percent of
 # subsampled trees" reads without the legend. Gain stays in the table either way.
@@ -1939,7 +1952,8 @@ gr = as_tbl_graph(pseudo$mst) %>%
   left_join(node_meta, by = "name") %>%
   left_join(mean_pseudo, by = "name") %>%
   activate(edges) %>%
-  mutate(conf = e_ig$conf)
+  mutate(conf = e_ig$conf,
+         cut_pct = as.numeric(e_ig$pct_of_cut))
 
 # Layout by real distance. The stress layout ignores edge weights by default and
 # draws every edge at roughly the same length, so the picture says nothing about
@@ -1985,11 +1999,19 @@ pt_size = max(2, min(9, 55 * min(lay_d) / lay_span))
 # Confidence is carried by edge color alone. Encoding it as width and color and
 # a printed number as well cost two more things to read for no more information.
 # The values are in mst_edges.csv and graph_edge_labels puts them back on.
+# Edge colour is the length as a percentage of the outgroup threshold, not the
+# subsampling frequency. Frequency reads 100 for an edge the tree was forced to
+# draw, because a node that belongs nowhere is attached to the same place in
+# every resample. The threshold says how long the edge is, which that cannot
+# hide. Blue is short, red is past the threshold; the numbers are in
+# mst_edges.csv along with the frequency.
+use_cut  = !all(is.na(e_ig$pct_of_cut))
 edge_aes = list(
-  if (use_freq) geom_edge_link(aes(edge_colour = conf), edge_width = 1.1)
+  if (use_cut) geom_edge_link(aes(edge_colour = cut_pct), edge_width = 1.1)
     else geom_edge_link(edge_colour = "grey55", edge_width = 1.1),
-  if (use_freq) scale_edge_colour_gradient(low = "#d6604d", high = "#2166ac",
-                  name = "% of subsampled trees", limits = c(0, 100)) else NULL)
+  if (use_cut) scale_edge_colour_gradient2(low = "#2166ac", mid = "#bdbdbd",
+                  high = "#b2182b", midpoint = 100,
+                  name = "% of the outgroup\nthreshold") else NULL)
 
 node_lab = geom_text_repel(data = layout_data, aes(x, y, label = name),
                            inherit.aes = FALSE, size = 2.6, colour = "grey20",
@@ -2038,6 +2060,52 @@ ggsave(p_node_graph, file = paste0(results_dir, "/tscan_node_graph.pdf"),
        width = 7, height = 7)
 ggsave(p_node_graph, file = paste0(results_dir, "/tscan_node_graph.png"),
        width = 7, height = 7, dpi = 300)
+```
+
+## Which node reached for which
+
+Each pair is drawn twice, once in each direction. An arrow from A to B is
+colored by where B sits in A's list of nodes ordered by distance, so an edge
+blue in both directions joins mutual nearest neighbors. An arrow that is blue
+one way and red the other is a node reaching for a partner that is not reaching
+back: the tail node had to attach somewhere and this was its best option, while
+the head node has many closer neighbors.
+
+This is the reading the edge frequency cannot give. A forced attachment is drawn
+in every resample, so it scores 100 percent there while showing red here.
+
+```{r, fig.width=9, fig.height=8}
+# Two directed edges per pair, each colored by how the node it points to ranks
+# among the neighbors of the node it leaves. Node positions are taken from the
+# layout above so the two figures can be read against each other.
+dir_edges = dplyr::bind_rows(
+  edge_tab %>% dplyr::transmute(from = node_1, to = node_2, rank = nn_rank_1),
+  edge_tab %>% dplyr::transmute(from = node_2, to = node_1, rank = nn_rank_2))
+
+gr_dir  = tidygraph::tbl_graph(
+  nodes = data.frame(name = layout_data$name, stringsAsFactors = FALSE),
+  edges = dir_edges, directed = TRUE)
+lay_dir = create_layout(gr_dir, layout = "manual", x = layout_data$x, y = layout_data$y)
+
+g_rank = ggraph(lay_dir) +
+  geom_edge_fan(aes(edge_colour = rank),
+                arrow = grid::arrow(length = unit(1.8, "mm"), type = "closed"),
+                start_cap = circle(2, "mm"), end_cap = circle(2.4, "mm"),
+                edge_width = .8) +
+  scale_edge_colour_gradient(low = "#2166ac", high = "#b2182b", trans = "log10",
+                             name = "rank of the node\nthe arrow points to") +
+  geom_node_point(size = max(1.5, pt_size * .5), colour = "grey30") +
+  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
+  coord_fixed() +
+  theme_void(base_size = 9) +
+  theme(legend.position = "right", legend.key.size = unit(.4, "cm"),
+        legend.title = element_text(size = 8), legend.text = element_text(size = 7))
+
+g_rank
+ggsave(g_rank, file = paste0(results_dir, "/tscan_node_graph_ranks.png"),
+       width = 9, height = 8, dpi = 300)
+ggsave(g_rank, file = paste0(results_dir, "/tscan_node_graph_ranks.pdf"),
+       width = 9, height = 8)
 ```
 
 ## Marker sets on the tree
@@ -2286,6 +2354,8 @@ file_notes = c(
   "subcluster_overlap_grid.csv"       = "The same overlap as percentages of the new subcluster, the old one and the union. Only written when subclusters are recomputed.",
   "tscan_trajectory_umap.png"         = "UMAP colored by node and by pseudotime, with the tree drawn over it.",
   "tscan_node_graph.png"              = "The tree itself: library composition per node as pie charts, and nodes colored by mean pseudotime.",
+  "tscan_node_graph_ranks.png" = "The tree with two arrows per pair, each colored by how the node it points to ranks among the neighbors of the node it leaves.",
+  "tscan_node_graph_ranks.pdf" = "The rank graph as a vector file.",
   "tscan_node_graph.pdf"              = "The node graph as a vector file, for figure assembly.",
   "tscan_node_graph_marker_sets.png"  = "The same tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
   "tscan_node_graph_marker_sets.pdf"  = "The marker set panels as a vector file.",
