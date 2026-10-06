@@ -28,6 +28,7 @@ params:
     split_by_subcluster: "5"
     subcluster_source: "prev"
     sub_k: 0
+    prev_sub_k: 0
     sub_n_clusters: 0
     sub_k_range: "5,10,15,20,25,30,40,50"
     sub_n_iterations: 10
@@ -353,28 +354,6 @@ lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
 # No cell is removed here. The space and the nodes are built on everything, and
 # any removal happens afterwards, under Removal, on the strength of what the
 # nodes turn out to express.
-parse_pairs = function(x) {
-  x = trimws(x)
-  if (!nzchar(x)) return(character(0))
-  kv = strsplit(trimws(strsplit(x, ";")[[1]]), "=")
-  setNames(vapply(kv, function(z) trimws(z[2]), character(1)),
-           vapply(kv, function(z) trimws(z[1]), character(1)))
-}
-
-anno_map  = parse_pairs(params$node_annotation)
-prev_file = as.character(params$prev_nodes_file)
-have_prev = nzchar(prev_file) && file.exists(prev_file)
-
-# read whenever it is available, because the subclustering below uses it to set
-# the number of subclusters to look for, which does not depend on any drop
-prev_nodes = NULL
-if (have_prev) {
-  prev_nodes = read.csv(prev_file, stringsAsFactors = FALSE)
-  stopifnot(all(c("barcode", "node") %in% colnames(prev_nodes)))
-  prev_nodes$node = as.character(prev_nodes$node)
-}
-
-
 comp_tab = lineage_key %>%
   dplyr::count(final_label, cell_type, library, name = "n") %>%
   tidyr::pivot_wider(names_from = library, values_from = n, values_fill = 0) %>%
@@ -426,6 +405,108 @@ datatable(lib_tab, rownames = FALSE, options = list(dom = "t"))
 ```
 
 `r n_kept = length(objs$kept_batches); paste0(format(ncol(merged), big.mark = ","), " cells from ", n_kept, " librar", if (n_kept == 1) "y" else "ies", " are kept.")`
+
+## Upstream clustering
+
+```{r}
+# Pulled from the source files rather than pasted in, so a change to 13 or to
+# scRNA_seq_functions.R shows up here without this section being edited.
+atlas_rmd = paste0(params$project_dir, "/src/",
+                   if (nzchar(params$atlas_suffix))
+                     "13b_atlas_no_technical_genes.Rmd" else
+                     "13_atlas_and_stage_correspondence.Rmd")
+fun_file  = paste0(params$project_dir, "/src/scRNA_seq_functions.R")
+for (src_path in c(atlas_rmd, fun_file))
+  if (!file.exists(src_path))
+    stop("missing ", src_path, ", which this section prints from.")
+
+# one labelled chunk of an Rmd, without its fences
+rmd_chunk = function(path, label) {
+  src  = readLines(path, warn = FALSE)
+  open = grep(paste0("^```\\{r[ ,]+", label, "[,} ]"), src)
+  if (length(open) != 1)
+    stop("expected one chunk labelled '", label, "' in ", basename(path),
+         ", found ", length(open),
+         ". The label is what this document finds the code by.")
+  shut = grep("^```[[:space:]]*$", src)
+  shut = shut[shut > open]
+  if (length(shut) == 0)
+    stop("chunk '", label, "' in ", basename(path), " is never closed.")
+  src[(open + 1):(min(shut) - 1)]
+}
+
+# one function definition from an R file, comments included. srcref rather than
+# deparse, which drops the comments and reformats what is left.
+r_function = function(path, name) {
+  ex = parse(path, keep.source = TRUE)
+  rf = attr(ex, "srcref")
+  for (i in seq_along(ex)) {
+    e = ex[[i]]
+    if (is.call(e) && length(e) >= 3L &&
+        as.character(e[[1]])[1] %in% c("<-", "=", "<<-") &&
+        identical(as.character(e[[2]])[1], name))
+      return(as.character(rf[[i]]))
+  }
+  stop("no definition of ", name, " in ", basename(path))
+}
+
+show_code = function(lines)
+  cat("```r\n", paste(lines, collapse = "\n"), "\n```\n", sep = "")
+```
+
+The clusters above were made by `r basename(atlas_rmd)`. The corrected space
+they are read into was made by `build_lineage_sce`. Neither runs here. The code
+for both is below, read out of those files while this document knits, so what
+appears is the code that ran rather than a copy of it.
+
+### The atlas correction
+
+Every library, merged with `fastMNN` over the 5,000 most variable genes.
+
+```{r, echo=FALSE, results='asis'}
+show_code(rmd_chunk(atlas_rmd, "atlas-correct"))
+```
+
+### The atlas clustering
+
+A shared nearest neighbor graph on that space, then Louvain. `k` comes from a
+subsampling sweep run by `src/run_stable_k.R` and reported in
+`r basename(atlas_rmd)`.
+
+```{r, echo=FALSE, results='asis'}
+show_code(rmd_chunk(atlas_rmd, "atlas-cluster"))
+```
+
+### The stage split
+
+Clusters failing a marker reproducibility test in both directions, with enough
+cells on each side, become two labels. `final_label` is the result, and it is
+the column this document reads its clusters from.
+
+```{r, echo=FALSE, results='asis'}
+show_code(rmd_chunk(atlas_rmd, "atlas-stage-split"))
+```
+
+### This lineage's corrected space
+
+`build_lineage_sce` takes the cells of the selected clusters and corrects them
+again on their own. Variable genes are chosen within these cells, so the space
+is not a subset of the atlas space. 18 calls the same function on the same
+cells, which is why the two methods are comparable.
+
+```{r, echo=FALSE, results='asis'}
+show_code(r_function(fun_file, "build_lineage_sce"))
+```
+
+### The stability sweep
+
+`find_stable_k` clusters independent subsamples at each `k` and scores the
+agreement between pairs of them. The atlas sweep and the subcluster sweep below
+both call it.
+
+```{r, echo=FALSE, results='asis'}
+show_code(r_function(fun_file, "find_stable_k"))
+```
 
 # Nodes
 
@@ -653,6 +734,80 @@ ggsave(p_stab, file = paste0(results_dir, "/subcluster_stability.png"),
        width = stab_w, height = 5, dpi = 300)
 ```
 
+```{r, eval=do_sweep}
+# A bare peak overstates what the sweep resolves. Neighboring k values sit
+# within a few thousandths of it, the ranking on the worst pair of subsamples
+# need not agree with the ranking on the mean, and the peak moves when the grid
+# of k values is refined. All three are reported next to the peak.
+flat_margin = 0.05
+
+sweep_read = stab_tab %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(
+    top_k     = k[which.max(mean_ari)],
+    top_ari   = max(mean_ari, na.rm = TRUE),
+    top_n     = mean_n_clusters[which.max(mean_ari)],
+    worst_k   = k[which.max(min_ari)],
+    worst_ari = max(min_ari, na.rm = TRUE),
+    n_flat    = sum(mean_ari >= max(mean_ari, na.rm = TRUE) - flat_margin,
+                    na.rm = TRUE),
+    flat_lo   = min(k[mean_ari >= max(mean_ari, na.rm = TRUE) - flat_margin]),
+    flat_hi   = max(k[mean_ari >= max(mean_ari, na.rm = TRUE) - flat_margin]),
+    .groups   = "drop")
+
+# prev_sub_k records the k the reused subclusters were fitted at, which this run
+# does not recompute and so cannot read off anything. Left at 0 the comparison
+# below is not drawn.
+prev_k = as.integer(params$prev_sub_k)
+used_read = if (prev_k > 0) {
+  stab_tab %>%
+    dplyr::filter(k == prev_k) %>%
+    dplyr::group_by(cluster) %>%
+    dplyr::summarise(used_ari = mean_ari[1], used_n = mean_n_clusters[1],
+                     .groups = "drop")
+} else NULL
+
+# A sharp peak and a flat one call for different sentences. So do a worst-case
+# best that agrees with the mean and one that does not.
+sweep_read$sentence = vapply(seq_len(nrow(sweep_read)), function(i) {
+  z = sweep_read[i, ]
+  paste0(
+    "Cluster ", z$cluster, " peaks at k = ", z$top_k,
+    " with a mean pairwise ARI of ", signif(z$top_ari, 3),
+    " over ", round(z$top_n, 1), " subclusters. ",
+    if (z$n_flat <= 1)
+      paste0("No other k scores within ", flat_margin, " of that peak. ")
+    else
+      paste0(z$n_flat - 1, " other k values, over the range ", z$flat_lo,
+             " to ", z$flat_hi, ", score within ", flat_margin, " of it. "),
+    if (identical(z$worst_k, z$top_k))
+      paste0("The worst single pair of subsamples agrees best at the same k, ",
+             "at ", signif(z$worst_ari, 3), ".")
+    else
+      paste0("The worst single pair of subsamples agrees best at k = ",
+             z$worst_k, " instead, at ", signif(z$worst_ari, 3), "."))
+}, character(1))
+
+sweep_note = paste0(
+  "The nodes are the ones from the annotated run, so no k is chosen here. ",
+  "The sweep is reported as a property of the cells. ",
+  paste(sweep_read$sentence, collapse = " "))
+
+if (!is.null(used_read) && nrow(used_read) > 0)
+  sweep_note = paste0(
+    sweep_note, " ",
+    paste0("The subclusters being reused were fitted at k = ", prev_k,
+           ", which scores ", signif(used_read$used_ari, 3),
+           " over ", round(used_read$used_n, 1), " subclusters here",
+           collapse = "; "),
+    ". That k was chosen on the corrected space of the run that fitted it. ",
+    "This sweep runs on the space built from the clusters selected here, ",
+    "which is the same space only where the same clusters were selected. ",
+    "build_lineage_sce picks its variable genes within the lineage's own ",
+    "cells, so adding or dropping a cluster moves the coordinates every ",
+    "number above is computed from.")
+```
+
 ```{r, eval=have_sweep}
 search_tab = dplyr::bind_rows(search_tabs)
 write.csv(search_tab, file = paste0(results_dir, "/subcluster_k_choice.csv"),
@@ -662,7 +817,9 @@ datatable(search_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (have_sweep) paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".") else if (!do_sweep) "" else { pk = stab_tab %>% dplyr::group_by(cluster) %>% dplyr::slice_max(mean_ari, n = 1) %>% dplyr::ungroup(); paste0("The nodes are the ones from the annotated run, so no k is chosen here. The sweep is reported as a property of the cells: ", paste0("cluster ", pk$cluster, " peaks at k = ", pk$k, " with a mean pairwise ARI of ", signif(pk$mean_ari, 3), " over ", round(pk$mean_n_clusters, 1), " subclusters", collapse = "; "), ". A low peak means no k recovers a stable partition of this cluster, whichever one is used.") }`
+`r if (have_sweep) paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".") else if (!do_sweep) "" else sweep_note`
+
+`r if (!do_sweep) "" else { mx = max(stab_tab$mean_ari, na.rm = TRUE); paste0("The sweep tops out at a mean ARI of ", signif(mx, 3), ", against the 0.9 that ", basename(atlas_rmd), " holds the atlas clustering to. ", if (mx < 0.85) "No k in the swept range recovers a sharply reproducible subdivision of these cells. That is a property of the cells rather than an argument for one k over another." else "The peak reaches that standard, so the subdivision at that k reproduces under perturbation of the cells.")}`
 
 `r if (!have_sweep) "" else if (all(is.na(search_tab$target))) "No target count is set. k is the most stable value in the sweep." else { best = search_tab %>% dplyr::group_by(cluster) %>% dplyr::summarise(top = max(mean_ari, na.rm = TRUE), got = mean_ari[chosen], tgt = target[1], .groups = "drop"); paste0("sub_n_clusters restricts the search to the k values returning ", paste(unique(best$tgt), collapse = ", "), " subclusters. ", paste0("Cluster ", best$cluster, " was fitted at mean ARI ", signif(best$got, 3), " against a best-in-sweep of ", signif(best$top, 3), collapse = "; "), ".") }`
 
@@ -2286,8 +2443,8 @@ file_notes = c(
   "node_depth_and_technical.csv"      = "The same four measures for this run's nodes.",
   "subcluster_depth_tests.csv"        = "Kruskal-Wallis of each measure across the subclusters, with the fold range in median depth.",
   "subcluster_downsample_check.csv"   = "Subclusters recomputed after downsampling every cell to a common depth, with the ARI against the original. A low ARI means the split was depth.",
-  "subcluster_stability.png"          = "Mean and worst-case pairwise ARI over the k sweep, with the subcluster count each k returns and the k used marked. Only written when subclusters are recomputed.",
-  "subcluster_stability.csv"          = "The ARI sweep over sub_k_range. Only written when subclusters are recomputed.",
+  "subcluster_stability.png"          = "Mean and worst-case pairwise ARI over the k sweep, with the subcluster count each k returns and the k used marked. Written whenever the sweep runs, which under reuse is sweep_when_reusing.",
+  "subcluster_stability.csv"          = "The ARI sweep over sub_k_range, measured on the corrected space of this run. Written whenever the sweep runs, which under reuse is sweep_when_reusing.",
   "subcluster_k_choice.csv"           = "Each candidate k with the subcluster count it returned and its ARI. Only written when subclusters are recomputed.",
   "subcluster_annotation_map.csv"     = "Every old-new subcluster pair with shared cell counts and Jaccard. Only written when subclusters are recomputed.",
   "subcluster_overlap_grid.csv"       = "The same overlap as percentages of the new subcluster, the old one and the union. Only written when subclusters are recomputed.",

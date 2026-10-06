@@ -56,11 +56,17 @@ EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
 GRAPH_LABELS="${GRAPH_LABELS:-FALSE}"
 # nodes to remove, by node id, after the Removal section reports what each
 # node expresses. Empty removes nothing.
-# "prev" reuses the annotated subclusters by barcode. "recluster" derives them
-# again, which is the only way to get the stability sweep, the k choice and the
-# old-to-new mapping. It renumbers the subclusters, so send it somewhere else
-# with RUN_SUFFIX rather than over the annotated run.
+# "prev" reuses the annotated subclusters by barcode, and still reports the
+# stability sweep. "recluster" derives the subclusters again, which is the only
+# way to get the k choice and the old-to-new mapping. It renumbers the
+# subclusters, so send it somewhere else with RUN_SUFFIX rather than over the
+# annotated run.
 SUB_SOURCE="${SUB_SOURCE:-prev}"
+# The k the reused subclusters were fitted at. Nothing in a reuse run can read
+# it off the data, so it is recorded here to be reported against the sweep.
+# 0 leaves that comparison out. The annotated run chose 20, where its own sweep
+# peaked on both mean and worst-case ARI.
+PREV_SUB_K="${PREV_SUB_K:-20}"
 DROP="${DROP:-}"
 EXTRA="${EXTRA:-neural_crest_markers_2026-09-25.csv,immediate_early_markers_2026-10-06.csv}"
 EVIDENCE="${EVIDENCE:-Dissociation response}"
@@ -162,6 +168,7 @@ Rscript -e "
                          edge_boot_cells = ${EDGE_BOOT_CELLS},
                          graph_edge_labels = ${GRAPH_LABELS},
                          subcluster_source = '${SUB_SOURCE}',
+                         prev_sub_k        = ${PREV_SUB_K},
                          drop_nodes       = '${DROP}',
                          extra_marker_file = '${EXTRA}',
                          removal_evidence_sets = '${EVIDENCE}',
