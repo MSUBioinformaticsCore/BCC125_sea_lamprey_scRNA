@@ -55,6 +55,12 @@ EDGE_BOOT="${EDGE_BOOT:-100}"
 EDGE_BOOT_CELLS="${EDGE_BOOT_CELLS:-100}"
 GRAPH_LABELS="${GRAPH_LABELS:-FALSE}"
 DROP="${DROP:-}"
+# A run that changes the tree keeps its own html and results directory, so two
+# settings can sit side by side. Defaults to "_outgroup" when OUTGROUP=TRUE.
+if [[ -z "${RUN_SUFFIX+x}" ]]; then
+  if [[ "${OUTGROUP}" == "TRUE" ]]; then RUN_SUFFIX="_outgroup"; else RUN_SUFFIX=""; fi
+fi
+
 OUT_DIR="${PROJECT_DIR}/html"
 
 # unset rather than absent means "run without the annotation and the drops"
@@ -115,12 +121,13 @@ Rscript -e "
   rmarkdown::render(
     input         = '${PROJECT_DIR}/src/17_germ_pseudotime_tscan.Rmd',
     output_dir    = '${OUT_DIR}',
-    output_file   = '17_germ_pseudotime_tscan_${LINEAGE}.html',
+    output_file   = '17_germ_pseudotime_tscan_${LINEAGE}${RUN_SUFFIX}.html',
     knit_root_dir = '${PROJECT_DIR}',
     params        = list(project_dir     = '${PROJECT_DIR}',
                          results_date    = '${RESULTS_DATE}',
                          lineage         = '${LINEAGE}',
                          atlas_suffix    = '${ATLAS_SUFFIX}',
+                         run_suffix      = '${RUN_SUFFIX}',
                          dist_method     = '${DIST}',
                          mnn_k           = ${MNN_K},
                          outgroup        = ${OUTGROUP},
@@ -135,8 +142,8 @@ Rscript -e "
 
 echo
 echo "finished: $(date)"
-echo "html:     ${OUT_DIR}/17_germ_pseudotime_tscan_${LINEAGE}.html"
-echo "results:  ${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_${LINEAGE}${ATLAS_SUFFIX}"
+echo "html:     ${OUT_DIR}/17_germ_pseudotime_tscan_${LINEAGE}${RUN_SUFFIX}.html"
+echo "results:  ${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_${LINEAGE}${ATLAS_SUFFIX}${RUN_SUFFIX}"
 echo
 echo "resource use for this job:"
 seff "${SLURM_JOB_ID}" || true
