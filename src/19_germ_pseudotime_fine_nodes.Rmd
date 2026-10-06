@@ -227,6 +227,11 @@ all_sets = if (have_extra) {
                        dplyr::mutate(loc_id = trimws(loc_id), origin = "extra"))))
 } else s1_sets
 
+# The sets that justify a removal are drawn on their own under Removal, so they
+# are left out of the all-sets plot rather than drawn twice.
+ev_sets = trimws(strsplit(as.character(params$removal_evidence_sets), ",")[[1]])
+ev_sets = intersect(ev_sets[nzchar(ev_sets)], unique(all_sets$CellTypeMarkerSet))
+
 set_origin = all_sets %>%
   dplyr::distinct(CellTypeMarkerSet, origin) %>%
   dplyr::group_by(CellTypeMarkerSet) %>%
@@ -621,9 +626,14 @@ if (!is.null(depth_tests) && nrow(depth_tests) > 0) {
 ## Node identity
 
 Every node is scored against **all** the marker sets available, somatic ones
-included, rather than only the germ sets the root rule uses. No cell is removed
-in this run, so every cell of the lineage is scored here. A node scoring high on
-a somatic set and low on every germ set is not a germ cell state.
+included, rather than only the germ sets the root rule uses. Every cell is still
+here: nothing has been removed at this point, and this table is what any removal
+below is decided on. A node scoring high on a somatic set and low on every germ
+set is not a germ cell state.
+
+The sets named by `removal_evidence_sets` are left out of the figure and drawn
+on their own under Removal. They are still in the table and in
+`node_identity_scores.csv`.
 
 ```{r}
 if (nrow(set_containment) > 0)
@@ -656,24 +666,31 @@ id_table = id_scores %>%
 write.csv(id_table, file = paste0(results_dir, "/node_identity_scores.csv"),
           row.names = FALSE)
 
+# one row per gene per set, so the height follows the gene count. Fixed, the
+# facets compress as sets are added.
+id_rows = nrow(dplyr::distinct(
+  all_sets %>% dplyr::filter(!CellTypeMarkerSet %in% ev_sets),
+  CellTypeMarkerSet, loc_id))
+id_h    = max(9, round(0.17 * id_rows + 3))
+
 datatable(id_table, rownames = FALSE, filter = "top",
           options = list(pageLength = 20, scrollX = TRUE))
 ```
 
 `r if (length(extra_missing) > 0) paste0("**Not found in data/: ", paste(extra_missing, collapse = ", "), ".** Those sets are not scored.") else ""`
 
-```{r, fig.width=11, fig.height=13}
+```{r, fig.width=11, fig.height=id_h}
 id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
 write.csv(id_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
           row.names = FALSE)
 
 p_identity = marker_bubble_plot(
-  id_bubble, node_levels,
+  id_bubble %>% dplyr::filter(!set %in% ev_sets), node_levels,
   title = "Marker expression by node, every set")
 
 p_identity
 ggsave(p_identity, file = paste0(results_dir, "/node_identity_scores.png"),
-       width = 11, height = 13, dpi = 300)
+       width = 11, height = id_h, dpi = 300)
 ```
 
 # Removal
@@ -688,10 +705,7 @@ the AP-1 and immediate-early genes that enzymatic digestion induces, so a node
 carrying them is defined by how the tissue was handled rather than by the
 animal. `drop_nodes` names the nodes to remove, by node, after reading it.
 
-```{r, fig.width=9, fig.height=7}
-ev_sets = trimws(strsplit(as.character(params$removal_evidence_sets), ",")[[1]])
-ev_sets = intersect(ev_sets[nzchar(ev_sets)], unique(all_sets$CellTypeMarkerSet))
-
+```{r}
 drop_nodes = trimws(strsplit(as.character(params$drop_nodes), ",")[[1]])
 drop_nodes = drop_nodes[nzchar(drop_nodes)]
 absent = setdiff(drop_nodes, node_levels)
@@ -702,6 +716,13 @@ if (length(absent) > 0)
 # the nodes being removed first on the axis, so the comparison is immediate
 ev_levels = c(drop_nodes, setdiff(node_levels, drop_nodes))
 
+ev_rows = nrow(dplyr::distinct(
+  all_sets %>% dplyr::filter(CellTypeMarkerSet %in% ev_sets),
+  CellTypeMarkerSet, loc_id))
+ev_h = max(5, round(0.19 * ev_rows + 2))
+```
+
+```{r, fig.width=9, fig.height=ev_h}
 if (length(ev_sets) > 0) {
   p_ev = marker_bubble_plot(
     id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,
@@ -710,7 +731,7 @@ if (length(ev_sets) > 0) {
       paste0("removed: ", paste(drop_nodes, collapse = ", ")))
   print(p_ev)
   ggsave(p_ev, file = paste0(results_dir, "/removal_evidence_bubble.png"),
-         width = 9, height = 7, dpi = 300)
+         width = 9, height = ev_h, dpi = 300)
 }
 ```
 

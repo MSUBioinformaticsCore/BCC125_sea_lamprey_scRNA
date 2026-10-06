@@ -237,6 +237,11 @@ all_sets = if (have_extra) {
                        dplyr::mutate(loc_id = trimws(loc_id), origin = "extra"))))
 } else s1_sets
 
+# The sets that justify a removal are drawn on their own under Removal, so they
+# are left out of the all-sets plot rather than drawn twice.
+ev_sets = trimws(strsplit(as.character(params$removal_evidence_sets), ",")[[1]])
+ev_sets = intersect(ev_sets[nzchar(ev_sets)], unique(all_sets$CellTypeMarkerSet))
+
 set_origin = all_sets %>%
   dplyr::distinct(CellTypeMarkerSet, origin) %>%
   dplyr::group_by(CellTypeMarkerSet) %>%
@@ -1115,7 +1120,11 @@ cat(
 included, rather than only the germ sets the root rule uses. Every cell is still
 here: nothing has been removed at this point, and this table is what any removal
 below is decided on. A node scoring high on a somatic set and low on every germ
-set is not a germ cell state.\n")
+set is not a germ cell state.
+
+The sets named by `removal_evidence_sets` are left out of the figure and drawn
+on their own under Removal. They are still in the table and in
+node_identity_scores.csv.\n")
 ```
 
 ```{r}
@@ -1149,6 +1158,13 @@ id_table = id_scores %>%
 write.csv(id_table, file = paste0(results_dir, "/node_identity_scores.csv"),
           row.names = FALSE)
 
+# one row per gene per set, so the height follows the gene count. Fixed, the
+# facets compress as sets are added.
+id_rows = nrow(dplyr::distinct(
+  all_sets %>% dplyr::filter(!CellTypeMarkerSet %in% ev_sets),
+  CellTypeMarkerSet, loc_id))
+id_h    = max(9, round(0.17 * id_rows + 3))
+
 datatable(id_table, rownames = FALSE, filter = "top",
           options = list(pageLength = 20))
 ```
@@ -1161,19 +1177,20 @@ The plot below breaks the set scores back out into the genes behind them. A set
 scoring high on the strength of one gene reads differently from a set whose genes
 are expressed together. Only the per-gene view separates the two.
 
-```{r, fig.width=11, fig.height=11}
+```{r, fig.width=11, fig.height=id_h}
 id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
 
 write.csv(id_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
           row.names = FALSE)
 
-p_id = marker_bubble_plot(id_bubble, node_levels,
+p_id = marker_bubble_plot(id_bubble %>% dplyr::filter(!set %in% ev_sets),
+                          node_levels,
                           title = "Marker expression by node")
 
 p_id
 
 ggsave(p_id, file = paste0(results_dir, "/node_identity_scores.png"),
-       width = 11, height = 11, dpi = 300)
+       width = 11, height = id_h, dpi = 300)
 ```
 
 # Removal
@@ -1199,10 +1216,7 @@ animal. That is a property of the protocol, which is why it is a reason to
 remove a node and the annotation is not. `drop_nodes` names what to remove,
 by node, after reading it.
 
-```{r, fig.width=9, fig.height=7}
-ev_sets = trimws(strsplit(as.character(params$removal_evidence_sets), ",")[[1]])
-ev_sets = intersect(ev_sets[nzchar(ev_sets)], unique(all_sets$CellTypeMarkerSet))
-
+```{r}
 drop_nodes = trimws(strsplit(as.character(params$drop_nodes), ",")[[1]])
 drop_nodes = drop_nodes[nzchar(drop_nodes)]
 absent = setdiff(drop_nodes, node_levels)
@@ -1212,6 +1226,13 @@ if (length(absent) > 0)
 
 ev_levels = c(drop_nodes, setdiff(node_levels, drop_nodes))
 
+ev_rows = nrow(dplyr::distinct(
+  all_sets %>% dplyr::filter(CellTypeMarkerSet %in% ev_sets),
+  CellTypeMarkerSet, loc_id))
+ev_h = max(5, round(0.19 * ev_rows + 2))
+```
+
+```{r, fig.width=9, fig.height=ev_h}
 if (length(ev_sets) > 0) {
   p_ev = marker_bubble_plot(
     id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,
@@ -1220,7 +1241,7 @@ if (length(ev_sets) > 0) {
       paste0("removed: ", paste(drop_nodes, collapse = ", ")))
   print(p_ev)
   ggsave(p_ev, file = paste0(results_dir, "/removal_evidence_bubble.png"),
-         width = 9, height = 7, dpi = 300)
+         width = 9, height = ev_h, dpi = 300)
 }
 ```
 
