@@ -31,6 +31,7 @@ params:
     sub_n_clusters: 0
     sub_k_range: "5,10,15,20,25,30,40,50"
     sub_n_iterations: 10
+    sweep_when_reusing: TRUE
     root_node: ""
     female_root_node: ""
     male_root_node: "Spermatogonia"
@@ -448,6 +449,13 @@ if (reuse_sub && !(nzchar(prev_src) && file.exists(prev_src)))
        "or set subcluster_source to 'recluster'.")
 
 have_sweep = have_split && !reuse_sub
+
+# The sweep measures how reproducibly each k recovers the same partition. That
+# is a property of the cells and the corrected space rather than of the
+# partition finally used, so it can be reported while the nodes still come from
+# the annotated run. Under reuse no k is chosen, because none is needed.
+do_sweep = have_split &&
+  (!reuse_sub || isTRUE(as.logical(params$sweep_when_reusing)))
 ```
 
 `r if (!have_split) paste0("The ", length(clusters), " selected clusters are the nodes.") else if (reuse_sub) paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " enter the tree as the subclusters of ", basename(prev_src), ", and every other cluster is one node. No cell is dropped from these clusters, so that assignment covers all of them and there is nothing to recompute. Deriving new subclusters here would produce a different partition, because this lineage's corrected space no longer holds the same cells, and the collaborators' labels would then have to be matched onto it. Taking the groups they were assigned to avoids that entirely. The subclusters are a partition of the earlier space carried forward; the centroids, the tree and the ordering are all computed in the current one.") else paste0("Cluster(s) ", paste(split_clusters, collapse = ", "), " are subclustered in this lineage's corrected space, using only that cluster's cells, and every other cluster is one node. k is the most reproducible value in a subsampling stability sweep that gives at least two subclusters. Setting sub_n_clusters restricts the search to the k values returning that many subclusters, and the most reproducible of those is taken. The sub_k parameter overrides the sweep. The space depends on the lineage, so cluster 5 subclusters from the female and all runs are computed separately and need not match.")`
@@ -492,7 +500,7 @@ datatable(reuse_tab, rownames = FALSE, options = list(pageLength = 15))
 
 `r if (!reuse_sub) "" else paste0("Reused ", nrow(reuse_tab), " subcluster(s) from ", basename(prev_src), ", covering ", format(sum(reuse_tab$n_cells), big.mark = ","), " cells. No stability sweep is run and no subcluster is recomputed.")`
 
-```{r, eval=have_sweep}
+```{r, eval=do_sweep}
 k_range = as.integer(trimws(strsplit(as.character(params$sub_k_range), ",")[[1]]))
 stopifnot(length(k_range) > 0, !anyNA(k_range))
 
@@ -529,6 +537,12 @@ for (cl in split_clusters) {
   tab = dplyr::bind_rows(lapply(stab, function(z)
     data.frame(cluster = cl, k = z$k, mean_n_clusters = z$mean_n_clusters,
                mean_ari = z$mean_ari, min_ari = z$min_ari)))
+
+  stab_tabs[[cl]] = tab
+
+  # Everything below picks a k and fits it. Under reuse the nodes already exist,
+  # so the sweep is reported and nothing is fitted.
+  if (reuse_sub) next
 
   eligible = tab %>% dplyr::filter(mean_n_clusters >= 2, !is.na(mean_ari))
 
@@ -585,8 +599,6 @@ for (cl in split_clusters) {
   search_tabs[[cl]] = search
 
   sub_assign[[cl]] = fits[[as.character(k_cl)]]
-
-  stab_tabs[[cl]] = tab
   chosen_ks[cl]   = k_cl
 }
 
@@ -594,6 +606,7 @@ stab_tab = dplyr::bind_rows(stab_tabs)
 write.csv(stab_tab, file = paste0(results_dir, "/subcluster_stability.csv"),
           row.names = FALSE)
 
+# empty under reuse, where no k is chosen. geom_vline then draws nothing.
 chosen_df = data.frame(cluster = names(chosen_ks),
                        k = as.integer(chosen_ks), stringsAsFactors = FALSE)
 stab_w = max(6, 2.6 * dplyr::n_distinct(stab_tab$cluster) + 2)
@@ -602,7 +615,7 @@ datatable(stab_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-```{r, fig.width=stab_w, fig.height=5, eval=have_sweep}
+```{r, fig.width=if (exists("stab_w")) stab_w else 7, fig.height=5, eval=do_sweep}
 # Both halves of the choice in one figure: how reproducible each k is, and how
 # many subclusters it returns. A k with a high ARI that returns two subclusters
 # is reproducible and uninformative.
@@ -626,7 +639,9 @@ p_stab = ggplot(stab_long, aes(x = k, y = value, linetype = series)) +
                                    "worst iteration" = "22")) +
   labs(x = "k", y = NULL, linetype = NULL,
        title = "Subclustering stability over the k sweep",
-       subtitle = "dashed vertical line marks the k used") +
+       subtitle = if (nrow(chosen_df) > 0)
+         "dashed vertical line marks the k used" else
+         "the nodes come from the annotated run, so no k is chosen here") +
   theme_bw(base_size = 9) +
   theme(strip.placement = "outside", strip.background = element_blank(),
         legend.position = "bottom")
@@ -645,7 +660,7 @@ datatable(search_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (!have_sweep) "" else paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".")`
+`r if (have_sweep) paste0("Subclustered ", paste0("cluster ", names(chosen_ks), " at k = ", chosen_ks, collapse = "; "), if (as.integer(params$sub_k) > 0) ", set by the sub_k parameter." else ".") else if (!do_sweep) "" else { pk = stab_tab %>% dplyr::group_by(cluster) %>% dplyr::slice_max(mean_ari, n = 1) %>% dplyr::ungroup(); paste0("The nodes are the ones from the annotated run, so no k is chosen here. The sweep is reported as a property of the cells: ", paste0("cluster ", pk$cluster, " peaks at k = ", pk$k, " with a mean pairwise ARI of ", signif(pk$mean_ari, 3), " over ", round(pk$mean_n_clusters, 1), " subclusters", collapse = "; "), ". A low peak means no k recovers a stable partition of this cluster, whichever one is used.") }`
 
 `r if (!have_sweep) "" else if (all(is.na(search_tab$target))) "No target count is set. k is the most stable value in the sweep." else { best = search_tab %>% dplyr::group_by(cluster) %>% dplyr::summarise(top = max(mean_ari, na.rm = TRUE), got = mean_ari[chosen], tgt = target[1], .groups = "drop"); paste0("sub_n_clusters restricts the search to the k values returning ", paste(unique(best$tgt), collapse = ", "), " subclusters. ", paste0("Cluster ", best$cluster, " was fitted at mean ARI ", signif(best$got, 3), " against a best-in-sweep of ", signif(best$top, 3), collapse = "; "), ".") }`
 
@@ -1215,7 +1230,7 @@ The plot below breaks the set scores back out into the genes behind them. A set
 scoring high on the strength of one gene reads differently from a set whose genes
 are expressed together. Only the per-gene view separates the two.
 
-```{r, fig.width=11, fig.height=id_h}
+```{r, fig.width=11, fig.height=if (exists("id_h")) id_h else 11}
 id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
 
 write.csv(id_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
@@ -1270,7 +1285,7 @@ ev_rows = nrow(dplyr::distinct(
 ev_h = max(5, round(0.19 * ev_rows + 2))
 ```
 
-```{r, fig.width=9, fig.height=ev_h}
+```{r, fig.width=9, fig.height=if (exists("ev_h")) ev_h else 7}
 if (length(ev_sets) > 0) {
   p_ev = marker_bubble_plot(
     id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,

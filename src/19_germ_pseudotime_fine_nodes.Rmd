@@ -679,7 +679,7 @@ datatable(id_table, rownames = FALSE, filter = "top",
 
 `r if (length(extra_missing) > 0) paste0("**Not found in data/: ", paste(extra_missing, collapse = ", "), ".** Those sets are not scored.") else ""`
 
-```{r, fig.width=11, fig.height=id_h}
+```{r, fig.width=11, fig.height=if (exists("id_h")) id_h else 13}
 id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
 write.csv(id_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
           row.names = FALSE)
@@ -722,7 +722,7 @@ ev_rows = nrow(dplyr::distinct(
 ev_h = max(5, round(0.19 * ev_rows + 2))
 ```
 
-```{r, fig.width=9, fig.height=ev_h}
+```{r, fig.width=9, fig.height=if (exists("ev_h")) ev_h else 7}
 if (length(ev_sets) > 0) {
   p_ev = marker_bubble_plot(
     id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,

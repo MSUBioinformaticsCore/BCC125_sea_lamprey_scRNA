@@ -1603,7 +1603,7 @@ if (have_ieg && nrow(ieg_genes) > 0) {
 
 `r if (!have_ieg) paste0("**", params$ieg_marker_file, " was not found in data/.** The check is skipped.") else if (is.null(ieg_tab)) "None of the immediate-early genes is in the data." else { top = ieg_tab[1, ]; nxt = ieg_tab[2, ]; paste0(nrow(ieg_genes), " of the immediate-early genes are in the data. The highest scoring cluster is ", top$cluster, " at ", top$mean_logexpr, " mean log expression, detected in ", top$pct_detected, " percent of its cells on average, against ", nxt$mean_logexpr, " for ", nxt$cluster, ". A cluster well clear of the rest here is one to look at before it is given a cell type.") }`
 
-```{r, fig.width=10, fig.height=ieg_h}
+```{r, fig.width=10, fig.height=if (exists("ieg_h")) ieg_h else 6}
 if (!is.null(ieg_tab)) {
   p_ieg = ggplot(ieg_bubble,
                  aes(x = cluster, y = WangGeneID,
