@@ -23,6 +23,7 @@ params:
     go_pval: 0.01
     germ_clusters: "5,15,16,17,18"
     germ_marker_lineage: all
+    germ_marker_suffix: "_recluster_remove_IEG"
     n_signature_genes: 100
     cores: 1
 ---
@@ -622,7 +623,7 @@ datatable(rep_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
                                            paging = FALSE))
 ```
 
-`r if (have_bulk) { r_m = sd(ours$ours_male) / sd(und_diff); excess = r_m / null_ratio; if (excess < 1.25) paste0("**The stage effect is barely larger than library noise.** The male ratio is ", signif(r_m, 3), " against ", signif(null_ratio, 3), " expected with no stage effect at all, an excess of ", signif(excess, 3), " fold. Library-level variation accounts for most of what is being called a stage effect, and a failure to reproduce in Yasmin would follow from that alone.") else paste0("The male ratio is ", signif(r_m, 3), " against ", signif(null_ratio, 3), " expected with no stage effect, an excess of ", signif(excess, 3), " fold. The stage effect is larger than library noise.") } else ""`
+`r if (have_bulk) { r_m = sd(ours$ours_male) / sd(und_diff); r_f = sd(ours$ours_female) / sd(und_diff); e_m = r_m / null_ratio; e_f = r_f / null_ratio; weak = c("male", "female")[c(e_m < 1.25, e_f < 1.25)]; nums = paste0("The male ratio is ", signif(r_m, 3), " and the female ratio ", signif(r_f, 3), ", against ", signif(null_ratio, 3), " expected with no stage effect at all. That is an excess of ", signif(e_m, 3), " fold in the males and ", signif(e_f, 3), " fold in the females. "); if (length(weak) == 0) paste0(nums, "Both stage effects are larger than library noise.") else paste0("**The ", paste(weak, collapse = " and "), if (length(weak) == 2) " stage effects are" else " stage effect is", " barely larger than library noise.** ", nums, "Library-level variation accounts for most of what is being called a stage effect there, and a failure to reproduce in Yasmin would follow from that alone.") } else ""`
 
 ## What is in the top genes?
 
@@ -649,7 +650,7 @@ datatable(top_counts %>% mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (have_bulk) { pc = top_counts$pct_below_cutoff[1]; if (pc > 25) paste0("**", signif(pc, 3), "% of the top male genes fall below the count cutoff.** The unfiltered ranking is largely a low-count list, and the filtered results below are the ones to read.") else paste0(signif(pc, 3), "% of the top male genes fall below the count cutoff, so the unfiltered ranking is not dominated by low-count genes.") } else ""`
+`r if (have_bulk) { pick = function(s) top_counts$pct_below_cutoff[top_counts$set == paste0("top ", top_probe, ", ", s)]; pm = pick("male"); pf = pick("female"); hi = c("male", "female")[c(pm > 25, pf > 25)]; nums = paste0(signif(pm, 3), "% of the top male genes and ", signif(pf, 3), "% of the top female genes fall below the count cutoff. "); if (length(hi) == 0) paste0(nums, "Neither unfiltered ranking is dominated by low-count genes.") else paste0("**The top ", paste(hi, collapse = " and "), if (length(hi) == 2) " lists are" else " list is", " largely low-count.** ", nums, "The filtered results below are the ones to read.") } else ""`
 
 # The comparison
 
@@ -1312,7 +1313,7 @@ datatable(overlap_tab %>%
           rownames = FALSE, filter = "top", options = list(pageLength = 16))
 ```
 
-`r if (!have_bulk) "" else { m = overlap_tab %>% dplyr::filter(matched); paste0("Of the ", nrow(overlap_tab), " pairings, ", nrow(m), " match on sex and direction. Their overlaps run from ", min(m$overlap), " to ", max(m$overlap), " genes against an expectation of about ", signif(mean(m$expected), 2), ", and ", sum(m$fdr < 0.05), " of them reach FDR < 0.05. The intersecting genes are in top_gene_list_overlap_genes.csv.") }`
+`r if (!have_bulk) "" else { m = overlap_tab %>% dplyr::filter(matched); per = m %>% dplyr::group_by(sex_ours, dir_ours) %>% dplyr::summarise(lo = min(overlap), hi = max(overlap), .groups = "drop"); paste0("Of the ", nrow(overlap_tab), " pairings, ", nrow(m), " match on sex and direction, and ", sum(m$fdr < 0.05), " of those reach FDR < 0.05. Against an expectation of about ", signif(mean(m$expected), 2), " genes, the overlaps are ", paste0(per$sex_ours, " ", per$dir_ours, " ", ifelse(per$lo == per$hi, as.character(per$lo), paste0(per$lo, " to ", per$hi)), collapse = "; "), ". The intersecting genes are in top_gene_list_overlap_genes.csv.") }`
 
 ```{r, eval=have_bulk, fig.width=12, fig.height=8}
 # Hand-built rather than UpSetR or ComplexUpset, so the document takes no new
@@ -1572,17 +1573,20 @@ Two marker sources are scored side by side, because they measure different
 things. *Atlas markers*, from `13_atlas_and_stage_correspondence.Rmd`, compare
 each cluster against every other cluster in the atlas. Most of those clusters
 are somatic, so a gene expressed across germ cells and absent from soma marks
-every germ cluster at once. *Pseudotime markers*, from
-`17_germ_pseudotime_tscan.Rmd`, compare node against node within the germ
-compartment alone, where the shared germ cell program is already divided out.
+every germ cluster at once. *Germ subcluster markers*, from
+`17_germ_pseudotime_tscan.Rmd`, compare subcluster against subcluster within the
+germ compartment alone, where the shared germ cell program is already divided
+out. Neither set is pseudotime-associated; both are markers of a group of cells
+against other groups.
 
 ```{r}
 marker_sources = list(
-  pseudotime = paste0(params$project_dir, "/results/", params$results_date,
-                      "_pseudotime_tscan_",
-                      as.character(params$germ_marker_lineage),
-                      "/subcluster_marker_genes.csv"),
-  atlas      = paste0(atlas_dir, "/cluster_marker_genes.csv"))
+  `germ subclusters` = paste0(params$project_dir, "/results/",
+                              params$results_date, "_pseudotime_tscan_",
+                              as.character(params$germ_marker_lineage),
+                              as.character(params$germ_marker_suffix),
+                              "/subcluster_marker_genes.csv"),
+  atlas              = paste0(atlas_dir, "/cluster_marker_genes.csv"))
 
 src_found       = vapply(marker_sources, file.exists, logical(1))
 have_cl_markers = have_bulk && any(src_found)
@@ -1596,8 +1600,13 @@ have_cl_markers = have_bulk && any(src_found)
 n_sig = as.integer(params$n_signature_genes)
 
 read_markers = function(src) {
-  tab = read.csv(marker_sources[[src]], stringsAsFactors = FALSE)
-  if (src == "pseudotime") {
+  # The id column is read as character or 5.1 and 5.10 both come back as 5.1.
+  # read.csv converts a column of 5.1, 5.2, 15, 16 to numeric without complaint,
+  # and the collision is silent.
+  id_col = if (src == "germ subclusters") "node" else "cluster"
+  tab = read.csv(marker_sources[[src]], stringsAsFactors = FALSE,
+                 colClasses = setNames("character", id_col))
+  if (src == "germ subclusters") {
     stopifnot(all(c("Gene", "node", "meanLogFC") %in% colnames(tab)))
     tab$group = as.character(tab$node)
   } else {
@@ -1628,7 +1637,7 @@ sig = germ_markers %>%
   dplyr::ungroup()
 ```
 
-`r if (have_cl_markers) paste0("Signatures are the top ", n_sig, " markers per group by mean log fold change, kept only where the gene is measurable in the Yasmin series.") else ""`
+`r if (have_cl_markers) paste0("Signatures are the top ", n_sig, " markers per group by mean log fold change, kept only where the gene is measurable in the Yasmin series.", if ("germ subclusters" %in% names(src_found)[src_found]) paste0(" The germ subclusters come from ", basename(dirname(marker_sources[["germ subclusters"]])), ", so the groups are that run's subclusters and anything it removed is absent: ", paste(sort(unique(germ_markers$group[germ_markers$source == "germ subclusters"])), collapse = ", "), ".") else "") else ""`
 
 ```{r, eval=have_cl_markers}
 # Each gene is standardized across the 28 samples first, so a signature score
@@ -1702,7 +1711,7 @@ ggsave(p_sex, file = paste0(results_dir, "/germ_signature_sex.png"),
        width = 11, height = 7, dpi = 300)
 ```
 
-`r if (!have_cl_markers) "" else { w = sex_tab %>% dplyr::filter(difference > 0); paste0("Scores are averages of genes standardized across all 28 samples, so zero is the series mean rather than no expression. ", nrow(w), " of ", nrow(sex_tab), " signatures score higher in the mid males. A signature whose two points nearly coincide is not reading identity, whatever it was built from.") }`
+`r if (!have_cl_markers) "" else { n_m = sum(sex_tab$difference > 0); n_f = sum(sex_tab$difference < 0); paste0("Scores are averages of genes standardized across all 28 samples, so zero is the series mean rather than no expression. Of ", nrow(sex_tab), " signatures, ", n_m, " score higher in the mid males and ", n_f, " higher in the mid females. A signature whose two points nearly coincide is not reading identity, whatever it was built from.") }`
 
 
 # Full gene table

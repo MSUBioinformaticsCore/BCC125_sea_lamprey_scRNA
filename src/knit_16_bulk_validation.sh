@@ -16,7 +16,7 @@
 #   - results/<date>_no_doublets/all.sce.Rds, for the pseudobulk
 #   - data/yasmin_PRJNA749754_sample_groups.csv, the per-animal records
 #   - results/<date>_atlas/cluster_marker_genes.csv, from 13, and
-#     results/<date>_pseudotime_tscan_<lineage>/subcluster_marker_genes.csv,
+#     results/<date>_pseudotime_tscan_<lineage><GERM_SUFFIX>/subcluster_marker_genes.csv,
 #     from 17, for the sex specificity section; it skips without both
 #
 # The slow step is the label permutation: six contrasts times N_PERM edgeR
@@ -103,7 +103,15 @@ esac
 
 CLMARKERS="${PROJECT_DIR}/results/${RESULTS_DATE}_atlas/cluster_marker_genes.csv"
 [[ -f "${CLMARKERS}" ]] || \
-  echo "note: ${CLMARKERS} not found; the sex specificity section will be skipped."
+  echo "note: ${CLMARKERS} not found; that marker source will be skipped."
+
+# Which pseudotime run the germ subcluster markers come from. The default is
+# the reclustered run with the dissociation node removed, so its subclusters
+# are the ones scored and that node is absent.
+GERM_SUFFIX="${GERM_SUFFIX:-_recluster_remove_IEG}"
+SUBMARKERS="${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_all${GERM_SUFFIX}/subcluster_marker_genes.csv"
+[[ -f "${SUBMARKERS}" ]] || \
+  echo "note: ${SUBMARKERS} not found; that marker source will be skipped."
 
 GENOME_DIR="${GENOME_DIR:-/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus}"
 GAF="${GENOME_DIR}/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf"
@@ -144,6 +152,7 @@ Rscript -e "
                          n_perm_labels        = ${N_PERM},
                          n_boot               = ${N_BOOT},
                          min_pseudobulk_count = ${MIN_PB},
+                         germ_marker_suffix   = '${GERM_SUFFIX}',
                          genome_dir           = '${GENOME_DIR}',
                          cores                = ${CORES}),
     envir         = new.env()
