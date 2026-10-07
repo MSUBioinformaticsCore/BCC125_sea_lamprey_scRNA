@@ -15,9 +15,9 @@
 #   - the nf-core/rnaseq gene matrix for the Yasmin reads, under NFCORE_DIR
 #   - results/<date>_no_doublets/all.sce.Rds, for the pseudobulk
 #   - data/yasmin_PRJNA749754_sample_groups.csv, the per-animal records
-#   - data/<marker_file>, optional; the composition section skips without it
-#   - results/<date>_atlas/cluster_marker_genes.csv, from 13, for the germ
-#     cell signature section; that section skips without it
+#   - results/<date>_atlas/cluster_marker_genes.csv, from 13, and
+#     results/<date>_pseudotime_tscan_<lineage>/subcluster_marker_genes.csv,
+#     from 17, for the sex specificity section; it skips without both
 #
 # The slow step is the label permutation: six contrasts times N_PERM edgeR
 # refits, about 1,200 fits at the default 200. Those fits run in parallel across
@@ -45,14 +45,12 @@ export R_LIBS_SITE="/opt/software-current/2023.06/x86_64/generic/software/R-bund
 PROJECT_DIR="/mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA"
 RESULTS_DATE="${RESULTS_DATE:-20260813}"
 NFCORE_DIR="${NFCORE_DIR:-/mnt/research/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA/results/yasmin_nfcore}"
-MARKER_FILE="${MARKER_FILE:-canonical_markers_S1_only_2026-08-14.csv}"
 # Which group assignment to use. group_suppT1labels follows Supplementary
 # Table 1 and the main text's description of mid males; group_textcounts
 # reproduces the group sizes printed in the text. They differ for two males.
 GROUP_COL="${GROUP_COL:-group_suppT1labels}"
 N_PERM="${N_PERM:-200}"
 N_BOOT="${N_BOOT:-2000}"
-N_RAND="${N_RAND:-2000}"
 MIN_PB="${MIN_PB:-10}"
 CORES="${SLURM_CPUS_PER_TASK:-1}"
 OUT_DIR="${PROJECT_DIR}/html"
@@ -103,13 +101,9 @@ case "${FOUND}" in
      echo "      The transcript-length correction will be absent." ;;
 esac
 
-MARKERS="${PROJECT_DIR}/data/${MARKER_FILE}"
-[[ -f "${MARKERS}" ]] || \
-  echo "note: ${MARKERS} not found; the composition section will be skipped."
-
 CLMARKERS="${PROJECT_DIR}/results/${RESULTS_DATE}_atlas/cluster_marker_genes.csv"
 [[ -f "${CLMARKERS}" ]] || \
-  echo "note: ${CLMARKERS} not found; the germ signature section will be skipped."
+  echo "note: ${CLMARKERS} not found; the sex specificity section will be skipped."
 
 GENOME_DIR="${GENOME_DIR:-/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus}"
 GAF="${GENOME_DIR}/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf"
@@ -146,11 +140,9 @@ Rscript -e "
     params        = list(project_dir          = '${PROJECT_DIR}',
                          results_date         = '${RESULTS_DATE}',
                          nfcore_dir           = '${NFCORE_DIR}',
-                         marker_file          = '${MARKER_FILE}',
                          group_column         = '${GROUP_COL}',
                          n_perm_labels        = ${N_PERM},
                          n_boot               = ${N_BOOT},
-                         n_rand_sets          = ${N_RAND},
                          min_pseudobulk_count = ${MIN_PB},
                          genome_dir           = '${GENOME_DIR}',
                          cores                = ${CORES}),
