@@ -123,7 +123,7 @@ fi
 # fail before the knit rather than partway through
 Rscript -e "
   need = c('rmarkdown','tidyverse','SingleCellExperiment','edgeR','patchwork',
-           'ggrepel','DT','Matrix')
+           'ggrepel','DT','Matrix','fgsea')
   miss = Filter(function(p) !requireNamespace(p, quietly = TRUE), need)
   if (length(miss) > 0) {
     message('missing R packages: ', paste(miss, collapse = ', ')); quit(status = 1)
