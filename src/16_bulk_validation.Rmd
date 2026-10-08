@@ -902,6 +902,11 @@ trend_perm = function(score_vec, ours_col, seed) {
 perm_file = paste0(Robject_out_dir, "/label_permutation_null.Rds")
 perm_sig  = list(n_perm  = n_perm_labels,
                  top_n   = top_ns[1],
+                 # which genes each permutation is scored on. Without this a
+                 # change to the selection rule reuses a null built on a
+                 # different gene set, and nothing says so.
+                 top_rule = "top_both, n each way",
+                 stat    = "spearman rho and percent same sign",
                  n_genes = nrow(cmp),
                  n_well  = sum(cmp$well_measured),
                  min_pb  = min_pb,
@@ -1083,30 +1088,31 @@ agreement_figure = function(axes, ylab, what) {
   # genes moving each way there is the background the matching half of our set
   # has to beat, and it is not 50 percent. Up and down are kept apart because the two backgrounds
   # are complements and a combined count would cancel them.
-  bg = vapply(axes, function(ax) {
+  pool = vapply(axes, function(ax) {
     v = cmp[cmp$well_measured, ][[axis_cols[[ax]][["yas"]]]]
-    mean(v > 0, na.rm = TRUE)
-  }, numeric(1))
+    c(n = sum(is.finite(v)), up = sum(v > 0, na.rm = TRUE))
+  }, numeric(2))
 
   dir_ann = top %>%
     dplyr::mutate(our_dir = ifelse(ours > 0, "up", "down")) %>%
     dplyr::group_by(axis, ranked_on, our_dir) %>%
     dplyr::summarise(n = dplyr::n(), k = sum(agree), .groups = "drop") %>%
     dplyr::mutate(
-      base  = ifelse(our_dir == "up", bg[as.character(axis)],
-                     1 - bg[as.character(axis)]),
-      base  = pmin(pmax(base, 1e-6), 1 - 1e-6),
-      # one sided, in the direction of agreement, so a set that departs the
-      # other way reads as no evidence rather than as a small p-value
-      p_bin = mapply(function(k, n, b)
-                       stats::binom.test(k, n, b, alternative = "greater")$p.value,
-                     k, n, base)) %>%
+      N = pool["n", as.character(axis)],
+      K = ifelse(our_dir == "up", pool["up", as.character(axis)],
+                 N - pool["up", as.character(axis)]),
+      # Hypergeometric: our n genes are a draw from the pool without
+      # replacement, and K of the pool move the way we do, so K/N is the
+      # background. One sided, in the direction of agreement, so a half of the
+      # set that departs the other way reads as no evidence rather than as a
+      # small p-value.
+      p_dir = stats::phyper(k - 1, K, N - K, n, lower.tail = FALSE)) %>%
     dplyr::arrange(axis, dplyr::desc(our_dir))
 
   panel_ann = dir_ann %>%
     dplyr::group_by(axis, ranked_on) %>%
     dplyr::summarise(dir_txt = paste0(our_dir, " ", k, "/", n, " agree, ",
-                                      "p = ", signif(p_bin, 2),
+                                      "p = ", signif(p_dir, 2),
                                       collapse = "\n"), .groups = "drop") %>%
     dplyr::mutate(rank_key = ifelse(grepl("our effect", ranked_on),
                                     "ours", "yasmin")) %>%
@@ -1138,8 +1144,8 @@ agreement_figure = function(axes, ylab, what) {
     labs(x = "our pseudobulk log2FC, larva to transformer", y = ylab,
          title = paste0("Our top ", top_ns[1], " genes each way against the ",
                         what),
-         subtitle = paste0("p is binomial and one sided, our genes moving the ",
-                           "same way against the rate among all genes")) +
+         subtitle = paste0("p is hypergeometric and one sided, our genes ",
+                           "moving the same way against the rate among all genes")) +
     theme_bw() + theme(legend.position = "top")
 
   # the strongest concordant genes, both effect sizes side by side
@@ -1193,7 +1199,7 @@ ggsave(p_trend, file = paste0(results_dir, "/bulk_trend_agreement.png"),
        width = 12, height = 10, dpi = 300)
 ```
 
-`r if (have_bulk) paste0("Panel A colors our ", top_set_lab, " genes by whether the two datasets agree on direction, with the rho from the agreement table printed per panel. Beneath it, each half of our set is counted against the share of all genes Yasmin et al moves that way in that contrast, which is the background it has to beat and is not 50 percent. The test is one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1 rather than a small one. Panel B takes the concordant genes with the largest effects and plots both estimates, so agreement reads as two markers on the same side of zero.") else ""`
+`r if (have_bulk) paste0("Panel A colors our ", top_set_lab, " genes by whether the two datasets agree on direction, with the rho from the agreement table printed per panel. Beneath it, each half of our set is counted against the share of all genes Yasmin et al moves that way in that contrast, which is the background it has to beat and is not 50 percent. The test is hypergeometric and one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1 rather than a small one. Panel B takes the concordant genes with the largest effects and plots both estimates, so agreement reads as two markers on the same side of zero.") else ""`
 
 
 ## Genome-wide scatter
