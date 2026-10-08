@@ -353,6 +353,13 @@ if (length(shared) < 0.5 * nrow(pseudobulk))
 
 # Yasmin et al stage effects
 
+The counts are the nf-core/rnaseq gene matrix for the Yasmin et al reads, taken
+length-scaled where that output exists and rounded, since Salmon estimates are
+not integers. They are cut to the genes our pseudobulk also measures, then
+filtered with `filterByExpr` on their own 28 samples under their own group
+labels, so the filter is theirs rather than one imposed by our data, and
+normalized with `calcNormFactors`.
+
 ```{r, eval=have_bulk}
 y = DGEList(counts = yasmin_counts[shared, ], samples = sample_meta)
 keep = filterByExpr(y, group = sample_meta$group_used)
@@ -441,6 +448,32 @@ runs_ef = sample_meta$run[g == "EF early females"]
 runs_mf = sample_meta$run[g == "MF mid females"]
 ```
 
+Each endpoint is an ordinary two-group test: the undifferentiated larvae against
+one mid group, fitted on just those libraries. The design is a two-level factor,
+dispersions are estimated within that subset, and the quasi-likelihood F test is
+taken on the second coefficient, so a positive log fold change means higher in
+the mid group than in the larvae. That matches the sign of our own effect, which
+runs from larva to transformer.
+
+`r if (have_bulk) paste0("The male endpoint is ", length(runs_ud), " undifferentiated larvae against ", length(runs_mm), " mid males, and the female endpoint the same larvae against ", length(runs_mf), " mid females.") else ""` Both
+endpoints share that larval side, so the two are not independent of each other,
+and each dispersion estimate comes from its own handful of libraries rather than
+from all 28. The late side is the whole mid group rather than animals matched to
+our transformers by stage.
+
+
+Each trend is a regression rather than a contrast between two groups. Every
+animal on a sex's axis enters at once carrying its own trend score, and
+expression is regressed on that score, so the intermediate groups contribute
+rather than being set aside. The design is the score itself, dispersions are
+estimated on those libraries, and the quasi-likelihood F test is taken on the
+slope. A positive slope means the gene rises along the ordering.
+
+The slope is reported two ways, as the coefficient itself and as the change
+across the span the score covers; the scatter section below says which is which
+and why.
+
+
 ```{r, eval=have_bulk}
 # Two endpoints and two trends.
 #
@@ -487,6 +520,8 @@ fem_trend       = run_trend(y, fem_runs, fem_score, "fem_trend")
 yasmin_res = Reduce(function(a, b) dplyr::full_join(a, b, by = "Gene"),
                     list(male_end, fem_end, male_trend, fem_trend))
 ```
+
+`r if (have_bulk) paste0("The male axis carries ", length(male_runs), " animals across ", length(male_groups), " groups and the female axis ", length(fem_runs), " across ", length(fem_groups), ".") else ""`
 
 ## Trend scores
 
@@ -567,6 +602,15 @@ Yasmin et al estimates pulls agreement toward zero. Low power therefore makes th
 conservative rather than invalid. Per-gene significance comes from the trends.
 
 # Our stage effect
+
+Our effect is a pseudobulk log ratio. Counts are summed over every cell of a
+library, giving one column per library and four in all: two undifferentiated
+larval, one male transformer, one female transformer. Those columns are
+normalized with `calcNormFactors` and put on the log2 CPM scale with a prior
+count of one. The two larval columns are averaged, and that average is
+subtracted from each transformer column, so our male and female effects are each
+one transformer library against the mean of the same two larval libraries.
+
 
 Two larval libraries against one transformer library per sex is not a formal
 test. The log fold change is used as an effect size. No p-values are reported
@@ -767,15 +811,21 @@ datatable(agreement %>% dplyr::select(-pool) %>%
           options = list(pageLength = 20))
 ```
 
-| column | what it holds |
-|---|---|
-| `axis` | which Yasmin et al contrast, as sex and shape |
-| `ranked_on` | which dataset picked the gene list, `ours` or `yasmin` |
-| `set` | `genome-wide` for every gene in the pool, or the top list |
-| `n` | genes the row is computed on |
-| `rho` | Spearman correlation between our effect and that of Yasmin et al |
-| `lo`, `hi` | bootstrap interval on `rho` |
-| `pct_same_sign` | percent of those genes both datasets move the same way |
+```{r, eval=have_bulk}
+datatable(data.frame(
+  column = c("<code>axis</code>", "<code>ranked_on</code>", "<code>set</code>", "<code>n</code>", "<code>rho</code>", "<code>lo</code>, <code>hi</code>", "<code>pct_same_sign</code>"),
+  holds  = c("which Yasmin et al contrast, as sex and shape",
+            "which dataset picked the gene list, <code>ours</code> or <code>yasmin</code>",
+            "<code>genome-wide</code> for every gene in the pool, or the top list",
+            "genes the row is computed on",
+            "Spearman correlation between our effect and that of Yasmin et al",
+            "bootstrap interval on <code>rho</code>",
+            "percent of those genes both datasets move the same way"),
+  stringsAsFactors = FALSE),
+  rownames = FALSE, escape = FALSE,
+  colnames = c("column", "what it holds"),
+  options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
 
 The table now carries every combination of contrast, gene pool and ranking side.
 `ranked_on = "ours"` is the original comparison. `ranked_on = "yasmin"` is the
@@ -984,15 +1034,21 @@ datatable(perm_tab %>% dplyr::select(-pool) %>%
           rownames = FALSE, filter = "top", options = list(pageLength = 20))
 ```
 
-| column | what it holds |
-|---|---|
-| `axis`, `ranked_on` | as in the agreement table above |
-| `statistic` | which of the three agreement measures the row tests |
-| `observed` | its value on Yasmin et al real contrast |
-| `null_median` | its median over the relabeled contrasts |
-| `null_95th` | its 95th percentile over them, the value to beat |
-| `p_perm` | fraction of relabelings reaching the observed value or better |
-| `n_perm` | relabelings that fitted |
+```{r, eval=have_bulk}
+datatable(data.frame(
+  column = c("<code>axis</code>, <code>ranked_on</code>", "<code>statistic</code>", "<code>observed</code>", "<code>null_median</code>", "<code>null_95th</code>", "<code>p_perm</code>", "<code>n_perm</code>"),
+  holds  = c("as in the agreement table above",
+            "which of the three agreement measures the row tests",
+            "its value on Yasmin et al real contrast",
+            "its median over the relabeled contrasts",
+            "its 95th percentile over them, the value to beat",
+            "fraction of relabelings reaching the observed value or better",
+            "relabelings that fitted"),
+  stringsAsFactors = FALSE),
+  rownames = FALSE, escape = FALSE,
+  colnames = c("column", "what it holds"),
+  options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
 
 `r if (have_bulk) paste0("The smallest p-value reachable with ", n_perm_labels, " permutations is ", signif(1 / (1 + n_perm_labels), 2), ". A statistic at that value is reported as a floor rather than as its true p-value.") else ""`
 
@@ -1034,9 +1090,7 @@ ggsave(p_perm, file = paste0(results_dir, "/bulk_permutation_null.png"),
 The scatters take our top 100 genes each way on a sex's axis and plot our effect
 against that of Yasmin et al, with points colored by whether the two datasets put the gene in
 the same direction. Each panel carries its Spearman correlation and the
-permutation p-value for that correlation. The paired plot underneath takes the
-strongest concordant genes and shows both effect sizes side by side, so a gene
-that rises in both series reads as two points on the same side of zero.
+permutation p-value for that correlation.
 
 The endpoints and the trends get their own figure. Their y axes are different
 quantities, a fold change between two groups of animals against the fitted change
@@ -1131,8 +1185,12 @@ agreement_figure = function(axes, ylab, what) {
     geom_text_repel(data = top %>%
                       dplyr::group_by(axis, ranked_on) %>%
                       dplyr::slice_max(abs(ours), n = 10, with_ties = FALSE),
-                    aes(label = label), size = 2.4, max.overlaps = 22,
-                    show.legend = FALSE) +
+                    # the labels inherit the agree colour otherwise, which puts
+                    # text in the same two colours as the points it sits among.
+                    # A dark label on a white halo reads over either colour.
+                    aes(label = label), colour = "grey15",
+                    segment.colour = "grey65", bg.color = "white", bg.r = .12,
+                    size = 2.4, max.overlaps = 22, show.legend = FALSE) +
     geom_label(data = panel_ann, aes(x = -Inf, y = Inf, label = txt),
                hjust = -0.05, vjust = 1.1, inherit.aes = FALSE, size = 3.1,
                label.size = 0, fill = "white", alpha = .75, lineheight = 1.05) +
@@ -1148,58 +1206,29 @@ agreement_figure = function(axes, ylab, what) {
                            "moving the same way against the rate among all genes")) +
     theme_bw() + theme(legend.position = "top")
 
-  # the strongest concordant genes, both effect sizes side by side
-  paired_long = top %>%
-    dplyr::filter(agree) %>%
-    dplyr::group_by(axis) %>%
-    dplyr::slice_max(abs(ours), n = 20, with_ties = FALSE) %>%
-    dplyr::ungroup() %>%
-    dplyr::mutate(direction = ifelse(ours > 0, "up in transformers",
-                                     "down in transformers")) %>%
-    tidyr::pivot_longer(c(ours, yasmin), names_to = "dataset",
-                        values_to = "effect") %>%
-    dplyr::mutate(dataset = dplyr::recode(dataset, ours = "ours",
-                                          yasmin = "Yasmin et al"))
-
-  p_paired = ggplot(paired_long, aes(x = effect, y = reorder(label, effect))) +
-    geom_vline(xintercept = 0, colour = "grey70") +
-    geom_line(aes(group = label), colour = "grey65", linewidth = .4) +
-    geom_point(aes(shape = dataset, fill = direction), size = 2.2,
-               colour = "grey25", stroke = .3) +
-    scale_shape_manual(values = c(ours = 21, `Yasmin et al` = 24), name = NULL) +
-    scale_fill_manual(values = c(`up in transformers` = "#0072B2",
-                                 `down in transformers` = "#E69F00"),
-                      name = NULL) +
-    facet_wrap(~axis, scales = "free") +
-    labs(x = "effect size in each dataset", y = NULL,
-         title = "Strongest concordant genes, both datasets") +
-    theme_bw() + theme(legend.position = "top",
-                       axis.text.y = element_text(size = 7))
-
-  p_top / p_paired + patchwork::plot_layout(heights = c(1, 1.2)) +
-    patchwork::plot_annotation(tag_levels = "A")
+  p_top
 }
 ```
 
-```{r, eval=have_bulk, fig.width=12, fig.height=10}
+```{r, eval=have_bulk, fig.width=12, fig.height=5.5}
 p_end = agreement_figure(c("male, endpoint", "female, endpoint"),
                          "Yasmin et al log2FC, larvae to mid group",
                          "Yasmin et al endpoint")
 p_end
 ggsave(p_end, file = paste0(results_dir, "/bulk_endpoint_agreement.png"),
-       width = 12, height = 10, dpi = 300)
+       width = 12, height = 5.5, dpi = 300)
 ```
 
-```{r, eval=have_bulk, fig.width=12, fig.height=10}
+```{r, eval=have_bulk, fig.width=12, fig.height=5.5}
 p_trend = agreement_figure(c("male, trend", "female, trend"),
                            "Yasmin et al log2FC across the series",
                            "Yasmin et al trend")
 p_trend
 ggsave(p_trend, file = paste0(results_dir, "/bulk_trend_agreement.png"),
-       width = 12, height = 10, dpi = 300)
+       width = 12, height = 5.5, dpi = 300)
 ```
 
-`r if (have_bulk) paste0("Panel A colors our ", top_set_lab, " genes by whether the two datasets agree on direction, with the rho from the agreement table printed per panel. Beneath it, each half of our set is counted against the share of all genes Yasmin et al moves that way in that contrast, which is the background it has to beat and is not 50 percent. The test is hypergeometric and one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1 rather than a small one. Panel B takes the concordant genes with the largest effects and plots both estimates, so agreement reads as two markers on the same side of zero.") else ""`
+`r if (have_bulk) paste0("Points are our ", top_set_lab, " genes, colored by whether the two datasets agree on direction, with the rho from the agreement table printed per panel. Beneath it, each half of our set is counted against the share of all genes Yasmin et al move that way in that contrast, which is the background it has to beat and is not 50 percent. The test is hypergeometric and one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1 rather than a small one.") else ""`
 
 
 ## Genome-wide scatter
@@ -1257,8 +1286,9 @@ scatter_for = function(ours_col, yas_col, title, ylab, n_label = 15) {
     geom_vline(xintercept = 0, colour = "grey80") +
     geom_point(alpha = .2, size = .5) +
     geom_point(data = lab, colour = "#c1272d", size = 1.2) +
-    geom_text_repel(data = lab, aes(label = label), size = 2.5,
-                    max.overlaps = 20) +
+    geom_text_repel(data = lab, aes(label = label), colour = "grey15",
+                    segment.colour = "grey65", bg.color = "white", bg.r = .12,
+                    size = 2.5, max.overlaps = 20) +
     geom_smooth(method = "lm", se = FALSE, linewidth = .5, colour = "#004488") +
     labs(x = "our pseudobulk log2FC, larva to transformer",
          y = ylab, title = title) +
@@ -1372,8 +1402,12 @@ gsea_raw = lapply(names(axis_cols), function(ax) {
   names(rank_vec) = go_pool$Gene
   rank_vec = rank_vec[is.finite(rank_vec)]
 
+  # BPPARAM rather than nproc: with nproc the multilevel step draws a progress
+  # bar straight to the console, which lands in the knitted output and is not
+  # caught by the chunk's message or warning options.
   list(ax = ax, rank_vec = rank_vec,
-       res = fgsea::fgsea(use, rank_vec, minSize = 10, nproc = 1))
+       res = fgsea::fgsea(use, rank_vec, minSize = 10,
+                          BPPARAM = BiocParallel::SerialParam(progressbar = FALSE)))
 })
 
 gsea_tab = dplyr::bind_rows(lapply(gsea_raw, function(z) {
@@ -1416,16 +1450,22 @@ datatable(gsea_tab %>%
           rownames = FALSE, filter = "top", options = list(pageLength = 10))
 ```
 
-| column | what it holds |
-|---|---|
-| `contrast` | which Yasmin et al contrast supplied the ranking |
-| `set` | which of our lists was tested |
-| `size` | genes of the set found in the ranking |
-| `ES` | enrichment score, how far toward one end the set sits |
-| `NES` | that score scaled by its null, so sets are comparable |
-| `p`, `fdr` | permutation p-value and its Benjamini-Hochberg adjustment |
-| `leading_edge` | genes of the set before the score peaks, which carry the signal |
-| `as_expected` | an up set with a positive score, or a down set with a negative one |
+```{r, eval=have_fgsea}
+datatable(data.frame(
+  column = c("<code>contrast</code>", "<code>set</code>", "<code>size</code>", "<code>ES</code>", "<code>NES</code>", "<code>p</code>, <code>fdr</code>", "<code>leading_edge</code>", "<code>as_expected</code>"),
+  holds  = c("which Yasmin et al contrast supplied the ranking",
+            "which of our lists was tested",
+            "genes of the set found in the ranking",
+            "enrichment score, how far toward one end the set sits",
+            "that score scaled by its null, so sets are comparable",
+            "permutation p-value and its Benjamini-Hochberg adjustment",
+            "genes of the set before the score peaks, which carry the signal",
+            "an up set with a positive score, or a down set with a negative one"),
+  stringsAsFactors = FALSE),
+  rownames = FALSE, escape = FALSE,
+  colnames = c("column", "what it holds"),
+  options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
 
 `r if (!have_fgsea) "" else { ok = gsea_tab %>% dplyr::filter(as_expected, fdr < 0.05); up = gsea_tab %>% dplyr::filter(direction == "up"); dn = gsea_tab %>% dplyr::filter(direction == "down"); paste0(nrow(ok), " of the ", nrow(gsea_tab), " tests enrich in the expected direction at FDR < 0.05. The up sets score ", paste(range(signif(up$NES, 2)), collapse = " to "), " and the down sets ", paste(range(signif(dn$NES, 2)), collapse = " to "), ". A set that enriches the wrong way, or not at all, is listed with as_expected FALSE. The genes behind each score are in top_gene_enrichment_leading_edge.csv.") }`
 
@@ -1968,7 +2008,7 @@ file_notes = c(
   "bulk_agreement.csv"             = "Spearman rho and percent sign agreement between our stage effect and that of Yasmin et al, for every axis, gene pool and ranking side, with bootstrap intervals.",
   "bulk_permutation_null.csv"      = "Each agreement statistic against its label-permutation null: the observed value, the null median and 95th percentile, and the empirical p-value.",
   "bulk_permutation_null.png"      = "The null distribution of rho across the top genes, with the observed value marked.",
-  "bulk_endpoint_agreement.png"    = "Our top genes, our effect against Yasmin et al endpoint contrasts, with the strongest concordant genes shown with both effect sizes.",
+  "bulk_endpoint_agreement.png"    = "Our top genes, our effect against the Yasmin et al endpoint contrasts, colored by whether the two datasets agree on direction.",
   "bulk_trend_agreement.png"       = "The same figure against Yasmin et al trend contrasts.",
   "bulk_agreement_scatter.png"     = "Our log fold change against that of Yasmin et al for every measurable gene, one panel per axis.",
   "top_gene_GO_pvalues.csv"        = "GO enrichment of the top stage genes from both sides, up and down taken separately, one row per term and gene set.",
