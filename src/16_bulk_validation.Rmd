@@ -226,8 +226,9 @@ id_note = paste0("Count columns were matched to the sample sheet by their ",
 
 ```{r, eval=have_bulk}
 # a numeric developmental position per animal, parsed from the recorded life
-# stage rather than from the group label. The mid female group spans stage 1 to
-# post-metamorphosis, so the label does not place an animal.
+# stage rather than from the group label. The group label is too coarse on its
+# own: the six mid females run from metamorphic stage 1 to post-metamorphosis
+# and all carry the same label, so the label alone cannot order them.
 stage_score = function(s) {
   s = tolower(s)
   dplyr::case_when(
@@ -386,9 +387,26 @@ run_trend = function(dge, runs, score, label) {
   sub = estimateDisp(sub, des)
   fit = glmQLFit(sub, des)
   res = glmQLFTest(fit, coef = 2)
+  # Two columns, because they answer different questions and one of them is what
+  # edgeR actually returned.
+  #
+  #   slope          edgeR's coefficient, renamed. On a continuous covariate it
+  #                  is a slope, the log2 change for a step of 1 on the score,
+  #                  not the fold change that run_two_group returns as logFC.
+  #                  Kept so a rerun of glmQLFTest matches this file.
+  #   series_log2FC  the same fit read across the span the score covers, which
+  #                  is the log2 change from one end of the series to the other.
+  #                  The model is linear in score, so this is a rescaling and
+  #                  needs no refit. Everything downstream is rank or sign
+  #                  based, so the two give identical statistics; this one is
+  #                  the one that can be read as a size.
+  span = diff(range(score))
   topTags(res, n = Inf, sort.by = "none")$table %>%
     tibble::rownames_to_column("Gene") %>%
     dplyr::select(Gene, logFC, PValue, FDR) %>%
+    dplyr::rename(slope = "logFC") %>%
+    dplyr::mutate(series_log2FC = slope * span) %>%
+    dplyr::relocate(series_log2FC, .after = slope) %>%
     dplyr::rename_with(~paste0(label, "_", .x), -Gene)
 }
 
@@ -677,6 +695,31 @@ cmp$label = ifelse(is.na(cmp$WangGeneID), cmp$Gene, cmp$WangGeneID)
 
 top_ns = as.integer(trimws(strsplit(as.character(params$top_n_list), ",")[[1]]))
 
+# The n strongest genes in each direction, and the two together.
+#
+# Selecting the n strongest by absolute effect gives a list whose direction
+# balance is whatever the data happens to carry, and here that is lopsided: the
+# largest magnitudes are overwhelmingly downward on both sides, so a top list
+# picked that way is almost entirely down genes. Two things go wrong with it.
+# Sign agreement then averages the up and down genes, which behave oppositely,
+# and the average can land below chance while both halves sit above it. rho
+# loses the range it depends on, because the list crowds into one tail.
+#
+# Taking n each way fixes the balance by construction and keeps both tails, so
+# rho is computed across the full spread of effects. Restricting to a single
+# direction instead is worse than either: with the range cut to one tail, rho
+# measures magnitude ranking within it and goes to nothing.
+top_dir = function(v, direction, n = top_ns[1]) {
+  ok = is.finite(v)
+  idx = if (direction == "up") which(ok & v > 0) else which(ok & v < 0)
+  idx[order(abs(v[idx]), decreasing = TRUE)][seq_len(min(n, length(idx)))]
+}
+top_both = function(v, n = top_ns[1])
+  sort(union(top_dir(v, "up", n), top_dir(v, "down", n)))
+
+# the label the agreement and permutation tables share for that set
+top_set_lab = paste0("top ", top_ns[1], " each way")
+
 # genome-wide, then restricted to our strongest stage genes.
 #
 # Relabelled contrasts drawn from the same 28 animals give a genome-wide
@@ -707,14 +750,14 @@ agreement_for = function(ours_col, yas_col, axis, keep, pool,
     n = gw[["n"]], rho = gw[["rho"]], lo = gw[["lo"]], hi = gw[["hi"]],
     pct_same_sign = 100 * mean(gw_agree))
 
-  ord = order(abs(rank_vec), decreasing = TRUE)
   for (n in top_ns) {
-    idx = ord[seq_len(min(n, nrow(d)))]
+    idx = top_both(rank_vec, n)
     s = spearman_ci(d[[ours_col]][idx], d[[yas_col]][idx])
     agree = sign(d[[ours_col]][idx]) == sign(d[[yas_col]][idx])
     agree = agree[is.finite(agree)]
     rows[[length(rows) + 1]] = data.frame(
-      axis = axis, pool = pool, ranked_on = rank_on, set = paste0("top ", n),
+      axis = axis, pool = pool, ranked_on = rank_on,
+      set = paste0("top ", n, " each way"),
       n = length(idx), rho = s[["rho"]], lo = s[["lo"]], hi = s[["hi"]],
       pct_same_sign = 100 * mean(agree))
   }
@@ -724,8 +767,8 @@ agreement_for = function(ours_col, yas_col, axis, keep, pool,
 axis_cols = list(
   "male, endpoint"   = c(ours = "ours_male",   yas = "male_end_logFC"),
   "female, endpoint" = c(ours = "ours_female", yas = "fem_end_logFC"),
-  "male, trend"      = c(ours = "ours_male",   yas = "male_trend_logFC"),
-  "female, trend"    = c(ours = "ours_female", yas = "fem_trend_logFC"))
+  "male, trend"      = c(ours = "ours_male",   yas = "male_trend_series_log2FC"),
+  "female, trend"    = c(ours = "ours_female", yas = "fem_trend_series_log2FC"))
 
 gene_pools = list("all genes"     = rep(TRUE, nrow(cmp)),
                   "well measured" = cmp$well_measured)
@@ -752,7 +795,7 @@ reciprocal one: their contrast picks the genes and our four libraries only have
 to follow. The reciprocal direction is the better powered of the two, since the
 selection happens on the replicated side.
 
-`r if (have_bulk) { say = function(ax) { a = agreement[agreement$axis == ax & agreement$pool == "well measured", ]; ao = a[a$ranked_on == "ours", ]; ay = a[a$ranked_on == "yasmin", ]; paste0(ax, ": genome-wide ", signif(ao$rho[ao$set == "genome-wide"], 3), ", our top ", top_ns[1], " ", signif(ao$rho[ao$set == paste0("top ", top_ns[1])], 3), ", their top ", top_ns[1], " ", signif(ay$rho[ay$set == paste0("top ", top_ns[1])], 3)) }; paste0("Spearman rho among well measured genes, for each contrast. ", paste(vapply(names(axis_cols), say, character(1)), collapse = ". "), ". The gap between the genome-wide value and the top-gene values says whether agreement concentrates in the genes each side nominates. The permutation below says whether any of it exceeds chance.") } else ""`
+`r if (have_bulk) { say = function(ax) { a = agreement[agreement$axis == ax & agreement$pool == "well measured", ]; ao = a[a$ranked_on == "ours", ]; ay = a[a$ranked_on == "yasmin", ]; paste0(ax, ": genome-wide ", signif(ao$rho[ao$set == "genome-wide"], 3), ", our ", top_set_lab, " ", signif(ao$rho[ao$set == top_set_lab], 3), ", their ", top_set_lab, " ", signif(ay$rho[ay$set == top_set_lab], 3)) }; paste0("Spearman rho among well measured genes, for each contrast. ", paste(vapply(names(axis_cols), say, character(1)), collapse = ". "), ". The gap between the genome-wide value and the top-gene values says whether agreement concentrates in the genes each side nominates. The permutation below says whether any of it exceeds chance.") } else ""`
 
 ## Reading the numbers
 
@@ -845,10 +888,8 @@ score_draw = function(lfc_all, ours_col, top_n) {
     keep = gene_pools[[perm_combos$pool[k]]]
     ov   = cmp[[ours_col]][keep]
     lv   = lfc_all[keep]
-    idx  = if (perm_combos$rank_on[k] == "ours")
-             order(abs(ov), decreasing = TRUE)[seq_len(min(top_n, length(ov)))]
-           else
-             order(abs(lv), decreasing = TRUE)[seq_len(min(top_n, length(lv)))]
+    idx  = if (perm_combos$rank_on[k] == "ours") top_both(ov, top_n)
+           else top_both(lv, top_n)
     agree = sign(ov[idx]) == sign(lv[idx])
     data.frame(
       pool = perm_combos$pool[k], rank_on = perm_combos$rank_on[k],
@@ -863,11 +904,15 @@ score_draw = function(lfc_all, ours_col, top_n) {
 # The fits are independent, so they fan out across cores. mclapply forks, which
 # is why the job script pins the BLAS threads to one: eight R processes each
 # spawning threads would oversubscribe the node.
-perm_null = function(draws, fit_draw, ours_col, top_n, cores = 1) {
+# eff_col differs by fit shape: run_two_group names its effect logFC and
+# run_trend names its effect slope, so the caller says which to score.
+perm_null = function(draws, fit_draw, ours_col, top_n, cores = 1,
+                     eff_col = "perm_logFC") {
   work = function(d) {
     tab = try(fit_draw(d), silent = TRUE)
     if (inherits(tab, "try-error")) return(NULL)
-    score_draw(tab$perm_logFC[match(cmp$Gene, tab$Gene)], ours_col, top_n)
+    stopifnot(eff_col %in% names(tab))
+    score_draw(tab[[eff_col]][match(cmp$Gene, tab$Gene)], ours_col, top_n)
   }
   res = if (cores > 1) parallel::mclapply(draws, work, mc.cores = cores)
         else lapply(draws, work)
@@ -888,7 +933,8 @@ two_group_perm = function(n_a, n_b, ours_col, seed) {
 trend_perm = function(score_vec, ours_col, seed) {
   perm_null(draw_runs(length(score_vec), n_perm_labels, seed),
             function(d) run_trend(y, d, score_vec, "perm"),
-            ours_col, top_ns[1], perm_cores)
+            ours_col, top_ns[1], perm_cores,
+            eff_col = "perm_series_log2FC")
 }
 
 # cached on a signature, since the permutation is the slow step in the document
@@ -939,16 +985,17 @@ perm_tab = dplyr::bind_rows(lapply(names(perm_res), function(ax) {
       obs = agreement[agreement$axis == ax & agreement$pool == pl &
                         agreement$ranked_on == ro, ]
       o   = c(obs$rho[obs$set == "genome-wide"],
-              obs$rho[obs$set == paste0("top ", top_ns[1])],
-              obs$pct_same_sign[obs$set == paste0("top ", top_ns[1])])
+              obs$rho[obs$set == top_set_lab],
+              obs$pct_same_sign[obs$set == top_set_lab])
       nl  = list(g$rho_gw, g$rho_top, g$pct_sign)
 
       out = data.frame(
         axis        = ax,
         pool        = pl,
         ranked_on   = ro,
-        statistic   = c("rho, genome-wide", paste0("rho, top ", top_ns[1]),
-                        paste0("% same sign, top ", top_ns[1])),
+        statistic   = c("rho, genome-wide",
+                        paste0("rho, ", top_set_lab),
+                        paste0("% same sign, ", top_set_lab)),
         observed    = o,
         null_median = vapply(nl, median, numeric(1), na.rm = TRUE),
         null_95th   = vapply(nl,
@@ -985,7 +1032,7 @@ obs_long = dplyr::bind_rows(lapply(names(perm_res), function(ax)
     obs = agreement[agreement$axis == ax & agreement$pool == "well measured" &
                       agreement$ranked_on == ro, ]
     data.frame(axis = ax, ranked_on = ro,
-               observed = obs$rho[obs$set == paste0("top ", top_ns[1])])
+               observed = obs$rho[obs$set == top_set_lab])
   }))))
 
 p_perm = ggplot(perm_long, aes(x = rho_top)) +
@@ -993,7 +1040,7 @@ p_perm = ggplot(perm_long, aes(x = rho_top)) +
   geom_vline(data = obs_long, aes(xintercept = observed),
              colour = "#c1272d", linewidth = .7) +
   facet_grid(ranked_on ~ axis, scales = "free_y") +
-  labs(x = paste0("Spearman rho across the top ", top_ns[1], " genes"),
+  labs(x = paste0("Spearman rho across the ", top_set_lab, " genes"),
        y = "permutations",
        title = "Observed agreement against random contrasts of the same shape",
        subtitle = "well measured genes; rows give the side that ranked the genes") +
@@ -1008,7 +1055,7 @@ ggsave(p_perm, file = paste0(results_dir, "/bulk_permutation_null.png"),
 ## The trend figure
 
 The scatters take our top 100 genes on each sex's axis and plot our effect
-against Yasmin's trend coefficient, with points colored by whether the two
+against Yasmin's change across her series, with points colored by whether the two
 datasets put the gene in the same direction. Each panel carries its Spearman
 correlation and the permutation p-value for that correlation. The paired plot
 underneath takes the strongest concordant genes and shows both effect sizes side
@@ -1020,7 +1067,6 @@ selection made on Yasmin's side, which this figure leaves out.
 trend_axes  = c("male, trend", "female, trend")
 # our effect picks the genes. The Yasmin-ranked selection is in the tables.
 rank_sides  = "ours"
-top_set_lab = paste0("top ", top_ns[1])
 
 panel_grid = expand.grid(axis = trend_axes, ranked_on = rank_sides,
                          stringsAsFactors = FALSE)
@@ -1032,8 +1078,9 @@ trend_top = dplyr::bind_rows(Map(function(ax, ro) {
                   yasmin = dplyr::all_of(cols[["yas"]])) %>%
     dplyr::filter(is.finite(ours), is.finite(yasmin))
   rank_vec = if (ro == "ours") d$ours else d$yasmin
-  d = d[order(abs(rank_vec), decreasing = TRUE)[
-          seq_len(min(top_ns[1], nrow(d)))], , drop = FALSE]
+  # the same balanced set the agreement table scores, so the rho and p printed
+  # on each panel describe the points that are drawn
+  d = d[top_both(rank_vec, top_ns[1]), , drop = FALSE]
   d$axis      = ax
   d$ranked_on = ro
   d$agree     = sign(d$ours) == sign(d$yasmin)
@@ -1093,9 +1140,9 @@ p_top = ggplot(trend_top, aes(x = ours, y = yasmin, colour = agree)) +
                                  `FALSE` = "opposite")) +
   facet_wrap(~ axis, scales = "free", nrow = 1) +
   labs(x = "our pseudobulk log2FC, larva to transformer",
-       y = "Yasmin trend coefficient",
+       y = "Yasmin log2FC across her whole series",
        title = paste0("Our top ", top_ns[1],
-                      " genes against the Yasmin trend"),
+                      " genes each way against the Yasmin trend"),
        subtitle = "p is the label permutation p-value for the correlation shown") +
   theme_bw() + theme(legend.position = "top")
 
@@ -1140,14 +1187,52 @@ ggsave(p_trend, file = paste0(results_dir, "/bulk_trend_agreement.png"),
        width = 12, height = 10, dpi = 300)
 ```
 
-`r if (have_bulk) paste0("Panel A colors each of our top ", top_ns[1], " genes by whether the two datasets agree on direction. The correlation and its permutation p-value are printed in each panel and are the same values the agreement and permutation tables carry. Panel B takes the concordant genes with the largest effects and plots both estimates, so agreement reads as two markers on the same side of zero.") else ""`
+`r if (have_bulk) paste0("Panel A colors our ", top_set_lab, " genes by whether the two datasets agree on direction. The correlation and its permutation p-value are printed in each panel and are the same values the agreement and permutation tables carry. Panel B takes the concordant genes with the largest effects and plots both estimates, so agreement reads as two markers on the same side of zero.") else ""`
 
 ## Genome-wide scatter
+
+Every gene measurable on both sides, our effect against Yasmin's, with the
+fifteen largest of ours labeled in each panel.
+
+The two rows are not the same quantity on the y axis. The endpoint panels
+compare two groups, so their y value is an ordinary log fold change: 1 means the
+gene sits twice as high in the mid group as in the larvae.
+
+The trend panels come from a fitted line rather than a contrast. Each animal
+carries a trend score, a number that puts it in developmental order: the
+undifferentiated larvae at 0, the next group at 1, the one after at 2, with the
+animals inside a group spread over the fraction between. Expression is regressed
+on that score, which gives a slope. The slope on its own says the change for a
+step of 1, and a step of 1 is not a fixed amount of development, so the number
+cannot be read without also knowing how far the score runs.
+
+The y value is therefore the slope read across the span the score covers, which
+is the log2 change from the first animal in the series to the last. `r if (!have_bulk) "" else paste0("The male score runs 0 to ", signif(max(male_score), 3), " and the female score 0 to ", signif(max(fem_score), 3), ".")`
+A value of 1 means the gene doubles over her whole series. Both rows of the
+figure are then log2 fold changes, and what still differs is the comparison:
+the endpoints contrast two groups of animals directly, while the trends read the
+change off a line through every animal.
+
+Three columns in the export cover this, because the slope and the rescaling
+answer different questions. `male_end_logFC` and `fem_end_logFC` are fold
+changes between two groups. `male_trend_slope` and `fem_trend_slope` are the
+coefficients edgeR returned, kept so that refitting reproduces this file.
+`male_trend_series_log2FC` and `fem_trend_series_log2FC` are those slopes across
+the span, which is what the figures and every statistic use.
+
+The rescaling changes no result. Spearman rho, percent same sign, the top-gene
+rankings and the permutation are all ranks or signs, so multiplying one column
+by a positive constant leaves every one of them identical.
 
 ```{r, eval=have_bulk, fig.width=11, fig.height=11, dev="png", dpi=600}
 # One point per measurable gene in each of four panels, so this one stays
 # raster. The rest of the figures in this document are vector.
-scatter_for = function(ours_col, yas_col, title, n_label = 15) {
+# Both rows are log2 fold changes, but of different comparisons, so the label
+# says which rather than leaving them looking interchangeable.
+yl_end   = "Yasmin log2FC, larvae to mid group"
+yl_trend = "Yasmin log2FC across her whole series"
+
+scatter_for = function(ours_col, yas_col, title, ylab, n_label = 15) {
   d = cmp %>%
     dplyr::select(Gene, label, ours = dplyr::all_of(ours_col),
                   yasmin = dplyr::all_of(yas_col)) %>%
@@ -1163,14 +1248,16 @@ scatter_for = function(ours_col, yas_col, title, n_label = 15) {
                     max.overlaps = 20) +
     geom_smooth(method = "lm", se = FALSE, linewidth = .5, colour = "#004488") +
     labs(x = "our pseudobulk log2FC, larva to transformer",
-         y = "Yasmin log2FC", title = title) +
+         y = ylab, title = title) +
     theme_bw()
 }
 
-p_male  = scatter_for("ours_male",   "male_end_logFC",   "Male endpoint")
-p_fem   = scatter_for("ours_female", "fem_end_logFC",    "Female endpoint")
-p_mtr   = scatter_for("ours_male",   "male_trend_logFC", "Male trend")
-p_ftr   = scatter_for("ours_female", "fem_trend_logFC",  "Female trend")
+p_male  = scatter_for("ours_male",   "male_end_logFC",   "Male endpoint",   yl_end)
+p_fem   = scatter_for("ours_female", "fem_end_logFC",    "Female endpoint", yl_end)
+p_mtr   = scatter_for("ours_male",   "male_trend_series_log2FC",
+                      "Male trend",   yl_trend)
+p_ftr   = scatter_for("ours_female", "fem_trend_series_log2FC",
+                      "Female trend", yl_trend)
 
 p_scatter = (p_male + p_fem) / (p_mtr + p_ftr)
 p_scatter
@@ -1196,12 +1283,6 @@ lists, and the overlap below intersects them.
 # rising genes says something different from one enriched among falling genes.
 go_pool = cmp[cmp$well_measured, , drop = FALSE]
 
-top_dir = function(v, direction, n = top_ns[1]) {
-  ok = is.finite(v)
-  idx = if (direction == "up") which(ok & v > 0) else which(ok & v < 0)
-  idx[order(abs(v[idx]), decreasing = TRUE)][seq_len(min(n, length(idx)))]
-}
-
 # Each set carries the source, sex and direction it came from, so terms can be
 # matched across sources later without parsing the label back apart.
 set_defs = c(
@@ -1221,9 +1302,12 @@ set_rows = lapply(set_defs, function(d)
     list(genes = data.frame(Gene = go_pool$Gene[idx],
                             set  = paste0(d$label, ", ", dir),
                             stringsAsFactors = FALSE),
+         # col is carried so the overlap below can recover which genes each
+         # side moves in each direction, not just which made its top hundred
          key   = data.frame(set = paste0(d$label, ", ", dir),
                             source = d$source, sex = d$sex,
                             contrast = d$contrast, direction = dir,
+                            col = d$col,
                             stringsAsFactors = FALSE))
   }))
 
@@ -1231,55 +1315,75 @@ set_rows = unlist(set_rows, recursive = FALSE)
 go_sets  = dplyr::bind_rows(lapply(set_rows, `[[`, "genes"))
 set_key  = dplyr::bind_rows(lapply(set_rows, `[[`, "key"))
 
-set_sizes = set_key %>%
-  dplyr::left_join(go_sets %>% dplyr::count(set, name = "n_genes"), by = "set")
-
-datatable(set_sizes, rownames = FALSE,
-          options = list(dom = "t", pageLength = 20))
 ```
+
+`r if (!have_bulk) "" else { n_per = go_sets %>% dplyr::count(set, name = "n"); short = n_per %>% dplyr::filter(n < top_ns[1]); paste0(nrow(n_per), " lists, ", if (nrow(short) == 0) paste0("each holding ", top_ns[1], " genes.") else paste0("holding ", top_ns[1], " genes each except ", paste0(short$set, " (", short$n, ")", collapse = "; "), ", where fewer genes move in that direction.")) }`
+
 ## Overlap between the lists
 
-A gene in our top hundred and in Yasmin's top hundred, on the same sex and in the
-same direction, is a stricter kind of agreement than the sign agreement reported
-above. Sign agreement asks only whether Yasmin moves our genes the same way,
-however weakly. This asks whether they are among her strongest too.
+The lists above are split by direction because GO enrichment needs them that
+way. The overlap below uses a single list per side instead, the top hundred by
+absolute effect, which is the convention the agreement table and the trend
+figure already use. A gene can therefore enter a list in either direction, and
+the table reports how many of the shared genes the two datasets move the same
+way.
 
-The expected overlap is the product of the two list sizes over the pool they were
-drawn from, and the p-value is hypergeometric on that pool. Both treat the lists
-as independent draws, which they are not: the two datasets share the biology
-under test. Read the p-value as a reference point rather than as a test of
-reproducibility.
+A gene in our top hundred and in Yasmin's top hundred is a stricter kind of
+agreement than the sign agreement reported above. Sign agreement asks only
+whether Yasmin moves our genes the same way, however weakly. This asks whether
+they are among her strongest too.
+
+The expected overlap is the product of the two list sizes over the pool they
+were drawn from, and the p-value is hypergeometric on that pool. Both treat the
+lists as independent draws, which they are not: the two datasets share the
+biology under test. Read the p-value as a reference point rather than as a test
+of reproducibility.
 
 ```{r, eval=have_bulk}
-all_lists = split(go_sets$Gene, go_sets$set)
-pool_n    = nrow(go_pool)
+# One list per side, top hundred by absolute effect, from the well measured
+# pool. Direction is not fixed here, so the background for the hypergeometric is
+# the whole pool, which is what both lists were drawn from.
+abs_cols = c(setNames(c("ours_male", "ours_female"),
+                      c("ours, male", "ours, female")),
+             setNames(vapply(axis_cols, `[[`, character(1), "yas"),
+                      paste0("Yasmin, ", names(axis_cols))))
 
-our_keys = set_key %>% dplyr::filter(source == "ours")
-yas_keys = set_key %>% dplyr::filter(source == "Yasmin")
+top_abs = function(v, n = top_ns[1]) {
+  i = which(is.finite(v))
+  i[order(abs(v[i]), decreasing = TRUE)][seq_len(min(n, length(i)))]
+}
+abs_lists = lapply(abs_cols, function(cl) go_pool$Gene[top_abs(go_pool[[cl]])])
 
-overlap_tab = dplyr::bind_rows(lapply(our_keys$set, function(a)
-  dplyr::bind_rows(lapply(yas_keys$set, function(b) {
-    ga = all_lists[[a]]
-    gb = all_lists[[b]]
-    k  = length(intersect(ga, gb))
+abs_sex = ifelse(grepl("female", names(abs_cols)), "female", "male")
+names(abs_sex) = names(abs_cols)
+is_ours = grepl("^ours", names(abs_cols))
+
+overlap_tab = dplyr::bind_rows(lapply(names(abs_cols)[is_ours], function(a)
+  dplyr::bind_rows(lapply(names(abs_cols)[!is_ours], function(b) {
+    ga = abs_lists[[a]]
+    gb = abs_lists[[b]]
+    sh = intersect(ga, gb)
+    k  = length(sh)
+    # of the shared genes, how many does each side move the same way. A gene can
+    # be large in both and point in opposite directions, which is a disagreement
+    # the raw count would hide.
+    j  = match(sh, go_pool$Gene)
+    same = if (k > 0) sum(sign(go_pool[[abs_cols[[a]]]][j]) ==
+                          sign(go_pool[[abs_cols[[b]]]][j])) else 0L
+    pool_n = sum(is.finite(go_pool[[abs_cols[[a]]]]) &
+                 is.finite(go_pool[[abs_cols[[b]]]]))
+    expd = length(ga) * length(gb) / pool_n
     data.frame(
-      ours = a, yasmin = b, n_ours = length(ga), n_yasmin = length(gb),
-      overlap = k,
-      expected = length(ga) * length(gb) / pool_n,
+      ours = a, yasmin = b, pool = pool_n,
+      n_ours = length(ga), n_yasmin = length(gb),
+      overlap = k, same_direction = same,
+      expected = expd, fold = if (expd > 0) k / expd else NA_real_,
       # P(X >= k) under the hypergeometric, so lower.tail on k - 1
       p_hyper = stats::phyper(k - 1, length(gb), pool_n - length(gb),
                               length(ga), lower.tail = FALSE),
       stringsAsFactors = FALSE)
   })))) %>%
-  dplyr::left_join(our_keys %>% dplyr::select(ours = set, sex_ours = sex,
-                                              dir_ours = direction),
-                   by = "ours") %>%
-  dplyr::left_join(yas_keys %>% dplyr::select(yasmin = set, sex_yas = sex,
-                                              dir_yas = direction,
-                                              contrast_yas = contrast),
-                   by = "yasmin") %>%
-  dplyr::mutate(matched = sex_ours == sex_yas & dir_ours == dir_yas,
-                fold = overlap / expected,
+  dplyr::mutate(matched = abs_sex[ours] == abs_sex[yasmin],
                 fdr = p.adjust(p_hyper, "BH")) %>%
   dplyr::arrange(dplyr::desc(matched), p_hyper)
 
@@ -1287,19 +1391,17 @@ write.csv(overlap_tab,
           file = paste0(results_dir, "/top_gene_list_overlap.csv"),
           row.names = FALSE)
 
-# the genes themselves, for the pairs the section is about
+# the genes themselves, for the pairs on the same sex
 overlap_genes = dplyr::bind_rows(lapply(which(overlap_tab$matched), function(i) {
-  g = intersect(all_lists[[overlap_tab$ours[i]]],
-                all_lists[[overlap_tab$yasmin[i]]])
+  a = overlap_tab$ours[i]; b = overlap_tab$yasmin[i]
+  g = intersect(abs_lists[[a]], abs_lists[[b]])
   if (length(g) == 0) return(NULL)
-  # our effect does not depend on the contrast, only on the sex
-  ours_col = paste0("ours_", overlap_tab$sex_ours[i])
-  idx      = match(g, cmp$Gene)
-  data.frame(ours = overlap_tab$ours[i], yasmin = overlap_tab$yasmin[i],
-             Gene = g,
-             label = cmp$label[idx],
-             ours_effect = cmp[[ours_col]][idx],
-             stringsAsFactors = FALSE)
+  j = match(g, go_pool$Gene)
+  data.frame(ours = a, yasmin = b, Gene = g, label = go_pool$label[j],
+             ours_effect   = go_pool[[abs_cols[[a]]]][j],
+             yasmin_effect = go_pool[[abs_cols[[b]]]][j],
+             stringsAsFactors = FALSE) %>%
+    dplyr::mutate(same_direction = sign(ours_effect) == sign(yasmin_effect))
 }))
 
 write.csv(overlap_genes,
@@ -1307,26 +1409,24 @@ write.csv(overlap_genes,
           row.names = FALSE)
 
 datatable(overlap_tab %>%
-            dplyr::select(ours, yasmin, matched, n_ours, n_yasmin, overlap,
+            dplyr::select(ours, yasmin, matched, overlap, same_direction,
                           expected, fold, p_hyper, fdr) %>%
             mutate(across(where(is.numeric), ~signif(., 3))),
-          rownames = FALSE, filter = "top", options = list(pageLength = 16))
+          rownames = FALSE, filter = "top", options = list(pageLength = 10))
 ```
 
-`r if (!have_bulk) "" else { m = overlap_tab %>% dplyr::filter(matched); per = m %>% dplyr::group_by(sex_ours, dir_ours) %>% dplyr::summarise(lo = min(overlap), hi = max(overlap), .groups = "drop"); paste0("Of the ", nrow(overlap_tab), " pairings, ", nrow(m), " match on sex and direction, and ", sum(m$fdr < 0.05), " of those reach FDR < 0.05. Against an expectation of about ", signif(mean(m$expected), 2), " genes, the overlaps are ", paste0(per$sex_ours, " ", per$dir_ours, " ", ifelse(per$lo == per$hi, as.character(per$lo), paste0(per$lo, " to ", per$hi)), collapse = "; "), ". The intersecting genes are in top_gene_list_overlap_genes.csv.") }`
+`r if (!have_bulk) "" else { m = overlap_tab %>% dplyr::filter(matched); paste0("Of the ", nrow(overlap_tab), " pairings, ", nrow(m), " are on the same sex: ", paste0(m$ours, " against ", m$yasmin, ", ", m$overlap, " genes", collapse = "; "), ". ", sum(m$fdr < 0.05), " of them reach FDR < 0.05 against an expectation of about ", signif(mean(m$expected), 2), " genes. The shared genes are in top_gene_list_overlap_genes.csv with both effect sizes.") }`
 
-```{r, eval=have_bulk, fig.width=12, fig.height=8}
+`r if (!have_bulk) "" else { comp = vapply(names(abs_cols), function(k) { v = go_pool[[abs_cols[[k]]]][top_abs(go_pool[[abs_cols[[k]]]])]; paste0(k, " ", sum(v > 0), " up and ", sum(v < 0), " down") }, character(1)); paste0("Selecting on absolute effect does not give a balanced list. ", paste(comp, collapse = "; "), ". Where one side's list is almost all one direction, the overlap is limited by that before any agreement is tested, and the direction-split GO sets above are the better guide to whether a direction reproduces.") }`
+
+```{r, eval=have_bulk, fig.width=11, fig.height=7}
 # Hand-built rather than UpSetR or ComplexUpset, so the document takes no new
 # dependency and the figure comes out as vector like the rest. Set sizes go in
 # the y axis labels instead of a third aligned panel.
-upset_contrast = "trend"   # the Yasmin contrast the figure shows
-n_int          = 20        # intersections drawn, largest first
+n_int = 20        # intersections drawn, largest first
 
-fig_sets = set_key %>%
-  dplyr::filter(source == "ours" | contrast == upset_contrast) %>%
-  dplyr::arrange(source, sex, direction)
-
-set_lists = split(go_sets$Gene, go_sets$set)[fig_sets$set]
+fig_sets  = names(abs_cols)
+set_lists = abs_lists[fig_sets]
 all_genes = sort(unique(unlist(set_lists)))
 
 # one column per set, in fig_sets order, so the bit strings below line up with it
@@ -1346,12 +1446,12 @@ int_sizes = int_all %>%
 
 bits = strsplit(int_sizes$pattern, "")
 mem_long = dplyr::bind_rows(lapply(seq_len(nrow(int_sizes)), function(i)
-  data.frame(x = int_sizes$x[i], set = fig_sets$set,
+  data.frame(x = int_sizes$x[i], set = fig_sets,
              member = bits[[i]] == "1", stringsAsFactors = FALSE)))
 
-set_lab = setNames(paste0(fig_sets$set, "  (",
+set_lab = setNames(paste0(fig_sets, "  (",
                           vapply(set_lists, length, integer(1)), ")"),
-                   fig_sets$set)
+                   fig_sets)
 
 x_scale = scale_x_continuous(breaks = int_sizes$x,
                              expand = ggplot2::expansion(add = .6))
@@ -1363,8 +1463,8 @@ p_ubar = ggplot(int_sizes, aes(x = x, y = size)) +
   scale_y_continuous(expand = ggplot2::expansion(mult = c(0, .14))) +
   labs(x = NULL, y = "genes in the intersection",
        title = paste0("Top ", top_ns[1],
-                      " gene lists, ours and the Yasmin ", upset_contrast),
-       subtitle = paste0("the ", n_int,
+                      " gene lists by absolute effect, ours and Yasmin's"),
+       subtitle = paste0("the ", nrow(int_sizes),
                          " largest intersections; set sizes in brackets")) +
   theme_bw(base_size = 10) +
   theme(axis.text.x = element_blank(), axis.ticks.x = element_blank(),
@@ -1377,7 +1477,7 @@ p_umat = ggplot(mem_long, aes(x = x, y = set)) +
   geom_point(data = dplyr::filter(mem_long, member),
              colour = "#0072B2", size = 3) +
   x_scale +
-  scale_y_discrete(limits = rev(fig_sets$set),
+  scale_y_discrete(limits = rev(fig_sets),
                    labels = function(z) unname(set_lab[z])) +
   labs(x = NULL, y = NULL) +
   theme_bw(base_size = 10) +
@@ -1389,10 +1489,10 @@ p_upset = p_ubar / p_umat + patchwork::plot_layout(heights = c(1, 1.15))
 p_upset
 
 ggsave(p_upset, file = paste0(results_dir, "/top_gene_list_upset.png"),
-       width = 12, height = 8, dpi = 300)
+       width = 11, height = 7, dpi = 300)
 ```
 
-`r if (!have_bulk) "" else paste0("Each column is the set of genes sharing one membership pattern, so the columns are disjoint rather than nested. ", format(length(all_genes), big.mark = ","), " genes appear in at least one of the ", nrow(fig_sets), " lists, spread over ", nrow(int_all), " patterns; the ", nrow(int_sizes), " drawn here hold ", format(sum(int_sizes$size), big.mark = ","), " of them. A column with one filled dot is genes unique to that list. The columns worth reading are the two-dot ones joining a list of ours to Yasmin's on the same sex and in the same direction.")`
+`r if (!have_bulk) "" else paste0("Each column is the set of genes sharing one membership pattern, so the columns are disjoint rather than nested. ", format(length(all_genes), big.mark = ","), " genes appear in at least one of the ", length(fig_sets), " lists, spread over ", nrow(int_all), " patterns; the ", nrow(int_sizes), " drawn here hold ", format(sum(int_sizes$size), big.mark = ","), " of them. A column with one filled dot is genes unique to that list. The columns worth reading are the two-dot ones joining one of our lists to a Yasmin contrast on the same sex.")`
 
 
 # Gene ontology
@@ -1753,7 +1853,7 @@ file_notes = c(
   "shared_trend_GO_terms.png"      = "The strongest of those shared terms, each with a point per dataset, faceted by sex and direction.",
   "germ_signature_sex.csv"         = "Mean germ signature score in Yasmin's mid males and mid females, per signature and marker source, with the difference between them.",
   "germ_signature_sex.png"         = "The same scores as paired points per signature, ordered by the male-minus-female difference.",
-  "bulk_vs_pseudobulk_per_gene.csv" = "One row per gene: our male and female stage effects, every Yasmin contrast's log fold change, and the Wang identifier.")
+  "bulk_vs_pseudobulk_per_gene.csv" = "One row per gene: our male and female stage effects, each Yasmin contrast's coefficient, and the Wang identifier. The endpoint columns are log fold changes between two groups. Each Yasmin trend carries two columns: *_trend_slope, the coefficient edgeR returned for the regression on the trend score, and *_trend_series_log2FC, that slope multiplied by the span the score covers, which is the log2 change across her whole series and the column every figure and statistic here uses. edgeR names its coefficient logFC for any design, so the slope is renamed to keep it apart from the endpoint columns, which are fold changes between two groups.")
 
 in_dir = sort(setdiff(list.files(results_dir), "Robjects"))
 
@@ -1789,7 +1889,7 @@ datatable(export_tab, rownames = FALSE, escape = FALSE,
 ```{r, eval=have_bulk}
 # The headline numbers come from the well measured pool. Both ranking directions
 # are shown, since they answer different questions.
-top_set = paste0("top ", top_ns[1])
+top_set = paste0("top ", top_ns[1], " each way")
 
 row_for = function(ax, set, ro = "ours")
   agreement[agreement$axis == ax & agreement$pool == "well measured" &
