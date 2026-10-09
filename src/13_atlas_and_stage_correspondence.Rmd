@@ -1711,6 +1711,18 @@ datatable(summary_tbl, rownames = FALSE, colnames = c("", "", ""),
 * **Independent evidence for the stage-associated patterns.** That comes from
   `16_bulk_validation.Rmd` or from staining.
 
+# Parameters
+
+Every setting this document was given, with the ones the knit script changed
+marked. These are the values the run used, so they describe the numbers on
+this page rather than the defaults in the source.
+
+```{r}
+datatable(params_table(params), rownames = FALSE,
+          colnames = c("parameter", "value", "where it came from"),
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
 # Session info
 
 ```{r}
