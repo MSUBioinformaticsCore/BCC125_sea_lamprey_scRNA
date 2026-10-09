@@ -1830,13 +1830,13 @@ ggsave(p_go_shared, file = paste0(results_dir, "/shared_trend_GO_terms.png"),
 `r if (!have_go || nrow(go_shared_trend) == 0) "" else paste0("Each term carries a point from each dataset. A term whose two points sit close together is supported about equally on both sides. One with a long connector is carried mostly by the dataset further to the right. Every term shown passes p < ", params$go_pval, " on both sides, which is what being shared means here.")`
 
 
-# Sex specificity
+# Germ signatures in the series
 
 A germ cell signature scored across the Yasmin et al samples asks whether their series
-carries the germ cell states we describe. A signature built from a male germ
-cell state should score higher in their males than in their females, and a
-female one should do the reverse. Where it does not, the signature is reading
-germ cell content rather than germ cell identity.
+carries the germ cell states we describe. The first question is which part of
+their series each of our states looks like, taking all eight of their groups.
+The second restricts that to their mid males against their mid females, which
+is the sex contrast.
 
 Two marker sources are scored side by side, because they measure different
 things. *Atlas markers*, from `13_atlas_and_stage_correspondence.Rmd`, compare
@@ -1950,6 +1950,115 @@ have_pt = !is.null(node_pt)
 ```
 
 `r if (!have_cl_markers || !want_pt || have_pt) "" else paste0("**Pseudotime is left out.** ", pt_file, " was not found, so the subcluster panel is ordered by the sex difference and the pseudotime panel is dropped.")`
+
+## Where each state scores in the series
+
+Each signature is averaged within each of the eight Yasmin et al groups, so the
+question is which part of their series our state resembles rather than only
+which sex. The group a signature peaks in is the direct answer. A state whose
+peak sits where the trajectory places it is corresponding; one that peaks
+somewhere else is not.
+
+```{r, eval=have_cl_markers}
+# Developmental order, males then females, with the shared larval group first.
+# Anything the sheet carries that is not in this list keeps its own name and is
+# appended, so a different group column cannot silently drop a group.
+yas_order = c("UD undifferentiated larvae", "PM prospective males",
+              "EM early males", "MM mid males", "LM late males",
+              "EF early females", "MF mid females", "LF late females")
+present   = unique(sample_meta$group_used)
+yas_levels = c(intersect(yas_order, present), setdiff(present, yas_order))
+
+node_group = dplyr::bind_rows(lapply(names(score_mats), function(src) {
+  m   = score_mats[[src]]
+  grp = sample_meta$group_used[match(rownames(m), sample_meta$run)]
+  dplyr::bind_rows(lapply(colnames(m), function(gp)
+    data.frame(source = src, group = gp, yas_group = grp,
+               score = as.numeric(m[, gp]), stringsAsFactors = FALSE)))
+})) %>%
+  dplyr::group_by(source, group, yas_group) %>%
+  dplyr::summarise(mean_score = mean(score), n_animals = dplyr::n(),
+                   .groups = "drop") %>%
+  dplyr::mutate(yas_group = factor(yas_group, levels = yas_levels))
+
+# the group each signature scores highest in
+node_peak = node_group %>%
+  dplyr::group_by(source, group) %>%
+  dplyr::slice_max(mean_score, n = 1, with_ties = FALSE) %>%
+  dplyr::ungroup()
+
+write.csv(node_group %>% dplyr::mutate(yas_group = as.character(yas_group)),
+          file = paste0(results_dir, "/germ_signature_by_group.csv"),
+          row.names = FALSE)
+
+datatable(node_group %>%
+            dplyr::mutate(mean_score = signif(mean_score, 3)),
+          rownames = FALSE, filter = "top", options = list(pageLength = 16))
+```
+
+```{r, eval=have_cl_markers, fig.width=9, fig.height=6}
+# Rows run in pseudotime where there is one, so the panel can be read against
+# the trajectory. The atlas has no pseudotime and falls back to its own names.
+# one limit across both panels, so the two fill scales are identical and
+# patchwork collects them into a single legend
+lim = max(abs(node_group$mean_score))
+
+corr_panel = function(src, last) {
+  d  = node_group %>% dplyr::filter(source == src)
+  pt = node_pt$mean_pseudotime[match(d$group, node_pt$group)]
+  o  = if (all(is.na(pt))) rank(d$group) else pt
+  lv = unique(d$group[order(o)])
+  d$group  = factor(d$group, levels = lv)
+  pk = node_peak %>% dplyr::filter(source == src) %>%
+    dplyr::mutate(group = factor(group, levels = lv))
+
+  ggplot(d, aes(x = yas_group, y = group, fill = mean_score)) +
+    geom_tile(colour = "white", linewidth = .5) +
+    # the peak group, ringed rather than recolored, so the fill scale stays
+    # readable underneath it
+    geom_point(data = pk, shape = 21, size = 2.4, fill = NA,
+               colour = "grey10", stroke = .7) +
+    scale_fill_distiller(palette = "RdBu", limits = c(-lim, lim),
+                         name = "mean score") +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) +
+    labs(x = NULL, y = NULL, title = src) +
+    theme_bw(base_size = 9) +
+    # the group names are the same on every panel, so only the bottom one
+    # spells them out
+    theme(axis.text.x = if (last) element_text(angle = 40, hjust = 1) else
+                        element_blank(),
+          axis.ticks.x = if (last) element_line() else element_blank(),
+          panel.grid = element_blank(),
+          plot.title = element_text(size = 9, face = "plain"))
+}
+
+srcs_c = unique(node_group$source)
+p_corr = patchwork::wrap_plots(Map(corr_panel, srcs_c,
+                                   seq_along(srcs_c) == length(srcs_c)),
+                               ncol = 1,
+                               heights = vapply(srcs_c, function(x)
+                                 dplyr::n_distinct(
+                                   node_group$group[node_group$source == x]),
+                                 integer(1))) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(
+    tag_levels = "A",
+    title = "Where each germ signature scores across the Yasmin et al series",
+    subtitle = paste0("mean score per group, ringed at each signature's peak",
+                      if (have_pt) "; subclusters ordered by pseudotime" else ""),
+    theme = theme(plot.title = element_text(size = 11),
+                  plot.subtitle = element_text(size = 9)))
+
+p_corr
+
+ggsave(p_corr, file = paste0(results_dir, "/germ_signature_by_group.png"),
+       width = 9, height = 6, dpi = 300)
+```
+
+`r if (!have_cl_markers) "" else { pk = node_peak[node_peak$source == "germ subclusters", ]; if (nrow(pk) == 0) "" else { pk = pk[order(match(pk$group, if (have_pt) node_pt$group[order(node_pt$mean_pseudotime)] else sort(pk$group))), ]; paste0("Peak group per subcluster, in pseudotime order: ", paste0(pk$group, " in ", as.character(pk$yas_group), collapse = "; "), ".") } }`
+
+## Sex specificity
 
 ```{r, eval=have_cl_markers}
 sex_tab = dplyr::bind_rows(lapply(names(score_mats), function(src)
@@ -2217,6 +2326,8 @@ file_notes = c(
   "top_gene_list_upset.png"        = "Intersections of our top gene lists with Yasmin et al trend lists, largest first, as an UpSet plot.",
   "shared_trend_GO_terms.csv"      = "Terms enriched in our top genes and in Yasmin et al trend genes on the same sex in the same direction, with each side's p-value, FDR and gene count.",
   "shared_trend_GO_terms.png"      = "The strongest of those shared terms, each with a point per dataset, faceted by sex and direction.",
+  "germ_signature_by_group.csv"    = "Mean germ signature score in each of the eight Yasmin et al groups, one row per signature and group, with the number of animals behind each mean.",
+  "germ_signature_by_group.png"    = "The same scores as a heatmap, signatures by group, with each signature's peak group ringed.",
   "germ_signature_sex.csv"         = "Mean germ signature score in Yasmin et al mid males and mid females, per signature and marker source, with the difference between them. The germ subcluster rows also carry that node's mean pseudotime and its cell count; the atlas rows have neither.",
   "bulk_validation_summary.png"    = "The enrichment curves and the effect size scatters in one figure, drawn at 180 by 225 mm and written at 600 dpi.",
   "bulk_validation_summary.pdf"    = "The same figure as vector at the same size, which is the one to submit.",
