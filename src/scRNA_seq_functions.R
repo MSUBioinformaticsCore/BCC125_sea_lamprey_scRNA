@@ -1883,3 +1883,42 @@ pseudotime_variance <- function(pt_df, lib_cols = NULL,
        figure = patchwork::wrap_plots(p_dist, p_var, ncol = 1,
                                       heights = c(3, 1)))
 }
+
+# What this run was given, as a table for the report.
+#
+# params holds the effective values: the Rmd's declared defaults with whatever
+# the knit script passed to render() on top. Nothing else in an html_document
+# shows them, so without this the reader cannot tell what produced the numbers
+# on the page.
+#
+# Where the declared defaults can be read back off the file, a third column
+# says whether the value came from the knit script or from the Rmd. That read
+# is wrapped, because it depends on knitr knowing its own input and is not
+# worth failing a knit over.
+params_table <- function(params, input = NULL) {
+  flat <- vapply(names(params), function(n) {
+    v <- params[[n]]
+    if (is.null(v) || length(v) == 0) "" else
+      paste(format(unlist(v), trim = TRUE), collapse = ", ")
+  }, character(1))
+
+  out <- data.frame(parameter = names(params), value = unname(flat),
+                    stringsAsFactors = FALSE)
+
+  defaults <- tryCatch({
+    f <- if (is.null(input)) knitr::current_input() else input
+    d <- rmarkdown::yaml_front_matter(f)$params
+    vapply(out$parameter, function(n) {
+      if (!n %in% names(d)) return(NA_character_)
+      v <- d[[n]]
+      if (is.list(v) && "value" %in% names(v)) v <- v$value
+      if (is.null(v) || length(v) == 0) "" else
+        paste(format(unlist(v), trim = TRUE), collapse = ", ")
+    }, character(1))
+  }, error = function(e) rep(NA_character_, nrow(out)))
+
+  out$source <- ifelse(is.na(defaults), "",
+                       ifelse(defaults == out$value, "document default",
+                              paste0("set for this run, default ", defaults)))
+  out[order(out$parameter), , drop = FALSE]
+}
