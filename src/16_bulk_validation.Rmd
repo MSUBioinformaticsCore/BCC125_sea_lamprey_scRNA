@@ -465,9 +465,12 @@ our transformers by stage.
 Each trend is a regression rather than a contrast between two groups. Every
 animal on a sex's axis enters at once carrying its own trend score, and
 expression is regressed on that score, so the intermediate groups contribute
-rather than being set aside. The design is the score itself, dispersions are
-estimated on those libraries, and the quasi-likelihood F test is taken on the
-slope. A positive slope means the gene rises along the ordering.
+rather than being set aside.
+
+The design matrix holds an intercept and one column, the score, so the model has
+a single coefficient beyond the intercept and that coefficient is the slope.
+Dispersions are estimated on those libraries, and the quasi-likelihood F test is
+taken on the slope. A positive slope means the gene rises along the ordering.
 
 The slope is reported two ways, as the coefficient itself and as the change
 across the span the score covers; the scatter section below says which is which
@@ -611,19 +614,9 @@ count of one. The two larval columns are averaged, and that average is
 subtracted from each transformer column, so our male and female effects are each
 one transformer library against the mean of the same two larval libraries.
 
-
 Two larval libraries against one transformer library per sex is not a formal
 test. The log fold change is used as an effect size. No p-values are reported
 from it.
-
-Nothing on the Yasmin et al side requires a gene to be measurable here. Their
-`filterByExpr` runs on their 28 samples. The shared set is an intersection of
-identifiers. A gene with three counts in one of our libraries and none in the
-others produces a large fold change on almost no evidence. Such a gene sits near
-the top of a list ranked by absolute fold change. `min_pseudobulk_count` marks
-the genes that carry enough counts here to be worth ranking. Both the marked and
-unmarked sets are carried through the comparison. The effect of the filter is
-therefore visible rather than assumed.
 
 ```{r, eval=have_bulk}
 pb = pseudobulk[shared, ][tested, ]
@@ -706,7 +699,12 @@ datatable(top_counts %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 `r if (have_bulk) { pick = function(s) top_counts$pct_below_cutoff[top_counts$set == paste0("top ", top_probe, ", ", s)]; pm = pick("male"); pf = pick("female"); hi = c("male", "female")[c(pm > 25, pf > 25)]; nums = paste0(signif(pm, 3), "% of the top male genes and ", signif(pf, 3), "% of the top female genes fall below the count cutoff. "); if (length(hi) == 0) paste0(nums, "Neither unfiltered ranking is dominated by low-count genes.") else paste0("**The top ", paste(hi, collapse = " and "), if (length(hi) == 2) " lists are" else " list is", " largely low-count.** ", nums, "The filtered results below are the ones to read.") } else ""`
 
-# The comparison
+# Effect size agreement
+
+Every gene carries an effect size on both sides. This section asks whether the
+two sets of numbers move together. It reports the Spearman correlation across
+genes, the share of genes the two datasets push the same way, and a null for
+each statistic built by relabeling the animals.
 
 ```{r, eval=have_bulk}
 cmp = ours %>% dplyr::inner_join(yasmin_res, by = "Gene")
@@ -827,40 +825,36 @@ datatable(data.frame(
   options = list(dom = "t", ordering = FALSE, paging = FALSE))
 ```
 
-The table now carries every combination of contrast, gene pool and ranking side.
+The table carries every contrast crossed with both ranking sides.
 `ranked_on = "ours"` is the original comparison. `ranked_on = "yasmin"` is the
 reciprocal one: their contrast picks the genes and our four libraries only have
 to follow. The reciprocal direction is the better powered of the two, since the
 selection happens on the replicated side.
 
-`r if (have_bulk) { say = function(ax) { a = agreement[agreement$axis == ax & agreement$pool == "well measured", ]; ao = a[a$ranked_on == "ours", ]; ay = a[a$ranked_on == "yasmin", ]; paste0(ax, ": genome-wide ", signif(ao$rho[ao$set == "genome-wide"], 3), ", our ", top_set_lab, " ", signif(ao$rho[ao$set == top_set_lab], 3), ", their ", top_set_lab, " ", signif(ay$rho[ay$set == top_set_lab], 3)) }; paste0("Spearman rho among well measured genes, for each contrast. ", paste(vapply(names(axis_cols), say, character(1)), collapse = ". "), ". Each of these has its own null, computed below, and that is what it has to be read against. The genome-wide and top-gene values are not comparable with each other.") } else ""`
-
 ## A label permutation null
 
-The two numbers above cannot be read as a test on their own. The top-gene set is
-picked by our own log fold change, which is one of the two variables being
-correlated. Selecting large effects widens the spread of that variable and
-lowers its relative measurement error, which raises the correlation by itself.
-Selecting on a noisy estimate also picks up genes whose effect we overstated,
-and those regress toward the mean in Yasmin et al, which lowers it. Both act at once,
-and neither can be signed without a null.
+The numbers above need something to be measured against. A rho of 0.25 says
+little on its own, because it is not obvious what rho an unrelated contrast
+would have produced on the same genes.
 
-The permutation holds all of that fixed. Group labels are reassigned at random
-among the 28 animals. The same contrast shape is refitted. The agreement
-statistics are recomputed against our unchanged effect sizes and our unchanged
-top-gene list. Whatever the selection does to the observed value, it does to
-every null value in the same way. What is left is whether Yasmin et al stage
-contrast agrees with our genes more than an arbitrary contrast of the same shape
-drawn from the same animals.
+The null answers that by making unrelated contrasts. Animals are put into groups
+at random, the contrast is refitted on those scrambled labels, and the agreement
+statistics are recomputed against our effect sizes, which never change. Doing
+that many times shows the range the statistic covers when the grouping carries
+no developmental information. `p_perm` is the share of those random contrasts
+that matched our genes as well as the real one did, or better.
 
-Labels are drawn from the whole series rather than shuffled within the contrast.
-Shuffling within it has too few distinct splits to resolve anything: 2 against 6
-gives 28 arrangements and 2 against 2 gives 6, so the smallest p-value reachable
-on the female endpoint would be 0.17.
+Our gene list is held fixed the whole time. Picking the top genes on our own
+effect inflates the correlation, but it inflates the null by the same amount, so
+the two stay comparable.
 
-All four contrasts get a null, on the same terms. For the endpoints a random set
-of animals is split into groups of the observed sizes. For the trends a random
-set of the same size receives the observed score vector.
+Animals are drawn from the whole 28-animal series rather than shuffled inside
+one contrast, because a small contrast has too few rearrangements to give a
+useful p-value. `r if (have_bulk) paste0("Reshuffling the male endpoint within itself allows only ", choose(length(runs_ud) + length(runs_mm), length(runs_ud)), " splits and the female endpoint ", choose(length(runs_ud) + length(runs_mf), length(runs_ud)), ", putting a floor of ", signif(1 / choose(length(runs_ud) + length(runs_mm), length(runs_ud)), 2), " and ", signif(1 / choose(length(runs_ud) + length(runs_mf), length(runs_ud)), 2), " under the p-value.") else ""`
+
+Every contrast gets a null on the same terms. An endpoint takes a random set of
+animals and splits it into groups of the observed sizes. A trend takes a random
+set of the same size and gives it the observed score vector.
 
 The trends use more animals than the endpoints, which is not the same as having
 more power here. Contrasting the two extreme groups gives a larger effect than
@@ -1092,10 +1086,38 @@ against that of Yasmin et al, with points colored by whether the two datasets pu
 the same direction. Each panel carries its Spearman correlation and the
 permutation p-value for that correlation.
 
-The endpoints and the trends get their own figure. Their y axes are different
-quantities, a fold change between two groups of animals against the fitted change
-across the whole Yasmin et al series, and putting them on shared panels would invite reading
-one against the other.
+The endpoints and the trends get their own figure, because their y axes are
+different quantities. Putting them on shared panels would invite reading one
+against the other.
+
+The endpoint panels compare two groups, so their y value is an ordinary log fold
+change: 1 means the gene sits twice as high in the mid group as in the larvae.
+
+The trend panels come from a fitted line. Each animal carries a trend score, a
+number that puts it in developmental order: the undifferentiated larvae at 0,
+the next group at 1, the one after at 2, with the animals inside a group spread
+over the fraction between. Expression is regressed on that score, which gives a
+slope. The slope on its own says the change for a step of 1, and a step of 1 is
+not a fixed amount of development, so the number cannot be read without also
+knowing how far the score runs.
+
+The y value is therefore the slope read across the span the score covers, which
+is the log2 change from the first animal in the series to the last. `r if (!have_bulk) "" else paste0("The male score runs 0 to ", signif(max(male_score), 3), " and the female score 0 to ", signif(max(fem_score), 3), ".")`
+A value of 1 means the gene doubles over the whole series. Both figures are then
+log2 fold changes, and what still differs is the comparison: the endpoints
+contrast two groups of animals directly, while the trends read the change off a
+line through every animal.
+
+Three columns in the export cover this, because the slope and the rescaling
+answer different questions. `male_end_logFC` and `fem_end_logFC` are fold
+changes between two groups. `male_trend_slope` and `fem_trend_slope` are the
+coefficients edgeR returned, kept so that refitting reproduces this file.
+`male_trend_series_log2FC` and `fem_trend_series_log2FC` are those slopes across
+the span, which is what the figures and every statistic use.
+
+The rescaling changes no result. Spearman rho, percent same sign, the top-gene
+rankings and the permutation are all ranks or signs, so multiplying one column
+by a positive constant leaves every one of them identical.
 
 ```{r, eval=have_bulk}
 # our effect picks the genes. The selection made on the Yasmin et al side is in
@@ -1166,6 +1188,7 @@ agreement_figure = function(axes, ylab, what) {
   panel_ann = dir_ann %>%
     dplyr::group_by(axis, ranked_on) %>%
     dplyr::summarise(dir_txt = paste0(our_dir, " ", k, "/", n, " agree, ",
+                                      round(100 * K / N), "% by chance, ",
                                       "p = ", signif(p_dir, 2),
                                       collapse = "\n"), .groups = "drop") %>%
     dplyr::mutate(rank_key = ifelse(grepl("our effect", ranked_on),
@@ -1228,7 +1251,7 @@ ggsave(p_trend, file = paste0(results_dir, "/bulk_trend_agreement.png"),
        width = 12, height = 5.5, dpi = 300)
 ```
 
-`r if (have_bulk) paste0("Points are our ", top_set_lab, " genes, colored by whether the two datasets agree on direction, with the rho from the agreement table printed per panel. Beneath it, each half of our set is counted against the share of all genes Yasmin et al move that way in that contrast, which is the background it has to beat and is not 50 percent. The test is hypergeometric and one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1 rather than a small one.") else ""`
+`r if (have_bulk) paste0("Points are our ", top_set_lab, " genes, colored by whether the two datasets agree on direction. Each panel prints the rho from the agreement table, then one line per direction: how many of our hundred Yasmin et al move the same way, how many would do so by chance given the share of all genes moving that way in that contrast, and a hypergeometric p-value. The chance share is not 50 percent, because their contrasts are not balanced. The test is one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1.") else ""`
 
 
 ## Genome-wide scatter
@@ -1236,35 +1259,10 @@ ggsave(p_trend, file = paste0(results_dir, "/bulk_trend_agreement.png"),
 Every gene measurable on both sides, our effect against that of Yasmin et al, with the
 fifteen largest of ours labeled in each panel.
 
-The two rows are not the same quantity on the y axis. The endpoint panels
-compare two groups, so their y value is an ordinary log fold change: 1 means the
-gene sits twice as high in the mid group as in the larvae.
-
-The trend panels come from a fitted line rather than a contrast. Each animal
-carries a trend score, a number that puts it in developmental order: the
-undifferentiated larvae at 0, the next group at 1, the one after at 2, with the
-animals inside a group spread over the fraction between. Expression is regressed
-on that score, which gives a slope. The slope on its own says the change for a
-step of 1, and a step of 1 is not a fixed amount of development, so the number
-cannot be read without also knowing how far the score runs.
-
-The y value is therefore the slope read across the span the score covers, which
-is the log2 change from the first animal in the series to the last. `r if (!have_bulk) "" else paste0("The male score runs 0 to ", signif(max(male_score), 3), " and the female score 0 to ", signif(max(fem_score), 3), ".")`
-A value of 1 means the gene doubles over the whole series. Both rows of the
-figure are then log2 fold changes, and what still differs is the comparison:
-the endpoints contrast two groups of animals directly, while the trends read the
-change off a line through every animal.
-
-Three columns in the export cover this, because the slope and the rescaling
-answer different questions. `male_end_logFC` and `fem_end_logFC` are fold
-changes between two groups. `male_trend_slope` and `fem_trend_slope` are the
-coefficients edgeR returned, kept so that refitting reproduces this file.
-`male_trend_series_log2FC` and `fem_trend_series_log2FC` are those slopes across
-the span, which is what the figures and every statistic use.
-
-The rescaling changes no result. Spearman rho, percent same sign, the top-gene
-rankings and the permutation are all ranks or signs, so multiplying one column
-by a positive constant leaves every one of them identical.
+The y axes carry the same two quantities described above: a log fold change
+between two groups in the endpoint row, and the fitted change across the whole
+series in the trend row. All four panels here sit in one figure, so the rows are
+not comparable with each other even though both are on a log2 scale.
 
 ```{r, eval=have_bulk, fig.width=11, fig.height=11, dev="png", dpi=600}
 # One point per measurable gene in each of four panels, so this one stays
@@ -1364,11 +1362,8 @@ set_key  = dplyr::bind_rows(lapply(set_rows, `[[`, "key"))
 
 ## Enrichment of our top genes in the Yasmin et al ranking
 
-Asking whether our top genes are also in the Yasmin et al top hundred needs a
-cutoff on that side, and a gene ranked just outside it counts for nothing.
-Enrichment
-removes that. Her genes are ranked once, from most up to most down, and the
-question becomes whether our list sits toward one end of that ranking rather than
+The Yasmin et al genes are ranked once, from most up to most down, and the
+question is whether our list sits toward one end of that ranking rather than
 spread through it.
 
 Our top hundred up and our top hundred down are separate gene sets, and each is
@@ -1376,10 +1371,8 @@ tested on its own. A set of genes we call up should land at the top of the
 ranking, giving a positive enrichment score, and a set we call down should land
 at the bottom, giving a negative one.
 
-Her ranking is the signed test statistic, the root of the quasi-likelihood F
-with the sign of the fold change. Ranking on the fold change instead would put
-genes with large but poorly measured changes at the top, and ranking on the
-p-value cannot carry a direction.
+The ranking is the signed test statistic, the root of the quasi-likelihood F
+with the sign of the fold change.
 
 ```{r}
 have_fgsea = have_bulk && requireNamespace("fgsea", quietly = TRUE)
@@ -1470,7 +1463,7 @@ datatable(data.frame(
 `r if (!have_fgsea) "" else { ok = gsea_tab %>% dplyr::filter(as_expected, fdr < 0.05); up = gsea_tab %>% dplyr::filter(direction == "up"); dn = gsea_tab %>% dplyr::filter(direction == "down"); paste0(nrow(ok), " of the ", nrow(gsea_tab), " tests enrich in the expected direction at FDR < 0.05. The up sets score ", paste(range(signif(up$NES, 2)), collapse = " to "), " and the down sets ", paste(range(signif(dn$NES, 2)), collapse = " to "), ". A set that enriches the wrong way, or not at all, is listed with as_expected FALSE. The genes behind each score are in top_gene_enrichment_leading_edge.csv.") }`
 
 ```{r, eval=have_fgsea, fig.width=10, fig.height=7}
-# The running enrichment score. Her genes are laid out left to right from most
+# The running enrichment score. The ranked genes are laid out left to right from
 # up to most down. The walk steps up at each gene of our set, in proportion to
 # its statistic, and down at every other gene, so a set concentrated at one end
 # drives the line away from zero and a set spread evenly leaves it flat. The
@@ -1980,6 +1973,40 @@ ggsave(p_sex, file = paste0(results_dir, "/germ_signature_sex.png"),
 `r if (!have_cl_markers) "" else { n_m = sum(sex_tab$difference > 0); n_f = sum(sex_tab$difference < 0); paste0("Scores are averages of genes standardized across all 28 samples, so zero is the series mean rather than no expression. Of ", nrow(sex_tab), " signatures, ", n_m, " score higher in the mid males and ", n_f, " higher in the mid females. A signature whose two points nearly coincide is not reading identity, whatever it was built from.") }`
 
 
+# Summary figure
+
+The two comparisons that ask whether our signal reproduces, in one figure,
+assembled from the plot objects the sections above already built, so nothing is
+recomputed and nothing can drift out of step with the tables. The germ signature
+scores are a different question and stay in their own figure.
+
+```{r, eval=have_bulk && have_fgsea, fig.width=14, fig.height=11}
+# titles are rewritten for the composite and the per-figure subtitles dropped,
+# since the caption below carries what they said
+panel = function(p, ttl) p + labs(title = ttl, subtitle = NULL) +
+  theme(plot.title = element_text(size = 10, face = "plain"))
+
+composite =
+  panel(p_gsea, "Our top genes in the Yasmin et al ranking") /
+  # the two scatters carry the same legend, so the row collects it into one
+  ((panel(p_end,   "Effect sizes, endpoint contrasts") |
+    panel(p_trend, "Effect sizes, trend contrasts")) +
+     patchwork::plot_layout(guides = "collect") &
+     theme(legend.position = "bottom")) +
+  patchwork::plot_layout(heights = c(1.5, 1)) +
+  patchwork::plot_annotation(tag_levels = "A")
+
+composite
+
+ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.png"),
+       width = 14, height = 11, dpi = 300, limitsize = FALSE)
+ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.pdf"),
+       width = 14, height = 11, limitsize = FALSE)
+```
+
+`r if (!(have_bulk && have_fgsea)) "" else paste0("**A** walks the Yasmin et al ranking from most up to most down and steps up at each of our genes, so a set concentrated at one end drives the line away from zero. **B** and **C** plot our ", top_set_lab, " genes against the Yasmin et al effect sizes, colored by whether the two datasets agree on direction, with the counts and their hypergeometric p-values printed per panel. A asks whether our strongest genes concentrate in theirs; B and C ask whether the effect sizes themselves agree.") else ""`
+
+
 # Full gene table
 
 ```{r, eval=have_bulk}
@@ -2005,7 +2032,7 @@ if (have_bulk) cat("# Export\n\n## Everything written by this document\n")
 ```{r, eval=have_bulk}
 file_notes = c(
   "trend_scores.csv"               = "The ordered covariate every Yasmin et al animal takes on its sex's trend axis, with the group, length and recorded life stage it was built from.",
-  "bulk_agreement.csv"             = "Spearman rho and percent sign agreement between our stage effect and that of Yasmin et al, for every axis, gene pool and ranking side, with bootstrap intervals.",
+  "bulk_agreement.csv"             = "Spearman rho and percent sign agreement between our stage effect and that of Yasmin et al, for every contrast and ranking side, genome-wide and on the top genes, with bootstrap intervals on rho.",
   "bulk_permutation_null.csv"      = "Each agreement statistic against its label-permutation null: the observed value, the null median and 95th percentile, and the empirical p-value.",
   "bulk_permutation_null.png"      = "The null distribution of rho across the top genes, with the observed value marked.",
   "bulk_endpoint_agreement.png"    = "Our top genes, our effect against the Yasmin et al endpoint contrasts, colored by whether the two datasets agree on direction.",
@@ -2020,8 +2047,10 @@ file_notes = c(
   "shared_trend_GO_terms.csv"      = "Terms enriched in our top genes and in Yasmin et al trend genes on the same sex in the same direction, with each side's p-value, FDR and gene count.",
   "shared_trend_GO_terms.png"      = "The strongest of those shared terms, each with a point per dataset, faceted by sex and direction.",
   "germ_signature_sex.csv"         = "Mean germ signature score in Yasmin et al mid males and mid females, per signature and marker source, with the difference between them.",
+  "bulk_validation_summary.png"    = "The enrichment curves and the effect size scatters in one figure.",
+  "bulk_validation_summary.pdf"    = "The same figure as vector, for assembly.",
   "germ_signature_sex.png"         = "The same scores as paired points per signature, ordered by the male-minus-female difference.",
-  "bulk_vs_pseudobulk_per_gene.csv" = "One row per gene: our male and female stage effects, each Yasmin et al contrast's coefficient, and the Wang identifier. The endpoint columns are log fold changes between two groups. Each Yasmin et al trend carries two columns: *_trend_slope, the coefficient edgeR returned for the regression on the trend score, and *_trend_series_log2FC, that slope multiplied by the span the score covers, which is the log2 change across her whole series and the column every figure and statistic here uses. edgeR names its coefficient logFC for any design, so the slope is renamed to keep it apart from the endpoint columns, which are fold changes between two groups.")
+  "bulk_vs_pseudobulk_per_gene.csv" = "One row per gene: our male and female stage effects, each Yasmin et al contrast's coefficient, and the Wang identifier. The endpoint columns are log fold changes between two groups. Each Yasmin et al trend carries two columns: *_trend_slope, the coefficient edgeR returned for the regression on the trend score, and *_trend_series_log2FC, that slope multiplied by the span the score covers, which is the log2 change across the whole series and the column every figure and statistic here uses. edgeR names its coefficient logFC for any design, so the slope is renamed to keep it apart from the endpoint columns, which are fold changes between two groups.")
 
 in_dir = sort(setdiff(list.files(results_dir), "Robjects"))
 
