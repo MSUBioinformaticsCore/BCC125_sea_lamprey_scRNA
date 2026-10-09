@@ -27,6 +27,7 @@ params:
     pseudotime_female_paths: "5.2"
     fine_marker_suffix: "_IEG_remove"
     fine_female_paths: ""
+    fgsea_nperm_simple: 10000
     n_signature_genes: 100
     cores: 1
 ---
@@ -1527,8 +1528,17 @@ gsea_raw = lapply(names(axis_cols), function(ax) {
   # BPPARAM rather than nproc: with nproc the multilevel step draws a progress
   # bar straight to the console, which lands in the knitted output and is not
   # caught by the chunk's message or warning options.
+  #
+  # nPermSimple above the default of 1000. fgsea normalizes an enrichment score
+  # against the null scores that came out with the same sign. Several of these
+  # rankings lean heavily one way, so a random set almost always walks that
+  # way, and a set enriching against the lean has almost no same-sign null to
+  # normalize against. fgsea then returns NA for NES, p and FDR, and the
+  # stronger the enrichment the more likely the NA. Raising the sample fills
+  # the tail in.
   list(ax = ax, rank_vec = rank_vec,
        res = fgsea::fgsea(use, rank_vec, minSize = 10,
+                          nPermSimple = as.integer(params$fgsea_nperm_simple),
                           BPPARAM = BiocParallel::SerialParam(progressbar = FALSE)))
 })
 
@@ -1544,6 +1554,11 @@ gsea_tab = dplyr::bind_rows(lapply(gsea_raw, function(z) {
                                 (direction == "down" & NES < 0)) %>%
     dplyr::relocate(source, .after = set)
 }))
+
+# A set whose NES came back NA was not normalized, which is the unbalanced
+# ranking described above rather than a weak result. Raise fgsea_nperm_simple
+# and knit again rather than reading the NA as nothing.
+gsea_na = gsea_tab %>% dplyr::filter(is.na(NES))
 
 write.csv(gsea_tab, file = paste0(results_dir, "/top_gene_enrichment.csv"),
           row.names = FALSE)
@@ -1573,6 +1588,8 @@ datatable(gsea_tab %>%
             mutate(across(where(is.numeric), ~signif(., 3))),
           rownames = FALSE, filter = "top", options = list(pageLength = 10))
 ```
+
+`r if (!have_fgsea || nrow(gsea_na) == 0) "" else paste0("**", nrow(gsea_na), " set(s) returned NA rather than a score: ", paste0(gsea_na$set, " on ", gsea_na$contrast, collapse = "; "), ".** fgsea could not normalize them against a null of the same sign, which happens when the ranking leans one way and the set enriches against the lean. The enrichment score itself is in the ES column. Raise fgsea_nperm_simple above ", params$fgsea_nperm_simple, " and knit again.")`
 
 ```{r, eval=have_fgsea}
 datatable(data.frame(
