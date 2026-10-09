@@ -799,8 +799,9 @@ sub_nodes_now = node_levels[grepl("\\.", node_levels)]
 ```{r}
 map_tab = NULL
 
-# Under subcluster_source = "prev" the nodes already carry her numbering, so
-# every label attaches by name and there is nothing to match by overlap.
+# Under subcluster_source = "prev" the nodes already carry the annotated run's
+# numbering, so every label attaches by name and there is nothing to match by
+# overlap.
 if (!reuse_sub && have_prev && length(sub_nodes_now) > 0) {
   prev = read.csv(prev_file, stringsAsFactors = FALSE)
   stopifnot(all(c("barcode", "node") %in% colnames(prev)))
@@ -2165,14 +2166,52 @@ if (length(graph_sets) > 0) {
 
 ## What the ordering tracks
 
-```{r}
-lib_r2 = if (dplyr::n_distinct(pt_df$library) > 1)
-  summary(lm(pseudotime ~ library, data = pt_df))$r.squared else NA_real_
-stage_r2 = if (dplyr::n_distinct(pt_df$stage) > 1)
-  summary(lm(pseudotime ~ stage, data = pt_df))$r.squared else NA_real_
+Cells from four libraries are ordered along one axis, and two of those
+libraries are larvae while two are transformers. An ordering that only
+separated the libraries would reproduce the sample sheet rather than describe
+development. This asks how much of it does that.
+
+Pseudotime is regressed on library, and separately on stage. For a categorical
+predictor the R squared of that regression is the share of the total spread in
+pseudotime that sits between the groups rather than within them. At 1 every
+library would occupy its own band with no overlap, and naming the library would
+tell you a cell's pseudotime. At 0 every library would cover the same range,
+and the whole ordering would be among cells from the same animal. Neither
+number is a p-value. With tens of thousands of cells the between-library
+difference is certain to be nonzero, and the question is how large it is.
+
+The libraries nest inside stage, each being one stage throughout, so the
+library figure can only be the larger of the two. The difference between them
+is what separating four libraries adds over separating two stages, which here
+is batch and sex.
+
+The trajectory is fitted in the corrected space, where fastMNN has already
+pulled the libraries onto each other. A low figure here is a check on that
+correction rather than independent evidence that the ordering is
+developmental: a high one would say the correction had failed and the
+ordering was separating animals. Evidence from outside this dataset is in
+`16_bulk_validation.Rmd`, where genes ordered by this pseudotime are tested
+against a bulk series collected by a different group.
+
+```{r, fig.width=7, fig.height=5}
+pt_var   = pseudotime_variance(pt_df, lib_cols)
+lib_r2   = pt_var$lib_r2
+stage_r2 = pt_var$stage_r2
+
+pt_var$figure
+
+ggsave(pt_var$figure,
+       file = paste0(results_dir, "/pseudotime_variance_by_library.png"),
+       width = 7, height = 5, dpi = 300)
+
+write.csv(pt_var$parts,
+          file = paste0(results_dir, "/pseudotime_variance_by_library.csv"),
+          row.names = FALSE)
 ```
 
-`r if (is.na(lib_r2)) "All cells come from one library, so library cannot explain pseudotime." else paste0("Library explains ", round(100 * lib_r2, 1), "% of the variance in pseudotime", if (!is.na(stage_r2)) paste0(", and stage explains ", round(100 * stage_r2, 1), "%") else "", ".")`
+`r if (is.na(lib_r2)) "All cells come from one library, so library cannot explain pseudotime." else paste0("Library explains ", round(100 * lib_r2, 1), "% of the variance in pseudotime", if (!is.na(stage_r2)) paste0(", and stage explains ", round(100 * stage_r2, 1), "%") else "", ". ", round(100 * (1 - lib_r2), 1), "% is variation among cells from the same library, which is the part of the ordering the sample sheet does not account for.")`
+
+`r if (is.na(lib_r2) || is.na(stage_r2)) "" else paste0("The upper panel is where the number comes from. A library whose cells cover the full range contributes little to it, and one confined to a narrow band contributes a lot.")`
 
 # Pseudotime-associated genes
 
@@ -2354,6 +2393,8 @@ file_notes = c(
   "tscan_node_graph_marker_sets.png"  = "The same tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
   "tscan_node_graph_marker_sets.pdf"  = "The marker set panels as a vector file.",
   "tscan_pseudotime_by_node.png"      = "Pseudotime distribution per node and per library.",
+  "pseudotime_variance_by_library.png" = "Pseudotime within each library, and the share of its variance that sits between libraries rather than within them.",
+  "pseudotime_variance_by_library.csv" = "That share split into stage, what separating the libraries adds over stage, and the remainder within libraries.",
   "node_identity_scores.png"          = "Marker expression per node, one dot per gene.",
   "removal_evidence_bubble.png"       = "The marker sets named by removal_evidence_sets, per node, with any node being removed first on the axis. The evidence behind a removal.",
   "node_depth_and_technical.png"      = "Depth and technical content per node of this run.",

@@ -1793,3 +1793,93 @@ technical_gene_ids <- function(gene_description) {
   list(mito = mito, rrna = rrna, ribo = ribo,
        all = Reduce(union, list(mito, rrna, ribo)))
 }
+
+# How much of the spread in pseudotime is just which sample a cell came from.
+#
+# R squared from a regression of pseudotime on a categorical predictor is the
+# share of the total spread that sits between the groups rather than within
+# them. Regressing on library asks how much of the ordering is answered by
+# naming the library: at 1 the trajectory would only be separating the
+# libraries, at 0 every library would cover the same range and the ordering
+# would be entirely within-sample. Regressing on stage asks the same of the
+# larva against transformer split alone.
+#
+# The libraries nest inside stage here, each library being one stage
+# throughout, so the library figure can only be the larger of the two. The gap
+# between them is what separating the four libraries adds over separating the
+# two stages, which is batch and sex.
+#
+# Returns the two numbers, the three-way split of the variance, and a figure.
+# lib_cols is the document's own library palette; pass NULL for ggplot's.
+pseudotime_variance <- function(pt_df, lib_cols = NULL,
+                                pseudotime_col = "pseudotime",
+                                library_col = "library",
+                                stage_col = "stage") {
+  d <- pt_df[is.finite(pt_df[[pseudotime_col]]), , drop = FALSE]
+
+  r2_of <- function(f) {
+    if (!f %in% colnames(d)) return(NA_real_)
+    if (dplyr::n_distinct(d[[f]]) < 2) return(NA_real_)
+    summary(stats::lm(stats::reformulate(f, pseudotime_col), data = d))$r.squared
+  }
+  lib_r2   <- r2_of(library_col)
+  stage_r2 <- r2_of(stage_col)
+
+  # the split only reads as nested when it is; if a library spans stages the
+  # two are not ordered and the middle term is meaningless, so it is dropped
+  nested <- !is.na(lib_r2) && !is.na(stage_r2) && lib_r2 >= stage_r2
+  parts <- if (nested)
+    data.frame(part = factor(c("stage", "library beyond stage",
+                               "within library"),
+                             levels = c("stage", "library beyond stage",
+                                        "within library")),
+               share = c(stage_r2, lib_r2 - stage_r2, 1 - lib_r2))
+  else
+    data.frame(part = factor(c("library", "within library"),
+                             levels = c("library", "within library")),
+               share = c(lib_r2, 1 - lib_r2))
+
+  p_dist <- ggplot2::ggplot(
+      d, ggplot2::aes(x = .data[[pseudotime_col]],
+                      y = .data[[library_col]],
+                      fill = .data[[library_col]])) +
+    ggplot2::geom_violin(scale = "width", colour = NA, alpha = .75) +
+    ggplot2::geom_boxplot(width = .16, outlier.shape = NA, fill = "white",
+                          colour = "grey25", linewidth = .35) +
+    ggplot2::labs(x = "pseudotime", y = NULL,
+                  title = "Pseudotime within each library") +
+    ggplot2::theme_bw(base_size = 10) +
+    ggplot2::theme(legend.position = "none",
+                   plot.title = ggplot2::element_text(size = 10,
+                                                      face = "plain"))
+  if (!is.null(lib_cols))
+    p_dist <- p_dist + ggplot2::scale_fill_manual(values = lib_cols)
+
+  share_cols <- c("stage" = "#0072B2", "library beyond stage" = "#56B4E9",
+                  "library" = "#0072B2", "within library" = "grey85")
+  p_var <- ggplot2::ggplot(parts, ggplot2::aes(x = share, y = "",
+                                               fill = part)) +
+    ggplot2::geom_col(width = .5, colour = "white", linewidth = .4,
+                      position = ggplot2::position_stack(reverse = TRUE)) +
+    ggplot2::geom_text(
+      data = parts[parts$share > .06, , drop = FALSE],
+      ggplot2::aes(label = paste0(round(100 * share, 1), "%")),
+      position = ggplot2::position_stack(vjust = .5, reverse = TRUE),
+      size = 3,
+      colour = ifelse(parts$part[parts$share > .06] == "within library",
+                      "grey20", "white")) +
+    ggplot2::scale_fill_manual(values = share_cols, name = NULL) +
+    ggplot2::scale_x_continuous(labels = function(x) paste0(100 * x, "%"),
+                                expand = c(0, 0)) +
+    ggplot2::labs(x = "share of the variance in pseudotime", y = NULL,
+                  title = "Where that spread sits") +
+    ggplot2::theme_bw(base_size = 10) +
+    ggplot2::theme(legend.position = "bottom",
+                   panel.grid.major.y = ggplot2::element_blank(),
+                   plot.title = ggplot2::element_text(size = 10,
+                                                      face = "plain"))
+
+  list(lib_r2 = lib_r2, stage_r2 = stage_r2, nested = nested, parts = parts,
+       figure = patchwork::wrap_plots(p_dist, p_var, ncol = 1,
+                                      heights = c(3, 1)))
+}
