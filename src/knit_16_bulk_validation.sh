@@ -130,6 +130,20 @@ FEM_PATHS="${FEM_PATHS:-5.2}"
 [[ -f "${SUBDIR}/tscan_pseudotime_genes.csv" ]] || \
   echo "note: ${SUBDIR}/tscan_pseudotime_genes.csv not found; the pseudotime gene sets will be skipped."
 
+# The same from the 19 fine-node run. FINE_FEM_PATHS has no sensible default,
+# because the fine node names change whenever that run is redone. Leave it
+# unset for the first knit, read the path names the document prints, then set
+# it and knit again.
+FINE_SUFFIX="${FINE_SUFFIX:-_IEG_remove}"
+FINE_FEM_PATHS="${FINE_FEM_PATHS:-}"
+FINEDIR="${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_fine_all${FINE_SUFFIX}"
+if [[ ! -f "${FINEDIR}/pseudotime_genes.csv" ]]; then
+  echo "note: ${FINEDIR}/pseudotime_genes.csv not found; the fine-node gene sets will be skipped."
+elif [[ -z "${FINE_FEM_PATHS}" ]]; then
+  echo "note: FINE_FEM_PATHS is unset; the fine-node gene sets will be skipped"
+  echo "      and the document will print the path names to set it to."
+fi
+
 GENOME_DIR="${GENOME_DIR:-/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus}"
 GAF="${GENOME_DIR}/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf"
 GONAMES="${GENOME_DIR}/GOs_names.txt"
@@ -171,6 +185,8 @@ Rscript -e "
                          min_pseudobulk_count = ${MIN_PB},
                          germ_marker_suffix   = '${GERM_SUFFIX}',
                          pseudotime_female_paths = '${FEM_PATHS}',
+                         fine_marker_suffix   = '${FINE_SUFFIX}',
+                         fine_female_paths    = '${FINE_FEM_PATHS}',
                          genome_dir           = '${GENOME_DIR}',
                          cores                = ${CORES}),
     envir         = new.env()
