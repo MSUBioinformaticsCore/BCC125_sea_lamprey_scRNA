@@ -121,6 +121,15 @@ SUBMARKERS="${SUBDIR}/subcluster_marker_genes.csv"
 [[ ! -f "${SUBMARKERS}" || -f "${SUBDIR}/pseudotime_per_cell.csv" ]] || \
   echo "note: ${SUBDIR}/pseudotime_per_cell.csv not found; the pseudotime panel will be skipped."
 
+# Genes changing along each trajectory path, tested for enrichment in the
+# Yasmin contrasts alongside the pseudobulk gene lists. FEM_PATHS names the
+# paths running out to the female terminal; every other path is treated as
+# male. Read the path names off the Trajectory section of 17 and change this
+# if the reclustering moves them.
+FEM_PATHS="${FEM_PATHS:-5.2}"
+[[ -f "${SUBDIR}/tscan_pseudotime_genes.csv" ]] || \
+  echo "note: ${SUBDIR}/tscan_pseudotime_genes.csv not found; the pseudotime gene sets will be skipped."
+
 GENOME_DIR="${GENOME_DIR:-/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus}"
 GAF="${GENOME_DIR}/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf"
 GONAMES="${GENOME_DIR}/GOs_names.txt"
@@ -161,6 +170,7 @@ Rscript -e "
                          n_boot               = ${N_BOOT},
                          min_pseudobulk_count = ${MIN_PB},
                          germ_marker_suffix   = '${GERM_SUFFIX}',
+                         pseudotime_female_paths = '${FEM_PATHS}',
                          genome_dir           = '${GENOME_DIR}',
                          cores                = ${CORES}),
     envir         = new.env()
