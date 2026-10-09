@@ -1129,7 +1129,11 @@ rank_sides = "ours"
 agree_cols = c(`TRUE` = "#0072B2", `FALSE` = "#D55E00")
 
 # Built once and called per contrast shape, so the two figures cannot drift apart.
-agreement_figure = function(axes, ylab, what) {
+# The size arguments carry the defaults this section draws at. The composite
+# calls the same function again with smaller type, because at journal width a
+# facet is about three inches and the annotation set in ten point runs off it.
+agreement_figure = function(axes, ylab, what, base_size = 11, pt_size = 1.6,
+                            lab_size = 2.4, ann_size = 3.1, n_lab = 10) {
   panel_grid = expand.grid(axis = axes, ranked_on = rank_sides,
                            stringsAsFactors = FALSE)
 
@@ -1204,18 +1208,18 @@ agreement_figure = function(axes, ylab, what) {
   p_top = ggplot(top, aes(x = ours, y = yasmin, colour = agree)) +
     geom_hline(yintercept = 0, colour = "grey70") +
     geom_vline(xintercept = 0, colour = "grey70") +
-    geom_point(size = 1.6, alpha = .85) +
+    geom_point(size = pt_size, alpha = .85) +
     geom_text_repel(data = top %>%
                       dplyr::group_by(axis, ranked_on) %>%
-                      dplyr::slice_max(abs(ours), n = 10, with_ties = FALSE),
+                      dplyr::slice_max(abs(ours), n = n_lab, with_ties = FALSE),
                     # the labels inherit the agree colour otherwise, which puts
                     # text in the same two colours as the points it sits among.
                     # A dark label on a white halo reads over either colour.
                     aes(label = label), colour = "grey15",
                     segment.colour = "grey65", bg.color = "white", bg.r = .12,
-                    size = 2.4, max.overlaps = 22, show.legend = FALSE) +
+                    size = lab_size, max.overlaps = 22, show.legend = FALSE) +
     geom_label(data = panel_ann, aes(x = -Inf, y = Inf, label = txt),
-               hjust = -0.05, vjust = 1.1, inherit.aes = FALSE, size = 3.1,
+               hjust = -0.05, vjust = 1.1, inherit.aes = FALSE, size = ann_size,
                label.size = 0, fill = "white", alpha = .75, lineheight = 1.05) +
     scale_colour_manual(values = agree_cols, name = NULL,
                         breaks = c("TRUE", "FALSE"),
@@ -1227,7 +1231,7 @@ agreement_figure = function(axes, ylab, what) {
                         what),
          subtitle = paste0("p is hypergeometric and one sided, our genes ",
                            "moving the same way against the rate among all genes")) +
-    theme_bw() + theme(legend.position = "top")
+    theme_bw(base_size = base_size) + theme(legend.position = "top")
 
   p_top
 }
@@ -1522,43 +1526,49 @@ lab = gsea_tab %>%
                 y = ifelse(direction == "up", hi + .22 * sp, hi + .10 * sp),
                 contrast = factor(contrast, levels = names(axis_cols)))
 
-p_gsea = ggplot(curve_df %>%
-                  dplyr::mutate(direction = dir_of(set),
-                                contrast = factor(contrast,
-                                                  levels = names(axis_cols))),
-                aes(x = rank, y = es, colour = direction)) +
-  geom_hline(yintercept = 0, colour = "grey75", linewidth = .4) +
-  geom_line(aes(group = set), linewidth = .8) +
-  geom_point(data = peak_df %>%
-               dplyr::mutate(direction = dir_of(set),
-                             contrast = factor(contrast,
-                                               levels = names(axis_cols))),
-             size = 2.2) +
-  geom_segment(data = bar %>%
-                 dplyr::mutate(contrast = factor(contrast,
+# Type and mark sizes are arguments so the same figure can be drawn again at
+# journal size for the composite. The defaults are the sizes this section uses.
+gsea_figure = function(base_size = 10, pt_size = 2.2, txt_size = 2.9,
+                       line_w = .8) {
+  ggplot(curve_df %>%
+           dplyr::mutate(direction = dir_of(set),
+                         contrast = factor(contrast,
+                                           levels = names(axis_cols))),
+         aes(x = rank, y = es, colour = direction)) +
+    geom_hline(yintercept = 0, colour = "grey75", linewidth = .4) +
+    geom_line(aes(group = set), linewidth = line_w) +
+    geom_point(data = peak_df %>%
+                 dplyr::mutate(direction = dir_of(set),
+                               contrast = factor(contrast,
                                                  levels = names(axis_cols))),
-               aes(x = rank, xend = rank, y = y0, yend = y1,
-                   colour = direction),
-               linewidth = .25, alpha = .55, inherit.aes = FALSE) +
-  geom_text(data = lab, aes(x = 0, y = y, label = txt), hjust = 0,
-            size = 2.9, show.legend = FALSE) +
-  scale_colour_manual(values = dir_cols, name = "our genes",
-                      breaks = c("up", "down"),
-                      labels = c(up = "up in transformers",
-                                 down = "down in transformers")) +
-  scale_x_continuous(labels = function(x) format(x, big.mark = ","),
-                     expand = ggplot2::expansion(mult = c(.01, .02))) +
-  facet_wrap(~ contrast, ncol = 2) +
-  labs(x = "Yasmin et al genes, ranked from most up to most down",
-       y = "running enrichment score",
-       title = "Our top genes against the Yasmin et al ranking",
-       subtitle = paste0("each line walks the ranking and steps up at our ",
-                         "genes; ticks mark where they fall")) +
-  theme_bw(base_size = 10) +
-  theme(legend.position = "bottom",
-        panel.grid.minor = element_blank(),
-        strip.background = element_rect(fill = "grey95", colour = NA))
+               size = pt_size) +
+    geom_segment(data = bar %>%
+                   dplyr::mutate(contrast = factor(contrast,
+                                                   levels = names(axis_cols))),
+                 aes(x = rank, xend = rank, y = y0, yend = y1,
+                     colour = direction),
+                 linewidth = .25, alpha = .55, inherit.aes = FALSE) +
+    geom_text(data = lab, aes(x = 0, y = y, label = txt), hjust = 0,
+              size = txt_size, show.legend = FALSE) +
+    scale_colour_manual(values = dir_cols, name = "our genes",
+                        breaks = c("up", "down"),
+                        labels = c(up = "up in transformers",
+                                   down = "down in transformers")) +
+    scale_x_continuous(labels = function(x) format(x, big.mark = ","),
+                       expand = ggplot2::expansion(mult = c(.01, .02))) +
+    facet_wrap(~ contrast, ncol = 2) +
+    labs(x = "Yasmin et al genes, ranked from most up to most down",
+         y = "running enrichment score",
+         title = "Our top genes against the Yasmin et al ranking",
+         subtitle = paste0("each line walks the ranking and steps up at our ",
+                           "genes; ticks mark where they fall")) +
+    theme_bw(base_size = base_size) +
+    theme(legend.position = "bottom",
+          panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = "grey95", colour = NA))
+}
 
+p_gsea = gsea_figure()
 p_gsea
 
 ggsave(p_gsea, file = paste0(results_dir, "/top_gene_enrichment.png"),
@@ -1917,6 +1927,31 @@ score_mats = lapply(split(sig, sig$source), function(d) {
 ```
 
 ```{r, eval=have_cl_markers}
+# Mean pseudotime per node, from the same run the germ subcluster markers come
+# from, so the nodes line up one for one. 17 writes one pseudotime per cell,
+# averaged over the paths out of the root, which is the value it reports
+# everywhere else. The atlas clusters have no pseudotime and stay empty.
+pt_file = paste0(dirname(marker_sources[["germ subclusters"]]),
+                 "/pseudotime_per_cell.csv")
+want_pt = "germ subclusters" %in% names(src_found)[src_found]
+
+node_pt = NULL
+if (want_pt && file.exists(pt_file)) {
+  pt_cells = read.csv(pt_file, stringsAsFactors = FALSE,
+                      colClasses = c(node = "character"))
+  stopifnot(all(c("node", "pseudotime") %in% colnames(pt_cells)))
+  node_pt = pt_cells %>%
+    dplyr::group_by(group = .data$node) %>%
+    dplyr::summarise(mean_pseudotime = mean(.data$pseudotime, na.rm = TRUE),
+                     n_cells = dplyr::n(), .groups = "drop") %>%
+    dplyr::mutate(source = "germ subclusters")
+}
+have_pt = !is.null(node_pt)
+```
+
+`r if (!have_cl_markers || !want_pt || have_pt) "" else paste0("**Pseudotime is left out.** ", pt_file, " was not found, so the subcluster panel is ordered by the sex difference and the pseudotime panel is dropped.")`
+
+```{r, eval=have_cl_markers}
 sex_tab = dplyr::bind_rows(lapply(names(score_mats), function(src)
   dplyr::bind_rows(lapply(colnames(score_mats[[src]]), function(gp)
     data.frame(source = src, group = gp,
@@ -1924,6 +1959,9 @@ sex_tab = dplyr::bind_rows(lapply(names(score_mats), function(src)
                mid_females = mean(score_mats[[src]][runs_mf, gp]),
                difference  = mean(score_mats[[src]][runs_mm, gp]) -
                              mean(score_mats[[src]][runs_mf, gp]))))))
+
+if (have_pt)
+  sex_tab = sex_tab %>% dplyr::left_join(node_pt, by = c("source", "group"))
 
 write.csv(sex_tab, file = paste0(results_dir, "/germ_signature_sex.csv"),
           row.names = FALSE)
@@ -1934,7 +1972,21 @@ datatable(sex_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 `r if (have_cl_markers) "Mid males against mid females, mean score in each. A signature that separates the sexes is measuring a germ cell state. One that does not is measuring how much germ cell content the gonad has, which every germ signature shares." else ""`
 
-```{r, eval=have_cl_markers, fig.width=7, fig.height=6}
+```{r, eval=have_cl_markers}
+# Spearman because twelve or so nodes cannot support a parametric correlation,
+# and because the question is monotone rather than linear. Both the signed
+# difference and its size are reported: the first asks whether later nodes score
+# more male, the second whether they separate the sexes at all.
+pt_cor = if (!have_pt) NULL else {
+  d = sex_tab %>% dplyr::filter(source == "germ subclusters",
+                                is.finite(mean_pseudotime))
+  ct = function(y) suppressWarnings(
+    stats::cor.test(d$mean_pseudotime, y, method = "spearman"))
+  list(n = nrow(d), signed = ct(d$difference), size = ct(abs(d$difference)))
+}
+```
+
+```{r, eval=have_cl_markers, fig.width=9, fig.height=6}
 # One ordering per marker source, since the two sources name different groups
 # and a global sort would interleave them.
 sex_long = sex_tab %>%
@@ -1944,39 +1996,82 @@ sex_long = sex_tab %>%
                                            mid_females = "mid females"),
                              levels = c("mid males", "mid females")))
 
+# Rows run in pseudotime where there is one, so the dumbbell panel and the
+# scatter beside it are read in the same order. The atlas groups have no
+# pseudotime and fall back to the difference.
+sex_long$ord = if (have_pt)
+  dplyr::coalesce(sex_long$mean_pseudotime, sex_long$difference) else
+  sex_long$difference
+
 # One plot per source rather than two facets. The sources hold different numbers
 # of groups, so facets of equal height leave the smaller one mostly empty; as
 # separate plots the heights follow the group counts and the rows line up at the
 # same spacing. It also lets each panel carry a tag.
 sex_panel = function(src) {
   d = sex_long %>% dplyr::filter(source == src)
-  ggplot(d, aes(x = score, y = reorder(group, difference))) +
+  ggplot(d, aes(x = score, y = reorder(group, ord))) +
     geom_vline(xintercept = 0, colour = "grey70") +
     geom_line(aes(group = group), colour = "grey65", linewidth = .4) +
     geom_point(aes(colour = sex), size = 2) +
     scale_colour_manual(values = c(`mid males` = "#0072B2",
                                    `mid females` = "#CC79A7"), name = NULL) +
-    labs(x = NULL, y = NULL, title = src) +
+    labs(x = "mean signature score", y = NULL, title = src) +
     theme_bw(base_size = 9) +
     theme(plot.title = element_text(size = 9, face = "plain"),
           panel.grid.major.y = element_line(colour = "grey92"),
           panel.grid.minor.x = element_blank())
 }
 
+pt_panel = function() {
+  d = sex_tab %>% dplyr::filter(source == "germ subclusters",
+                                is.finite(mean_pseudotime))
+  rho = unname(pt_cor$signed$estimate)
+  ggplot(d, aes(x = mean_pseudotime, y = difference)) +
+    geom_hline(yintercept = 0, colour = "grey70") +
+    geom_smooth(method = "lm", formula = y ~ x, se = FALSE,
+                colour = "grey45", linewidth = .4, linetype = "22") +
+    geom_point(size = 2, colour = "#009E73") +
+    ggrepel::geom_text_repel(aes(label = group), size = 2.5, colour = "grey15",
+                             segment.colour = "grey65", bg.color = "white",
+                             bg.r = .12, min.segment.length = 0, seed = 1) +
+    labs(x = "mean pseudotime", y = "male minus female score",
+         title = "germ subclusters, by pseudotime",
+         subtitle = sprintf("Spearman rho = %.2f, p = %.3f, n = %d nodes",
+                            rho, pt_cor$signed$p.value, pt_cor$n)) +
+    theme_bw(base_size = 9) +
+    theme(plot.title = element_text(size = 9, face = "plain"),
+          plot.subtitle = element_text(size = 8, colour = "grey30"),
+          panel.grid.minor = element_blank())
+}
+
 srcs = unique(sex_tab$source)
+dumb = setNames(lapply(srcs, sex_panel), srcs)
 n_by = vapply(srcs, function(x) sum(sex_tab$source == x), integer(1))
 
-p_sex = patchwork::wrap_plots(lapply(srcs, sex_panel), ncol = 1,
-                              heights = n_by) +
-  patchwork::plot_layout(guides = "collect") +
+# The scatter sits beside the subcluster dumbbell it is drawn from, so the two
+# read as one statement about the subclusters. The atlas keeps the row above.
+if (have_pt) {
+  row_pt = dumb[["germ subclusters"]] | pt_panel()
+  p_sex  = if ("atlas" %in% srcs) dumb[["atlas"]] / row_pt else row_pt
+  hts    = if ("atlas" %in% srcs)
+    unname(n_by[c("atlas", "germ subclusters")]) else 1
+  # the scatter is last in the tag order, which is third only if the atlas drew
+  pt_tag = if ("atlas" %in% srcs) "C" else "B"
+} else {
+  p_sex = patchwork::wrap_plots(dumb, ncol = 1)
+  hts   = unname(n_by)
+}
+
+p_sex = p_sex +
+  patchwork::plot_layout(heights = hts, guides = "collect") +
   patchwork::plot_annotation(
     tag_levels = "A",
     title = "Germ signature scores in Yasmin et al mid males and mid females",
-    subtitle = "groups ordered by the male-minus-female difference",
-    caption = "mean signature score",
+    subtitle = if (have_pt)
+      "subclusters ordered by mean pseudotime, atlas clusters by the male-minus-female difference" else
+      "groups ordered by the male-minus-female difference",
     theme = theme(plot.title = element_text(size = 11),
-                  plot.subtitle = element_text(size = 9),
-                  plot.caption = element_text(size = 9, hjust = .5))) &
+                  plot.subtitle = element_text(size = 9))) &
   # collected to the foot of the figure; at the top it opens a gap between the
   # first panel's title and its own axes
   theme(legend.position = "bottom")
@@ -1984,44 +2079,86 @@ p_sex = patchwork::wrap_plots(lapply(srcs, sex_panel), ncol = 1,
 p_sex
 
 ggsave(p_sex, file = paste0(results_dir, "/germ_signature_sex.png"),
-       width = 7, height = 6, dpi = 300)
+       width = 9, height = 6, dpi = 300)
 ```
 
 `r if (!have_cl_markers) "" else { n_m = sum(sex_tab$difference > 0); n_f = sum(sex_tab$difference < 0); paste0("Scores are averages of genes standardized across all 28 samples, so zero is the series mean rather than no expression. Of ", nrow(sex_tab), " signatures, ", n_m, " score higher in the mid males and ", n_f, " higher in the mid females. A signature whose two points nearly coincide is not reading identity, whatever it was built from.") }`
 
+`r if (!have_cl_markers || !have_pt) "" else sprintf("Panel %s sets each subcluster's sex difference against its mean pseudotime, taken over the cells in that node. Spearman rho is %.2f, p = %.3f, across %d nodes. On the size of the difference rather than its sign, rho is %.2f, p = %.3f. Pseudotime is the average over the paths out of the root, so a node on a branch carries a blended value.", pt_tag, unname(pt_cor$signed$estimate), pt_cor$signed$p.value, pt_cor$n, unname(pt_cor$size$estimate), pt_cor$size$p.value)`
+
 
 # Summary figure
 
-The two comparisons that ask whether our signal reproduces, in one figure,
-assembled from the plot objects the sections above already built, so nothing is
-recomputed and nothing can drift out of step with the tables. The germ signature
-scores are a different question and stay in their own figure.
+The two comparisons that ask whether our signal reproduces, in one figure, drawn
+at the size it will be printed. The panels come from the same two functions the
+sections above call, with the type and mark sizes set smaller, so the numbers
+are the ones those sections report. The germ signature scores are a different
+question and stay in their own figure.
 
-```{r, eval=have_bulk && have_fgsea, fig.width=14, fig.height=11}
+```{r}
+# Drawn at final size rather than drawn large and reduced, because reduction is
+# what takes type below a journal's minimum. 180 mm is the full width most
+# journals set a wide figure at, and 225 mm is about what a page leaves above
+# the caption.
+jrnl_w = 180 / 25.4
+jrnl_h = 225 / 25.4
+# base_size 8 puts axis labels at 6.4 pt and the smallest text, the gene names,
+# at 5.7 pt. Journal minima are usually 5 to 7 pt at final size.
+jrnl_base = 8
+```
+
+```{r, eval=have_bulk && have_fgsea, fig.width=jrnl_w, fig.height=jrnl_h}
 # titles are rewritten for the composite and the per-figure subtitles dropped,
 # since the caption below carries what they said
 panel = function(p, ttl) p + labs(title = ttl, subtitle = NULL) +
-  theme(plot.title = element_text(size = 10, face = "plain"))
+  theme(plot.title = element_text(size = jrnl_base, face = "plain"))
+
+# All three stacked rather than the scatters set side by side. Each scatter is
+# two facets wide and carries a three line annotation inside the panel, so half
+# the page width clips that text. Stacking also keeps the enrichment panel from
+# spreading across the whole width, which flattens the curves.
+gsea_j = gsea_figure(base_size = jrnl_base, pt_size = 1.3, txt_size = 2.1,
+                     line_w = .5)
+# five gene labels rather than ten; at this panel size ten collide whatever the
+# repel does with them
+end_j   = agreement_figure(c("male, endpoint", "female, endpoint"),
+                           "Yasmin et al log2FC, larvae to mid group",
+                           "Yasmin et al endpoint",
+                           base_size = jrnl_base, pt_size = .9, lab_size = 2.0,
+                           ann_size = 2.2, n_lab = 5)
+trend_j = agreement_figure(c("male, trend", "female, trend"),
+                           "Yasmin et al log2FC across the series",
+                           "Yasmin et al trend",
+                           base_size = jrnl_base, pt_size = .9, lab_size = 2.0,
+                           ann_size = 2.2, n_lab = 5)
 
 composite =
-  panel(p_gsea, "Our top genes in the Yasmin et al ranking") /
-  # the two scatters carry the same legend, so the row collects it into one
-  ((panel(p_end,   "Effect sizes, endpoint contrasts") |
-    panel(p_trend, "Effect sizes, trend contrasts")) +
+  panel(gsea_j, "Our top genes in the Yasmin et al ranking") /
+  # the two scatters carry the same legend, so the block collects it into one
+  ((panel(end_j,   "Effect sizes, endpoint contrasts") /
+    panel(trend_j, "Effect sizes, trend contrasts")) +
      patchwork::plot_layout(guides = "collect") &
      theme(legend.position = "bottom")) +
-  patchwork::plot_layout(heights = c(1.5, 1)) +
-  patchwork::plot_annotation(tag_levels = "A")
+  # the enrichment panel is two facet rows, the scatters one each
+  patchwork::plot_layout(heights = c(3.5, 5.36)) +
+  patchwork::plot_annotation(tag_levels = "A") &
+  # the default margins leave a band of white under each legend, which on a
+  # page is width the panels could have had
+  theme(plot.tag = element_text(size = jrnl_base + 2, face = "bold"),
+        plot.margin = margin(2, 2, 2, 2),
+        legend.margin = margin(0, 0, 0, 0),
+        legend.box.spacing = unit(4, "pt"))
 
 composite
 
-ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.png"),
-       width = 14, height = 11, dpi = 300, limitsize = FALSE)
+# pdf is the version to submit: vector, no resolution to lose at typesetting
 ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.pdf"),
-       width = 14, height = 11, limitsize = FALSE)
+       width = jrnl_w, height = jrnl_h)
+ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.png"),
+       width = jrnl_w, height = jrnl_h, dpi = 600)
 ```
 
-`r if (!(have_bulk && have_fgsea)) "" else paste0("**A** walks the Yasmin et al ranking from most up to most down and steps up at each of our genes, so a set concentrated at one end drives the line away from zero. **B** and **C** plot our ", top_set_lab, " genes against the Yasmin et al effect sizes, colored by whether the two datasets agree on direction, with the counts and their hypergeometric p-values printed per panel. A asks whether our strongest genes concentrate in theirs; B and C ask whether the effect sizes themselves agree.")`
+`r if (!(have_bulk && have_fgsea)) "" else paste0("**A** walks the Yasmin et al ranking from most up to most down and steps up at each of our genes, so a set concentrated at one end drives the line away from zero. **B** and **C** plot our ", top_set_lab, " genes against the Yasmin et al effect sizes, colored by whether the two datasets agree on direction, with the counts and their hypergeometric p-values printed per panel. A asks whether our strongest genes concentrate in theirs; B and C ask whether the effect sizes themselves agree. The figure is drawn at 180 by 225 mm, so the type is at printed size and nothing is reduced at typesetting. B and C name their five strongest genes rather than the ten the section figures name, which is as many as the panels hold at this width.")`
 
 
 # Full gene table
@@ -2063,10 +2200,10 @@ file_notes = c(
   "top_gene_list_upset.png"        = "Intersections of our top gene lists with Yasmin et al trend lists, largest first, as an UpSet plot.",
   "shared_trend_GO_terms.csv"      = "Terms enriched in our top genes and in Yasmin et al trend genes on the same sex in the same direction, with each side's p-value, FDR and gene count.",
   "shared_trend_GO_terms.png"      = "The strongest of those shared terms, each with a point per dataset, faceted by sex and direction.",
-  "germ_signature_sex.csv"         = "Mean germ signature score in Yasmin et al mid males and mid females, per signature and marker source, with the difference between them.",
-  "bulk_validation_summary.png"    = "The enrichment curves and the effect size scatters in one figure.",
-  "bulk_validation_summary.pdf"    = "The same figure as vector, for assembly.",
-  "germ_signature_sex.png"         = "The same scores as paired points per signature, ordered by the male-minus-female difference.",
+  "germ_signature_sex.csv"         = "Mean germ signature score in Yasmin et al mid males and mid females, per signature and marker source, with the difference between them. The germ subcluster rows also carry that node's mean pseudotime and its cell count; the atlas rows have neither.",
+  "bulk_validation_summary.png"    = "The enrichment curves and the effect size scatters in one figure, drawn at 180 by 225 mm and written at 600 dpi.",
+  "bulk_validation_summary.pdf"    = "The same figure as vector at the same size, which is the one to submit.",
+  "germ_signature_sex.png"         = "The same scores as paired points per signature, with the subcluster sex difference set against mean pseudotime beside them.",
   "bulk_vs_pseudobulk_per_gene.csv" = "One row per gene: our male and female stage effects, each Yasmin et al contrast's coefficient, and the Wang identifier. The endpoint columns are log fold changes between two groups. Each Yasmin et al trend carries two columns: *_trend_slope, the coefficient edgeR returned for the regression on the trend score, and *_trend_series_log2FC, that slope multiplied by the span the score covers, which is the log2 change across the whole series and the column every figure and statistic here uses. edgeR names its coefficient logFC for any design, so the slope is renamed to keep it apart from the endpoint columns, which are fold changes between two groups.")
 
 in_dir = sort(setdiff(list.files(results_dir), "Robjects"))

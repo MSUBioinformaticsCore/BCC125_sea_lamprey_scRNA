@@ -18,6 +18,8 @@
 #   - results/<date>_atlas/cluster_marker_genes.csv, from 13, and
 #     results/<date>_pseudotime_tscan_<lineage><GERM_SUFFIX>/subcluster_marker_genes.csv,
 #     from 17, for the sex specificity section; it skips without both
+#   - pseudotime_per_cell.csv from that same run, for the panel setting the sex
+#     difference against pseudotime; that panel alone skips without it
 #
 # The slow step is the label permutation: six contrasts times N_PERM edgeR
 # refits, about 1,200 fits at the default 200. Those fits run in parallel across
@@ -109,9 +111,15 @@ CLMARKERS="${PROJECT_DIR}/results/${RESULTS_DATE}_atlas/cluster_marker_genes.csv
 # the reclustered run with the dissociation node removed, so its subclusters
 # are the ones scored and that node is absent.
 GERM_SUFFIX="${GERM_SUFFIX:-_recluster_remove_IEG}"
-SUBMARKERS="${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_all${GERM_SUFFIX}/subcluster_marker_genes.csv"
+SUBDIR="${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_tscan_all${GERM_SUFFIX}"
+SUBMARKERS="${SUBDIR}/subcluster_marker_genes.csv"
 [[ -f "${SUBMARKERS}" ]] || \
   echo "note: ${SUBMARKERS} not found; that marker source will be skipped."
+
+# Mean pseudotime per node, for the panel that sets the sex difference against
+# it. Written by the same run as the markers above.
+[[ ! -f "${SUBMARKERS}" || -f "${SUBDIR}/pseudotime_per_cell.csv" ]] || \
+  echo "note: ${SUBDIR}/pseudotime_per_cell.csv not found; the pseudotime panel will be skipped."
 
 GENOME_DIR="${GENOME_DIR:-/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus}"
 GAF="${GENOME_DIR}/GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf"
