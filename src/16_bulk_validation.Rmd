@@ -1934,40 +1934,57 @@ datatable(sex_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
 
 `r if (have_cl_markers) "Mid males against mid females, mean score in each. A signature that separates the sexes is measuring a germ cell state. One that does not is measuring how much germ cell content the gonad has, which every germ signature shares." else ""`
 
-```{r, eval=have_cl_markers, fig.width=11, fig.height=7}
+```{r, eval=have_cl_markers, fig.width=7, fig.height=6}
 # One ordering per marker source, since the two sources name different groups
 # and a global sort would interleave them.
-sex_plot = sex_tab %>%
-  dplyr::arrange(source, difference) %>%
-  dplyr::mutate(ykey = factor(paste(source, group, sep = "|"),
-                              levels = paste(source, group, sep = "|")))
-
-sex_long = sex_plot %>%
+sex_long = sex_tab %>%
   tidyr::pivot_longer(c(mid_males, mid_females), names_to = "sex",
                       values_to = "score") %>%
-  dplyr::mutate(sex = dplyr::recode(sex, mid_males = "mid males",
-                                    mid_females = "mid females"))
+  dplyr::mutate(sex = factor(dplyr::recode(sex, mid_males = "mid males",
+                                           mid_females = "mid females"),
+                             levels = c("mid males", "mid females")))
 
-p_sex = ggplot(sex_long, aes(x = score, y = ykey)) +
-  geom_vline(xintercept = 0, colour = "grey70") +
-  geom_line(aes(group = ykey), colour = "grey65", linewidth = .5) +
-  geom_point(aes(colour = sex), size = 2.6) +
-  scale_colour_manual(values = c(`mid males` = "#0072B2",
-                                 `mid females` = "#CC79A7"),
-                      name = NULL) +
-  scale_y_discrete(labels = function(x) sub("^[^|]*\\|", "", x)) +
-  facet_wrap(~ source, scales = "free_y", ncol = 2) +
-  labs(x = "mean signature score", y = NULL,
-       title = "Germ signature scores in Yasmin et al mid males and mid females",
-       subtitle = "groups ordered by the male-minus-female difference") +
-  theme_bw(base_size = 10) +
-  theme(legend.position = "top",
-        panel.grid.major.y = element_line(colour = "grey92"))
+# One plot per source rather than two facets. The sources hold different numbers
+# of groups, so facets of equal height leave the smaller one mostly empty; as
+# separate plots the heights follow the group counts and the rows line up at the
+# same spacing. It also lets each panel carry a tag.
+sex_panel = function(src) {
+  d = sex_long %>% dplyr::filter(source == src)
+  ggplot(d, aes(x = score, y = reorder(group, difference))) +
+    geom_vline(xintercept = 0, colour = "grey70") +
+    geom_line(aes(group = group), colour = "grey65", linewidth = .4) +
+    geom_point(aes(colour = sex), size = 2) +
+    scale_colour_manual(values = c(`mid males` = "#0072B2",
+                                   `mid females` = "#CC79A7"), name = NULL) +
+    labs(x = NULL, y = NULL, title = src) +
+    theme_bw(base_size = 9) +
+    theme(plot.title = element_text(size = 9, face = "plain"),
+          panel.grid.major.y = element_line(colour = "grey92"),
+          panel.grid.minor.x = element_blank())
+}
+
+srcs = unique(sex_tab$source)
+n_by = vapply(srcs, function(x) sum(sex_tab$source == x), integer(1))
+
+p_sex = patchwork::wrap_plots(lapply(srcs, sex_panel), ncol = 1,
+                              heights = n_by) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(
+    tag_levels = "A",
+    title = "Germ signature scores in Yasmin et al mid males and mid females",
+    subtitle = "groups ordered by the male-minus-female difference",
+    caption = "mean signature score",
+    theme = theme(plot.title = element_text(size = 11),
+                  plot.subtitle = element_text(size = 9),
+                  plot.caption = element_text(size = 9, hjust = .5))) &
+  # collected to the foot of the figure; at the top it opens a gap between the
+  # first panel's title and its own axes
+  theme(legend.position = "bottom")
 
 p_sex
 
 ggsave(p_sex, file = paste0(results_dir, "/germ_signature_sex.png"),
-       width = 11, height = 7, dpi = 300)
+       width = 7, height = 6, dpi = 300)
 ```
 
 `r if (!have_cl_markers) "" else { n_m = sum(sex_tab$difference > 0); n_f = sum(sex_tab$difference < 0); paste0("Scores are averages of genes standardized across all 28 samples, so zero is the series mean rather than no expression. Of ", nrow(sex_tab), " signatures, ", n_m, " score higher in the mid males and ", n_f, " higher in the mid females. A signature whose two points nearly coincide is not reading identity, whatever it was built from.") }`
@@ -2004,7 +2021,7 @@ ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.pdf"),
        width = 14, height = 11, limitsize = FALSE)
 ```
 
-`r if (!(have_bulk && have_fgsea)) "" else paste0("**A** walks the Yasmin et al ranking from most up to most down and steps up at each of our genes, so a set concentrated at one end drives the line away from zero. **B** and **C** plot our ", top_set_lab, " genes against the Yasmin et al effect sizes, colored by whether the two datasets agree on direction, with the counts and their hypergeometric p-values printed per panel. A asks whether our strongest genes concentrate in theirs; B and C ask whether the effect sizes themselves agree.") else ""`
+`r if (!(have_bulk && have_fgsea)) "" else paste0("**A** walks the Yasmin et al ranking from most up to most down and steps up at each of our genes, so a set concentrated at one end drives the line away from zero. **B** and **C** plot our ", top_set_lab, " genes against the Yasmin et al effect sizes, colored by whether the two datasets agree on direction, with the counts and their hypergeometric p-values printed per panel. A asks whether our strongest genes concentrate in theirs; B and C ask whether the effect sizes themselves agree.")`
 
 
 # Full gene table
