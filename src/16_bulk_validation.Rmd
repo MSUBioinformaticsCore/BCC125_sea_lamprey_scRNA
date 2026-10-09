@@ -1412,14 +1412,20 @@ thousands of cells inside the germ compartment. They are a second way to name
 our stage genes, and they are mostly different genes. Both runs are tested
 here and both are left out of the gene ontology section.
 
-One path of each run goes out to the female terminal and the others to the
-male terminals, so each arm is matched to the Yasmin et al contrasts on its own
-sex. Paths sharing an arm are pooled into one set per direction rather than
-counted as separate tests, since they share most of their genes. Where a gene
-is reported on more than one path, the path it moves most on is the one kept.
+Each path is tested on its own, up and down separately. Paths out of the same
+root share most of their genes, so these are not independent tests, and the
+figures are read as one result per run seen from each terminal rather than as
+several. Naming the female terminals is what decides which contrasts a path is
+tested against; every path not named is treated as male.
 
 ```{r}
-# Each run contributes two sets per sex. The female paths have to be named,
+# which family a set name belongs to: the pseudobulk lists, or one path of one
+# pseudotime run
+src_of = function(x) ifelse(grepl("^pseudotime ", x),
+                            sub("^(pseudotime [^,]+),.*$", "\\1", x),
+                            "pseudobulk")
+
+# Each run contributes two sets per path. The female paths have to be named,
 # because nothing in the gene table says which terminal is which; the document
 # lists the paths it found and skips the run if they are not set.
 pt_sources = list(
@@ -1449,31 +1455,22 @@ pt_build = function(z) {
   if (length(fem) == 0 || length(setdiff(fem, paths)) > 0)
     return(list(label = z$label, ok = FALSE, paths = paths, asked = fem))
 
-  arm = raw %>%
+  keep = raw %>%
     dplyr::mutate(sex = ifelse(Path %in% fem, "female", "male")) %>%
     # only genes the bulk comparison can rank, so a set is not scored on genes
     # that were never in the ranking
-    dplyr::filter(Gene %in% go_pool$Gene) %>%
-    # one row per gene per arm, from the path it moves most on
-    dplyr::group_by(sex, Gene) %>%
-    dplyr::slice_max(abs(logFC), n = 1, with_ties = FALSE) %>%
-    dplyr::ungroup()
+    dplyr::filter(Gene %in% go_pool$Gene)
 
-  rows = dplyr::bind_rows(lapply(sort(unique(arm$sex)), function(sx)
-    dplyr::bind_rows(lapply(c("up", "down"), function(dir) {
-      x = arm %>% dplyr::filter(sex == sx, Direction == dir) %>%
-        dplyr::slice_max(abs(logFC), n = top_ns[1], with_ties = FALSE)
-      data.frame(set = paste0("pseudotime ", z$label, ", ", sx, ", ", dir),
-                 Gene = x$Gene, sex = sx, direction = dir,
-                 stringsAsFactors = FALSE)
-    }))))
+  rows = keep %>%
+    dplyr::group_by(Path, sex, Direction) %>%
+    dplyr::slice_max(abs(logFC), n = top_ns[1], with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::transmute(set = paste0("pseudotime ", z$label, " ", Path, ", ",
+                                  sex, ", ", Direction),
+                     Gene, sex, direction = Direction)
 
-  arms = raw %>%
-    dplyr::mutate(sex = ifelse(Path %in% fem, "female", "male")) %>%
-    dplyr::distinct(sex, Path) %>%
-    dplyr::group_by(sex) %>%
-    dplyr::summarise(paths = paste(sort(Path), collapse = ", "),
-                     .groups = "drop") %>%
+  arms = keep %>%
+    dplyr::count(Path, sex, Direction, name = "n_genes") %>%
     dplyr::mutate(label = z$label)
 
   list(label = z$label, ok = TRUE, rows = rows, arms = arms)
@@ -1491,23 +1488,17 @@ pt_key  = if (nrow(pt_rows) == 0) NULL else pt_rows %>%
 pt_arms = dplyr::bind_rows(lapply(pt_ok, `[[`, "arms"))
 
 have_pt_sets = length(pt_sets) > 0
-pt_families  = vapply(pt_ok, function(z) paste0("pseudotime ", z$label),
-                      character(1))
+# one family, and so one figure, per path
+pt_families  = if (have_pt_sets) unique(src_of(pt_rows$set)) else character(0)
 ```
 
 `r if (!have_fgsea || length(pt_bad) == 0) "" else paste0("**Skipped, because the female paths are not named: ", paste(vapply(pt_bad, function(z) paste0(z$label, " (paths found: ", paste(z$paths, collapse = ", "), ")"), character(1)), collapse = "; "), ".** Set them and rerun.")`
 
-`r if (!have_pt_sets) "" else paste0("Paths by run and arm: ", paste0(pt_arms$label, ", ", pt_arms$sex, ", ", pt_arms$paths, collapse = "; "), ". Each set is the top ", top_ns[1], " genes of that arm and direction by log fold change along the path, kept to genes the Yasmin et al comparison ranks.")`
+`r if (!have_pt_sets) "" else { a = dplyr::distinct(pt_arms, label, Path, sex); paste0("Paths tested: ", paste0(a$label, " ", a$Path, " (", a$sex, ")", collapse = "; "), ". Each set is the top ", top_ns[1], " genes of that path and direction by log fold change along it, kept to genes the Yasmin et al comparison ranks.") }`
 
 ```{r, eval=have_fgsea}
 # the pseudotime sets ride alongside ours through the same fgsea call, so the
 # table, the leading edge and the figures treat them the same way
-# which family a set name belongs to: the pseudobulk lists, or one of the
-# pseudotime runs
-src_of = function(x) ifelse(grepl("^pseudotime ", x),
-                            sub("^(pseudotime [^,]+),.*$", "\\1", x),
-                            "pseudobulk")
-
 all_sets = if (have_pt_sets) c(our_sets, pt_sets) else our_sets
 all_key  = dplyr::bind_rows(
   set_key %>% dplyr::filter(source == "ours") %>%
@@ -2496,8 +2487,6 @@ file_notes = c(
   "top_gene_enrichment.csv"        = "Each of our top gene lists tested for enrichment in each Yasmin et al contrast's ranking, with the enrichment score, its normalized value, the permutation p-value and FDR, and whether the direction came out as expected.",
   "top_gene_enrichment_leading_edge.csv" = "The genes carrying each enrichment, with our effect size and the Yasmin et al test statistic.",
   "top_gene_enrichment.png"        = "Normalized enrichment score per set and contrast, with the up and down sets colored and significance marked.",
-  "pseudotime_nodes_enrichment.png" = "The same walk for the pseudotime-associated gene sets from the 17 node trajectory, one arm per sex, against the same four rankings.",
-  "pseudotime_fine_enrichment.png" = "The same walk for the pseudotime-associated gene sets from the 19 fine-node trajectory.",
   "top_gene_list_upset.png"        = "Intersections of our top gene lists with Yasmin et al trend lists, largest first, as an UpSet plot.",
   "shared_trend_GO_terms.csv"      = "Terms enriched in our top genes and in Yasmin et al trend genes on the same sex in the same direction, with each side's p-value, FDR and gene count.",
   "shared_trend_GO_terms.png"      = "The strongest of those shared terms, each with a point per dataset, faceted by sex and direction.",
@@ -2508,6 +2497,14 @@ file_notes = c(
   "bulk_validation_summary.pdf"    = "The same figure as vector at the same size, which is the one to submit.",
   "germ_signature_sex.png"         = "The same scores as paired points per signature, with the subcluster sex difference set against mean pseudotime beside them.",
   "bulk_vs_pseudobulk_per_gene.csv" = "One row per gene: our male and female stage effects, each Yasmin et al contrast's coefficient, and the Wang identifier. The endpoint columns are log fold changes between two groups. Each Yasmin et al trend carries two columns: *_trend_slope, the coefficient edgeR returned for the regression on the trend score, and *_trend_series_log2FC, that slope multiplied by the span the score covers, which is the log2 change across the whole series and the column every figure and statistic here uses. edgeR names its coefficient logFC for any design, so the slope is renamed to keep it apart from the endpoint columns, which are fold changes between two groups.")
+
+# one enrichment figure per trajectory path, so these are named from the paths
+# the run turned out to have rather than listed by hand above
+if (have_pt_sets)
+  file_notes = c(file_notes,
+    setNames(paste0("Enrichment walk for the ", pt_families,
+                    " gene sets against the four Yasmin et al rankings."),
+             paste0(gsub(" ", "_", pt_families), "_enrichment.png")))
 
 in_dir = sort(setdiff(list.files(results_dir), "Robjects"))
 
