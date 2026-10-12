@@ -137,6 +137,13 @@ FEM_PATHS="${FEM_PATHS:-5.2}"
 FINE_SUFFIX="${FINE_SUFFIX:-_IEG_remove}"
 FINE_FEM_PATHS="${FINE_FEM_PATHS:-}"
 FINEDIR="${PROJECT_DIR}/results/${RESULTS_DATE}_pseudotime_fine_all${FINE_SUFFIX}"
+
+# The fine run feeds two sections. Its node markers are a third source for the
+# signature scores and need nothing set; its pseudotime genes are a gene set
+# for the enrichment and need FINE_FEM_PATHS.
+[[ -f "${FINEDIR}/node_marker_genes.csv" ]] || \
+  echo "note: ${FINEDIR}/node_marker_genes.csv not found; the fine nodes will be left out of the signature scores."
+
 if [[ ! -f "${FINEDIR}/pseudotime_genes.csv" ]]; then
   echo "note: ${FINEDIR}/pseudotime_genes.csv not found; the fine-node gene sets will be skipped."
 elif [[ -z "${FINE_FEM_PATHS}" ]]; then
