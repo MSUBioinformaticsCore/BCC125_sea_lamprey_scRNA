@@ -89,8 +89,7 @@ for. The claim goes no further.
 
 **Bulk is a mixture.** A gene changing in bulk can reflect a shift in which cell
 types are present rather than a change within any cell type. Pseudobulk shares
-that property. The two sides are on the same footing. The composition section
-measures how much of the agreement composition accounts for.
+that property. The two sides are on the same footing. 
 
 **The larval endpoint is matched by stage rather than by size.** Our larvae are
 112 mm and sex-labile by our own staging. Every larval-stage animal in Yasmin et al
@@ -910,14 +909,12 @@ score_draw = function(lfc_all, ours_col, top_n) {
     lv   = lfc_all[keep]
     idx  = if (perm_combos$rank_on[k] == "ours") top_both(ov, top_n)
            else top_both(lv, top_n)
-    agree = sign(ov[idx]) == sign(lv[idx])
     data.frame(
       pool = perm_combos$pool[k], rank_on = perm_combos$rank_on[k],
       rho_gw   = suppressWarnings(cor(ov, lv, method = "spearman",
                                       use = "complete.obs")),
       rho_top  = suppressWarnings(cor(ov[idx], lv[idx], method = "spearman",
-                                      use = "complete.obs")),
-      pct_sign = 100 * mean(agree, na.rm = TRUE))
+                                      use = "complete.obs")))
   }))
 }
 
@@ -965,7 +962,7 @@ perm_sig  = list(n_perm  = n_perm_labels,
                  # change to the selection rule reuses a null built on a
                  # different gene set, and nothing says so.
                  top_rule = "top_both, n each way",
-                 stat    = "spearman rho and percent same sign",
+                 stat    = "spearman rho",
                  n_genes = nrow(cmp),
                  n_well  = sum(cmp$well_measured),
                  min_pb  = min_pb,
@@ -1010,17 +1007,15 @@ perm_tab = dplyr::bind_rows(lapply(names(perm_res), function(ax) {
       obs = agreement[agreement$axis == ax & agreement$pool == pl &
                         agreement$ranked_on == ro, ]
       o   = c(obs$rho[obs$set == "genome-wide"],
-              obs$rho[obs$set == top_set_lab],
-              obs$pct_same_sign[obs$set == top_set_lab])
-      nl  = list(g$rho_gw, g$rho_top, g$pct_sign)
+              obs$rho[obs$set == top_set_lab])
+      nl  = list(g$rho_gw, g$rho_top)
 
       out = data.frame(
         axis        = ax,
         pool        = pl,
         ranked_on   = ro,
         statistic   = c("rho, genome-wide",
-                        paste0("rho, ", top_set_lab),
-                        paste0("% same sign, ", top_set_lab)),
+                        paste0("rho, ", top_set_lab)),
         observed    = o,
         null_median = vapply(nl, median, numeric(1), na.rm = TRUE),
         null_95th   = vapply(nl,
@@ -1047,8 +1042,8 @@ datatable(perm_tab %>% dplyr::select(-pool) %>%
 datatable(data.frame(
   column = c("<code>axis</code>, <code>ranked_on</code>", "<code>statistic</code>", "<code>observed</code>", "<code>null_median</code>", "<code>null_95th</code>", "<code>p_perm</code>", "<code>n_perm</code>"),
   holds  = c("as in the agreement table above",
-            "which of the three agreement measures the row tests",
-            "its value on Yasmin et al real contrast",
+            "which of the two correlations the row tests",
+            "its value on the real Yasmin et al contrast",
             "its median over the relabeled contrasts",
             "its 95th percentile over them, the value to beat",
             "fraction of relabelings reaching the observed value or better",
@@ -1098,12 +1093,7 @@ ggsave(p_perm, file = paste0(results_dir, "/bulk_permutation_null.png"),
 
 The scatters take our top 100 genes each way on a sex's axis and plot our effect
 against that of Yasmin et al, with points colored by whether the two datasets put the gene in
-the same direction. Each panel carries its Spearman correlation and the
-permutation p-value for that correlation.
-
-The endpoints and the trends get their own figure, because their y axes are
-different quantities. Putting them on shared panels would invite reading one
-against the other.
+the same direction. 
 
 The endpoint panels compare two groups, so their y value is an ordinary log fold
 change: 1 means the gene sits twice as high in the mid group as in the larvae.
@@ -1130,13 +1120,13 @@ coefficients edgeR returned, kept so that refitting reproduces this file.
 `male_trend_series_log2FC` and `fem_trend_series_log2FC` are those slopes across
 the span, which is what the figures and every statistic use.
 
-The rescaling changes no result. Spearman rho, percent same sign, the top-gene
-rankings and the permutation are all ranks or signs, so multiplying one column
-by a positive constant leaves every one of them identical.
+The rescaling changes no result. Spearman rho, the top-gene rankings and the
+permutation are all ranks, so multiplying one column by a positive constant
+leaves every one of them identical.
 
 ```{r, eval=have_bulk}
-# our effect picks the genes. The selection made on the Yasmin et al side is in
-  # the tables.
+# Our effect picks the genes for these figures. The agreement table above also
+# carries the selection made on the Yasmin et al side, which is not drawn.
 rank_sides = "ours"
 
 # Okabe-Ito blue and vermillion. A red-green pair is the one contrast a red-green
@@ -1270,7 +1260,7 @@ ggsave(p_trend, file = paste0(results_dir, "/bulk_trend_agreement.png"),
        width = 12, height = 5.5, dpi = 300)
 ```
 
-`r if (have_bulk) paste0("Points are our ", top_set_lab, " genes, colored by whether the two datasets agree on direction. Each panel prints the rho from the agreement table, then one line per direction: how many of our hundred Yasmin et al move the same way, how many would do so by chance given the share of all genes moving that way in that contrast, and a hypergeometric p-value. The chance share is not 50 percent, because their contrasts are not balanced. The test is one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1.") else ""`
+`r if (have_bulk) paste0("Points are our ", top_set_lab, " genes, colored by whether the two datasets agree on direction. Each panel prints the rho from the agreement table, then one line per direction: how many of our hundred genes move the same way in the Yasmin et al contrast, how many would do so by chance given the share of all genes moving that way there, and a hypergeometric p-value. The chance share is not 50 percent, because their contrasts are not balanced. The test is one sided in the direction of agreement, so a half of the set that departs the other way returns a p-value near 1.") else ""`
 
 
 ## Genome-wide scatter
@@ -1932,8 +1922,7 @@ here and both are left out of the gene ontology section.
 Each path is tested on its own, up and down separately. Paths out of the same
 root share most of their genes, so these are not independent tests, and the
 figures are read as one result per run seen from each terminal rather than as
-several. Naming the female terminals is what decides which contrasts a path is
-tested against; every path not named is treated as male.
+several. 
 
 ```{r}
 # Each run contributes two sets per path. The female paths have to be named,
@@ -2175,14 +2164,16 @@ their series each of our states looks like, taking all eight of their groups.
 The second restricts that to their mid males against their mid females, which
 is the sex contrast.
 
-Two marker sources are scored side by side, because they measure different
+Three marker sources are scored side by side, because they measure different
 things. *Atlas markers*, from `13_atlas_and_stage_correspondence.Rmd`, compare
 each cluster against every other cluster in the atlas. Most of those clusters
 are somatic, so a gene expressed across germ cells and absent from soma marks
 every germ cluster at once. *Germ subcluster markers*, from
-`17_germ_pseudotime_tscan.Rmd`, compare subcluster against subcluster within the
-germ compartment alone, where the shared germ cell program is already divided
-out. Neither set is pseudotime-associated; both are markers of a group of cells
+`17_germ_pseudotime_tscan.Rmd`, and *fine node markers*, from
+`19_germ_pseudotime_fine_nodes.Rmd`, compare one group of germ cells against
+another within the germ compartment alone, where the shared germ cell program
+is already divided out. The two differ in how finely that compartment is cut.
+None of the three is pseudotime-associated; all are markers of a group of cells
 against other groups.
 
 ```{r}
@@ -2618,13 +2609,9 @@ ggsave(p_sex, file = paste0(results_dir, "/germ_signature_sex.png"),
 `r if (!have_cl_markers || length(pt_srcs) == 0) "" else paste0("The scatter beside each node panel sets the size of that node's sex difference against its mean pseudotime. The sign is dropped, so a node whose two scores sit far apart counts the same whichever sex is higher. ", paste0(vapply(pt_srcs, function(sr) sprintf("Panel %s, %s: rho %.2f, p = %.3f, across %d nodes", pt_tag[[sr]], sr, unname(pt_cor[[sr]]$size$estimate), pt_cor[[sr]]$size$p.value, pt_cor[[sr]]$n), character(1)), collapse = ". "), ". Pseudotime is the average over the paths out of the root, so a node on a branch carries a blended value, and the two runs are on their own scales.")`
 
 
-# Summary figure
+# Summary figures
 
-The two comparisons that ask whether our signal reproduces, in one figure, drawn
-at the size it will be printed. The panels come from the same two functions the
-sections above call, with the type and mark sizes set smaller, so the numbers
-are the ones those sections report. The germ signature scores are a different
-question and stay in their own figure.
+## Pseudobulk comparisons  
 
 ```{r}
 # Drawn at final size rather than drawn large and reduced, because reduction is
@@ -2689,13 +2676,9 @@ ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.png"),
        width = jrnl_w, height = jrnl_h, dpi = 600)
 ```
 
-## The fine nodes in one figure
+## Fine node summary
 
-The two things the fine trajectory says about the Yasmin et al series, together.
-Above, where each fine node's signature scores across their eight groups. Below,
-how the genes changing along each fine path sit in their two trend rankings. The
-rows are different things, nodes above and trajectory terminals below, so the
-panels share an x axis in spirit only and carry their own scales.
+A) Each fine node's signature scores across Yasmin et al.'s eight groups. B) The trajectory, colored by peak group. C) How the genes changing along each fine path sit in the two Yasmin et al. trend rankings. Positive (red) NES means enrichment among the genes increasing along development. Negative (blue) NES means enrichment among the genes decreasing along development. 
 
 ```{r}
 # The tree 19 drew, read back rather than laid out again here, so the two
@@ -2708,15 +2691,19 @@ have_tree  = all(file.exists(tree_files))
 have_fine_sum = have_cl_markers && have_fgsea && have_pt_sets &&
   "fine nodes" %in% node_group$source && "fine" %in% gs$run
 
+# The signature heatmap is tall and narrow, the tree and the enrichment grid
+# are short and wide. Stacked in one column the second two waste most of the
+# page, so the heatmap takes the left and the other two share the right, and
+# the height is whichever side needs more.
 fine_h = if (!have_fine_sum) 6 else {
   n_node = dplyr::n_distinct(node_group$group[node_group$source == "fine nodes"])
   n_path = dplyr::n_distinct(gs$row[gs$run == "fine"])
-  max(6, 3.0 + .17 * n_node + .3 * n_path +
-         if (have_tree) max(4, .09 * n_node) else 0)
+  max(7, 2.2 + .17 * n_node, 3.5 + .3 * n_path + if (have_tree) 4 else 0)
 }
+fine_w = if (have_tree) 12 else 10
 ```
 
-```{r, eval=have_fine_sum, fig.width=9, fig.height=fine_h}
+```{r, eval=have_fine_sum, fig.width=fine_w, fig.height=fine_h}
 # Heights follow the row counts, each with an allowance for the group names
 # angled under it, since both panels spell out their own x axis.
 n_node = dplyr::n_distinct(node_group$group[node_group$source == "fine nodes"])
@@ -2763,26 +2750,29 @@ tree_panel = function() {
                              segment.colour = "grey70", max.overlaps = 40,
                              bg.color = "white", bg.r = .12) +
     scale_fill_manual(values = yas_cols, name = NULL, drop = FALSE) +
-    scale_alpha_continuous(range = c(.35, 1), name = "margin over\nthe next group") +
+    # no legend for the margin: it is the least informative of six keys, and
+    # the caption says what a faint node means
+    scale_alpha_continuous(range = c(.35, 1), guide = "none") +
     coord_equal() +
     labs(x = NULL, y = NULL, title = "The trajectory, by peak group") +
     theme_void(base_size = 9) +
     theme(plot.title = element_text(size = 9, face = "plain", hjust = 0))
 }
 
-p_parts = list(corr_panel("fine nodes", TRUE) +
-                 labs(title = "Signature score across the series"))
-p_hts   = n_node + 8
-if (have_tree) {
-  p_parts = c(p_parts, list(tree_panel()))
-  p_hts   = c(p_hts, max(14L, as.integer(.55 * n_node)))
-}
-p_parts = c(p_parts, list(hm_panel("fine", "trend") +
-                            labs(title = "Pseudotime genes in the trend rankings")))
-p_hts   = c(p_hts, n_path + 8)
+# Upright group names here rather than the angled ones the standalone figure
+# uses. Angled, the leftmost label overhangs the panel by more than an inch and
+# runs off the side of a composite that starts at the page edge.
+left   = corr_panel("fine nodes", TRUE) +
+           labs(title = "Signature score across the series") +
+           theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
+grid_p = hm_panel("fine", "trend") +
+           labs(title = "Pseudotime genes in the trend rankings")
+right  = if (have_tree)
+  tree_panel() / grid_p + patchwork::plot_layout(heights = c(2.2, 1)) else
+  grid_p
 
-p_fine = patchwork::wrap_plots(p_parts, ncol = 1) +
-  patchwork::plot_layout(heights = p_hts, guides = "collect") +
+p_fine = (left | right) +
+  patchwork::plot_layout(widths = c(1, 1.1), guides = "collect") +
   patchwork::plot_annotation(
     tag_levels = "A",
     title = "The fine node trajectory against the Yasmin et al series",
@@ -2791,14 +2781,11 @@ p_fine = patchwork::wrap_plots(p_parts, ncol = 1) +
 p_fine
 
 ggsave(p_fine, file = paste0(results_dir, "/fine_node_summary.png"),
-       width = 9, height = fine_h, dpi = 300, limitsize = FALSE)
+       width = fine_w, height = fine_h, dpi = 300, limitsize = FALSE)
 ggsave(p_fine, file = paste0(results_dir, "/fine_node_summary.pdf"),
-       width = 9, height = fine_h, limitsize = FALSE)
+       width = fine_w, height = fine_h, limitsize = FALSE)
 ```
 
-`r if (!have_fine_sum) "" else "A node warm in a group scores high there; a path warm in a column enriched toward the up end of that ranking, cool toward the down end. The outlined cells above are each signature's peak group, which is not a test. The points below are FDR < 0.05."`
-
-`r if (!(have_bulk && have_fgsea)) "" else paste0("**A** walks the Yasmin et al ranking from most up to most down and steps up at each of our genes, so a set concentrated at one end drives the line away from zero. **B** and **C** plot our ", top_set_lab, " genes against the Yasmin et al effect sizes, colored by whether the two datasets agree on direction, with the counts and their hypergeometric p-values printed per panel. A asks whether our strongest genes concentrate in theirs; B and C ask whether the effect sizes themselves agree. The figure is drawn at 180 by 225 mm, so the type is at printed size and nothing is reduced at typesetting. B and C name their five strongest genes rather than the ten the section figures name, which is as many as the panels hold at this width.")`
 
 
 # Full gene table
@@ -2884,12 +2871,6 @@ datatable(export_tab, rownames = FALSE, escape = FALSE,
                          columnDefs = list(list(width = "260px", targets = 0))))
 ```
 
-`r if (!have_bulk) "" else if (length(unknown) > 0) paste0(length(unknown), " file(s) in the directory are not written by this document and are left out of the table: ", paste(unknown, collapse = ", "), ". Either an earlier version wrote them, or they are new and need a line in file_notes.") else ""`
-
-`r if (!have_bulk) "" else if (length(missing) > 0) paste0("Described but not written on this run: ", paste(missing, collapse = ", "), ". A section that was skipped writes nothing.") else ""`
-
-`r if (!have_bulk) "" else paste0("Two cached intermediates sit in ", results_dir, "/Robjects and are not listed: pseudobulk.Rds, the per-library count sums, and label_permutation_null.Rds, the permutation refits. Both are reused across runs and rebuilt when the inputs change.")`
-
 
 # Summary
 
@@ -2955,8 +2936,7 @@ batch. It does not separate stage from batch within our data.
 Both endpoints use the whole mid group. Neither is stage-matched to our
 transformers animal by animal. The mid male group is stage 7 and
 post-metamorphosis throughout. The mid female group spans stage 1 to
-post-metamorphosis, which makes its late endpoint broader than ours. Read each
-contrast on its own size rather than treating one sex as primary.
+post-metamorphosis, which makes its late endpoint broader than ours. 
 
 The larval endpoint is matched by stage description rather than by size. Our
 larvae are sex-labile by our own staging and larger than every larval animal in
