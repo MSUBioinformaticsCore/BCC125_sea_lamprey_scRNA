@@ -2667,6 +2667,52 @@ ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.png"),
        width = jrnl_w, height = jrnl_h, dpi = 600)
 ```
 
+## The fine nodes in one figure
+
+The two things the fine trajectory says about the Yasmin et al series, together.
+Above, where each fine node's signature scores across their eight groups. Below,
+how the genes changing along each fine path sit in their two trend rankings. The
+rows are different things, nodes above and trajectory terminals below, so the
+panels share an x axis in spirit only and carry their own scales.
+
+```{r}
+have_fine_sum = have_cl_markers && have_fgsea && have_pt_sets &&
+  "fine nodes" %in% node_group$source && "fine" %in% gs$run
+
+fine_h = if (!have_fine_sum) 6 else {
+  n_node = dplyr::n_distinct(node_group$group[node_group$source == "fine nodes"])
+  n_path = dplyr::n_distinct(gs$row[gs$run == "fine"])
+  max(6, 3.0 + .17 * n_node + .3 * n_path)
+}
+```
+
+```{r, eval=have_fine_sum, fig.width=9, fig.height=fine_h}
+# Heights follow the row counts, each with an allowance for the group names
+# angled under it, since both panels spell out their own x axis.
+n_node = dplyr::n_distinct(node_group$group[node_group$source == "fine nodes"])
+n_path = dplyr::n_distinct(gs$row[gs$run == "fine"])
+
+p_fine = (corr_panel("fine nodes", TRUE) +
+            labs(title = "Signature score across the series")) /
+         (hm_panel("fine", "trend") +
+            labs(title = "Pseudotime genes in the trend rankings")) +
+  patchwork::plot_layout(heights = c(n_node + 8, n_path + 8),
+                         guides = "collect") +
+  patchwork::plot_annotation(
+    tag_levels = "A",
+    title = "The fine node trajectory against the Yasmin et al series",
+    theme = theme(plot.title = element_text(size = 11)))
+
+p_fine
+
+ggsave(p_fine, file = paste0(results_dir, "/fine_node_summary.png"),
+       width = 9, height = fine_h, dpi = 300, limitsize = FALSE)
+ggsave(p_fine, file = paste0(results_dir, "/fine_node_summary.pdf"),
+       width = 9, height = fine_h, limitsize = FALSE)
+```
+
+`r if (!have_fine_sum) "" else "A node warm in a group scores high there; a path warm in a column enriched toward the up end of that ranking, cool toward the down end. The rings mean different things in the two panels, a signature's peak group above and FDR < 0.05 below."`
+
 `r if (!(have_bulk && have_fgsea)) "" else paste0("**A** walks the Yasmin et al ranking from most up to most down and steps up at each of our genes, so a set concentrated at one end drives the line away from zero. **B** and **C** plot our ", top_set_lab, " genes against the Yasmin et al effect sizes, colored by whether the two datasets agree on direction, with the counts and their hypergeometric p-values printed per panel. A asks whether our strongest genes concentrate in theirs; B and C ask whether the effect sizes themselves agree. The figure is drawn at 180 by 225 mm, so the type is at printed size and nothing is reduced at typesetting. B and C name their five strongest genes rather than the ten the section figures name, which is as many as the panels hold at this width.")`
 
 
@@ -2717,6 +2763,8 @@ file_notes = c(
   "germ_signature_by_group.png"    = "The same scores as a heatmap, signatures by group, with each signature's peak group ringed.",
   "germ_signature_sex.csv"         = "Mean germ signature score in Yasmin et al mid males and mid females, per signature and marker source, with the difference between them. The germ subcluster rows also carry that node's mean pseudotime and its cell count; the atlas rows have neither.",
   "bulk_validation_summary.png"    = "The enrichment curves and the effect size scatters in one figure, drawn at 180 by 225 mm and written at 600 dpi.",
+  "fine_node_summary.png"          = "The fine node signatures across the Yasmin et al groups, with the fine path enrichments in the two trend rankings beneath them.",
+  "fine_node_summary.pdf"          = "The same figure as vector.",
   "bulk_validation_summary.pdf"    = "The same figure as vector at the same size, which is the one to submit.",
   "germ_signature_sex.png"         = "The same scores as paired points per signature, with the subcluster sex difference set against mean pseudotime beside them.",
   "bulk_vs_pseudobulk_per_gene.csv" = "One row per gene: our male and female stage effects, each Yasmin et al contrast's coefficient, and the Wang identifier. The endpoint columns are log fold changes between two groups. Each Yasmin et al trend carries two columns: *_trend_slope, the coefficient edgeR returned for the regression on the trend score, and *_trend_series_log2FC, that slope multiplied by the span the score covers, which is the log2 change across the whole series and the column every figure and statistic here uses. edgeR names its coefficient logFC for any design, so the slope is renamed to keep it apart from the endpoint columns, which are fold changes between two groups.")
