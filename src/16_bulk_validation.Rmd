@@ -2381,8 +2381,11 @@ corr_panel = function(src, last) {
     # readable underneath it
     geom_point(data = pk, shape = 21, size = 2.4, fill = NA,
                colour = "grey10", stroke = .7) +
-    scale_fill_distiller(palette = "RdBu", limits = c(-lim, lim),
-                         name = "mean score") +
+    # BrBG rather than the RdBu the enrichment scores use: the two appear
+    # together in the fine node summary and two red-to-blue bars there cannot
+    # be told apart. Both are colorblind safe.
+    scale_fill_distiller(palette = "BrBG", direction = 1,
+                         limits = c(-lim, lim), name = "mean score") +
     scale_x_discrete(expand = c(0, 0)) +
     scale_y_discrete(expand = c(0, 0)) +
     labs(x = NULL, y = NULL, title = src) +
