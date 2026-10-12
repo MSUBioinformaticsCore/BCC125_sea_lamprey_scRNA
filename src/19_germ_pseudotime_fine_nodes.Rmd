@@ -1284,6 +1284,14 @@ layout_by_distance = function(graph, lengths) {
 set.seed(1)
 lay = layout_by_distance(gr, e_ig$weight)
 
+# The coordinates, so another document can draw this same tree rather than
+# computing a layout of its own and showing a different picture of it. The
+# edges are already in mst_edges.csv, so the pair is enough to redraw it.
+write.csv(data.frame(node = as.character(lay$name),
+                     x = lay$x, y = lay$y, stringsAsFactors = FALSE),
+          file = paste0(results_dir, "/node_graph_layout.csv"),
+          row.names = FALSE)
+
 # edge color is the subsampling frequency, so an edge a different sample would
 # not have drawn reads as red
 lay_d = as.matrix(dist(as.matrix(lay[, c("x", "y")])))
@@ -1745,6 +1753,7 @@ file_notes = c(
   "node_composition.csv"      = "Cells per node and the cluster each node came from.",
   "node_by_annotation.csv"    = "Annotation composition of every node, as counts and fractions. The evidence behind panel B of the node graph.",
   "node_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
+  "node_graph_layout.csv"        = "Where each node sits on the node graph figure, so the same tree can be drawn elsewhere.",
   "mst_edges.csv"             = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance in standard deviations of the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
   "annotation_pseudotime.csv" = "Median and quartiles of pseudotime for each annotation. The ordering claim in numbers.",
   "pseudotime_vs_technical.csv"   = "Pseudotime regressed on depth, mitochondrial, rRNA and ribosomal content, pooled and within each library.",
