@@ -2340,8 +2340,47 @@ corr_h = { n = dplyr::distinct(node_group, source, group)
            max(6, 2.5 + .17 * nrow(n) +
                   1.1 * dplyr::n_distinct(node_group$source)) }
 
-# the group each signature scores highest in
+# The group each signature scores highest in, and every group it cannot be
+# told apart from.
+#
+# The peak is the largest of eight means over two to six animals, so taking the
+# argmax alone states more than the data carry: half of these signatures have a
+# runner-up within the median margin of the winner. What is marked instead is
+# the top group together with any group within one standard error of it, so a
+# clean win still marks one cell and a near-tie marks the groups it is a tie
+# between.
+#
+# The standard error uses a within-signature pooled SD rather than each group's
+# own. Four of the eight groups hold two animals, and a two-animal SD is too
+# unstable to set a threshold with.
+node_se = dplyr::bind_rows(lapply(names(score_mats), function(src) {
+  m   = score_mats[[src]]
+  grp = sample_meta$group_used[match(rownames(m), sample_meta$run)]
+  dplyr::bind_rows(lapply(colnames(m), function(gp) {
+    v  = m[, gp]
+    ss = sum(tapply(v, grp, function(x) sum((x - mean(x))^2)))
+    df = length(v) - dplyr::n_distinct(grp)
+    data.frame(source = src, group = gp,
+               sd_pooled = if (df > 0) sqrt(ss / df) else NA_real_,
+               stringsAsFactors = FALSE)
+  }))
+}))
+
 node_peak = node_group %>%
+  dplyr::left_join(node_se, by = c("source", "group")) %>%
+  dplyr::group_by(source, group) %>%
+  dplyr::mutate(
+    se_top  = sd_pooled / sqrt(n_animals[which.max(mean_score)]),
+    is_peak = mean_score == max(mean_score),
+    # within one standard error of the best, so the mark covers the groups the
+    # comparison cannot separate
+    tied    = mean_score >= max(mean_score) - se_top) %>%
+  dplyr::ungroup() %>%
+  dplyr::filter(is_peak | tied)
+
+# the argmax on its own. The tree gives each node one color, so it needs one
+# row per node whatever the margin.
+node_top = node_group %>%
   dplyr::group_by(source, group) %>%
   dplyr::slice_max(mean_score, n = 1, with_ties = FALSE) %>%
   dplyr::ungroup()
@@ -2383,13 +2422,18 @@ corr_panel = function(src, last) {
 
   ggplot(d, aes(x = yas_group, y = group, fill = mean_score)) +
     geom_tile(colour = "white", linewidth = .5) +
-    # The peak group is outlined rather than marked with a point. These panels
-    # sit beside the enrichment heatmap, whose points mean FDR < 0.05, and the
-    # same symbol in both would read as significance here too. An outlined
-    # cell is a different kind of mark and cannot be mistaken for one.
-    geom_tile(data = pk, aes(colour = "peak group"), fill = NA,
-              linewidth = .7) +
-    scale_colour_manual(values = c(`peak group` = "grey10"), name = NULL) +
+    # The peak is outlined rather than marked with a point. These panels sit
+    # beside the enrichment heatmap, whose points mean FDR < 0.05, and the same
+    # symbol in both would read as significance here too. An outlined cell is a
+    # different kind of mark and cannot be mistaken for one.
+    #
+    # A row carries more than one outline where the groups are within a
+    # standard error of each other, which is the signature being high across
+    # that part of the series rather than in one group of it.
+    geom_tile(data = pk, aes(colour = "highest group,\nor tied with it"),
+              fill = NA, linewidth = .7) +
+    scale_colour_manual(values = setNames("grey10", "highest group,\nor tied with it"),
+                        name = NULL) +
     # BrBG rather than the RdBu the enrichment scores use: the two appear
     # together in the fine node summary and two red-to-blue bars there cannot
     # be told apart. Both are colorblind safe.
@@ -2424,8 +2468,8 @@ p_corr = patchwork::wrap_plots(Map(corr_panel, srcs_c,
     tag_levels = "A",
     title = "Where each germ signature scores across the Yasmin et al series",
     subtitle = paste0("mean score per group, outlined at each signature's ",
-                      "peak; rows clustered on their profile across the ",
-                      "series"),
+                      "highest group and any within one standard error of ",
+                      "it; rows clustered on their profile across the series"),
     theme = theme(plot.title = element_text(size = 11),
                   plot.subtitle = element_text(size = 9)))
 
@@ -2727,7 +2771,7 @@ tree_panel = function() {
                               dplyr::nth(mean_score, 2), .groups = "drop")
 
   nd = lay %>%
-    dplyr::left_join(node_peak %>%
+    dplyr::left_join(node_top %>%
                        dplyr::filter(source == "fine nodes") %>%
                        dplyr::select(node = group, yas_group),
                      by = "node") %>%
@@ -2832,7 +2876,7 @@ file_notes = c(
   "pseudotime_enrichment_grid.png" = "Every pseudotime path and direction against every Yasmin et al contrast, colored by FDR, split by trajectory and contrast shape.",
   "pseudotime_cross_sex.csv"       = "Each pseudotime path and direction with the strongest enrichment it reached on its own sex and on the other, and the contrast each came from.",
   "germ_signature_by_group.csv"    = "Mean germ signature score in each of the eight Yasmin et al groups, one row per signature and group, with the number of animals behind each mean.",
-  "germ_signature_by_group.png"    = "The same scores as a heatmap, signatures by group, with each signature's peak group outlined.",
+  "germ_signature_by_group.png"    = "The same scores as a heatmap, signatures by group, with each signature's highest group outlined, along with any group it cannot be told apart from.",
   "germ_signature_sex.csv"         = "Mean germ signature score in Yasmin et al mid males and mid females, per signature and marker source, with the difference between them. The germ subcluster rows also carry that node's mean pseudotime and its cell count; the atlas rows have neither.",
   "bulk_validation_summary.png"    = "The enrichment curves and the effect size scatters in one figure, drawn at 180 by 225 mm and written at 600 dpi.",
   "fine_node_summary.png"          = "The fine node signatures across the Yasmin et al groups, with the fine path enrichments in the two trend rankings beneath them.",
