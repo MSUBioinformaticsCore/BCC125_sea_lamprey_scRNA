@@ -1402,121 +1402,30 @@ have_fgsea = have_bulk && requireNamespace("fgsea", quietly = TRUE)
 ```{r, eval=have_fgsea}
 our_sets = split(go_sets$Gene, go_sets$set)[
   set_key$set[set_key$source == "ours"]]
-```
 
-### Pseudotime-associated genes as a second definition
-
-Our pseudobulk effect is a ratio between four libraries over the whole atlas.
-The genes 17 and 19 report as changing along their trajectories come from
-thousands of cells inside the germ compartment. They are a second way to name
-our stage genes, and they are mostly different genes. Both runs are tested
-here and both are left out of the gene ontology section.
-
-Each path is tested on its own, up and down separately. Paths out of the same
-root share most of their genes, so these are not independent tests, and the
-figures are read as one result per run seen from each terminal rather than as
-several. Naming the female terminals is what decides which contrasts a path is
-tested against; every path not named is treated as male.
-
-```{r}
 # which family a set name belongs to: the pseudobulk lists, or one path of one
 # pseudotime run
 src_of = function(x) ifelse(grepl("^pseudotime ", x),
                             sub("^(pseudotime [^,]+),.*$", "\\1", x),
                             "pseudobulk")
-
-# Each run contributes two sets per path. The female paths have to be named,
-# because nothing in the gene table says which terminal is which; the document
-# lists the paths it found and skips the run if they are not set.
-pt_sources = list(
-  list(label = "nodes",
-       file  = paste0(germ_dir, "/tscan_pseudotime_genes.csv"),
-       female = as.character(params$pseudotime_female_paths)),
-  list(label = "fine",
-       file  = paste0(fine_dir, "/pseudotime_genes.csv"),
-       female = as.character(params$fine_female_paths)))
-
-pt_found = vapply(pt_sources, function(z) file.exists(z$file), logical(1))
-have_pt_sets = have_fgsea && any(pt_found)
 ```
-
-`r if (!have_fgsea || all(pt_found)) "" else paste0("**Not found, so skipped: ", paste(vapply(pt_sources[!pt_found], function(z) z$file, character(1)), collapse = "; "), ".**")`
-
-```{r, eval=have_pt_sets}
-# one run's worth of sets, or NULL with a note if its female paths are unnamed
-pt_build = function(z) {
-  raw = read.csv(z$file, stringsAsFactors = FALSE,
-                 colClasses = c(Path = "character"))
-  stopifnot(all(c("Path", "Direction", "Gene", "logFC") %in% colnames(raw)))
-  paths = sort(unique(raw$Path))
-  fem   = trimws(strsplit(z$female, ",")[[1]])
-  fem   = fem[nzchar(fem)]
-
-  if (length(fem) == 0 || length(setdiff(fem, paths)) > 0)
-    return(list(label = z$label, ok = FALSE, paths = paths, asked = fem))
-
-  keep = raw %>%
-    dplyr::mutate(sex = ifelse(Path %in% fem, "female", "male")) %>%
-    # only genes the bulk comparison can rank, so a set is not scored on genes
-    # that were never in the ranking
-    dplyr::filter(Gene %in% go_pool$Gene)
-
-  rows = keep %>%
-    dplyr::group_by(Path, sex, Direction) %>%
-    dplyr::slice_max(abs(logFC), n = top_ns[1], with_ties = FALSE) %>%
-    dplyr::ungroup() %>%
-    dplyr::transmute(set = paste0("pseudotime ", z$label, " ", Path, ", ",
-                                  sex, ", ", Direction),
-                     Gene, sex, direction = Direction)
-
-  arms = keep %>%
-    dplyr::count(Path, sex, Direction, name = "n_genes") %>%
-    dplyr::mutate(label = z$label)
-
-  list(label = z$label, ok = TRUE, rows = rows, arms = arms)
-}
-
-pt_built = lapply(pt_sources[pt_found], pt_build)
-pt_ok    = Filter(function(z) z$ok, pt_built)
-pt_bad   = Filter(function(z) !z$ok, pt_built)
-
-pt_rows = dplyr::bind_rows(lapply(pt_ok, `[[`, "rows"))
-pt_sets = if (nrow(pt_rows) > 0) split(pt_rows$Gene, pt_rows$set) else list()
-pt_key  = if (nrow(pt_rows) == 0) NULL else pt_rows %>%
-  dplyr::distinct(set, sex, direction) %>%
-  dplyr::mutate(source = "pseudotime")
-pt_arms = dplyr::bind_rows(lapply(pt_ok, `[[`, "arms"))
-
-have_pt_sets = length(pt_sets) > 0
-# one family, and so one figure, per path
-pt_families  = if (have_pt_sets) unique(src_of(pt_rows$set)) else character(0)
-```
-
-`r if (!have_fgsea || length(pt_bad) == 0) "" else paste0("**Skipped, because the female paths are not named: ", paste(vapply(pt_bad, function(z) paste0(z$label, " (paths found: ", paste(z$paths, collapse = ", "), ")"), character(1)), collapse = "; "), ".** Set them and rerun.")`
-
-`r if (!have_pt_sets) "" else { a = dplyr::distinct(pt_arms, label, Path, sex); paste0("Paths tested: ", paste0(a$label, " ", a$Path, " (", a$sex, ")", collapse = "; "), ". Each set is the top ", top_ns[1], " genes of that path and direction by log fold change along it, kept to genes the Yasmin et al comparison ranks.") }`
 
 ```{r, eval=have_fgsea}
-# the pseudotime sets ride alongside ours through the same fgsea call, so the
-# table, the leading edge and the figures treat them the same way
-all_sets = if (have_pt_sets) c(our_sets, pt_sets) else our_sets
-all_key  = dplyr::bind_rows(
-  set_key %>% dplyr::filter(source == "ours") %>%
-    dplyr::select(set, source, sex, direction),
-  if (have_pt_sets) pt_key %>% dplyr::select(set, source, sex, direction))
-
-# fgsea once per contrast, reused for both the table and the leading edge
-set.seed(1)
-gsea_raw = lapply(names(axis_cols), function(ax) {
+# One family of gene sets against the four rankings. Called once for the
+# pseudobulk lists and once for the pseudotime paths, so each family carries
+# its own Benjamini-Hochberg correction rather than the two sharing one.
+#
+# cross_sex says whether a set goes against both sexes. The pseudobulk lists
+# go against their own sex only, since our effect is computed per sex and the
+# cross-sex pairing would compare two different quantities. Every pseudotime
+# path goes against all four contrasts: a path out of the male arm hitting the
+# male contrasts and not the female ones is the claim, and the cross-sex tests
+# are what makes it one rather than two unrelated hits.
+run_gsea = function(sets, key, cross_sex) {
+ set.seed(1)
+ raw = lapply(names(axis_cols), function(ax) {
   sex = trimws(strsplit(ax, ",")[[1]])[1]
-  # The pseudobulk lists go against their own sex only, since our effect is
-  # computed per sex and the cross-sex pairing would compare two different
-  # quantities. Every pseudotime path goes against all four contrasts: a path
-  # out of the male arm hitting the male contrasts and not the female ones is
-  # the claim, and the cross-sex tests are what makes it one rather than two
-  # unrelated hits.
-  use = all_sets[all_key$set[all_key$source == "pseudotime" |
-                               all_key$sex == sex]]
+  use = sets[key$set[cross_sex | key$sex == sex]]
 
   rank_vec = go_pool[[axis_cols[[ax]][["stat"]]]]
   names(rank_vec) = go_pool$Gene
@@ -1537,9 +1446,9 @@ gsea_raw = lapply(names(axis_cols), function(ax) {
        res = fgsea::fgsea(use, rank_vec, minSize = 10,
                           nPermSimple = as.integer(params$fgsea_nperm_simple),
                           BPPARAM = BiocParallel::SerialParam(progressbar = FALSE)))
-})
+ })
 
-gsea_tab = dplyr::bind_rows(lapply(gsea_raw, function(z) {
+ tab = dplyr::bind_rows(lapply(raw, function(z) {
   r = z$res
   data.frame(contrast = z$ax, set = r$pathway, size = r$size,
              ES = r$ES, NES = r$NES, p = r$pval, fdr = r$padj,
@@ -1552,21 +1461,13 @@ gsea_tab = dplyr::bind_rows(lapply(gsea_raw, function(z) {
                   # which sex the set was built on, and whether this contrast
                   # is that sex. The pseudobulk rows are matched by
                   # construction; the pseudotime rows are not.
-                  set_sex = all_key$sex[match(set, all_key$set)],
+                  set_sex = key$sex[match(set, key$set)],
                   matched = set_sex == trimws(strsplit(z$ax, ",")[[1]])[1]) %>%
     dplyr::relocate(source, set_sex, matched, .after = set)
-}))
+ }))
 
-# A set whose NES came back NA was not normalized, which is the unbalanced
-# ranking described above rather than a weak result. Raise fgsea_nperm_simple
-# and knit again rather than reading the NA as nothing.
-gsea_na = gsea_tab %>% dplyr::filter(is.na(NES))
-
-write.csv(gsea_tab, file = paste0(results_dir, "/top_gene_enrichment.csv"),
-          row.names = FALSE)
-
-# the leading edge genes, which are the ones carrying each enrichment
-gsea_genes = dplyr::bind_rows(lapply(gsea_raw, function(z) {
+ # the leading edge genes, which are the ones carrying each enrichment
+ genes = dplyr::bind_rows(lapply(raw, function(z) {
   r = z$res
   dplyr::bind_rows(lapply(seq_len(nrow(r)), function(i) {
     g = r$leadingEdge[[i]]
@@ -1578,9 +1479,26 @@ gsea_genes = dplyr::bind_rows(lapply(gsea_raw, function(z) {
                yasmin_stat = unname(z$rank_vec[g]),
                stringsAsFactors = FALSE)
   }))
-}))
+ }))
 
-write.csv(gsea_genes,
+ list(raw = raw, tab = tab, genes = genes)
+}
+
+# A set whose NES came back NA was not normalized, which is the unbalanced
+# ranking described above rather than a weak result. Raise fgsea_nperm_simple
+# and knit again rather than reading the NA as nothing.
+na_sets = function(tab) tab %>% dplyr::filter(is.na(NES))
+
+g_pb     = run_gsea(our_sets,
+                    set_key %>% dplyr::filter(source == "ours") %>%
+                      dplyr::select(set, source, sex, direction),
+                    cross_sex = FALSE)
+gsea_tab = g_pb$tab
+gsea_na  = na_sets(gsea_tab)
+
+write.csv(gsea_tab, file = paste0(results_dir, "/top_gene_enrichment.csv"),
+          row.names = FALSE)
+write.csv(g_pb$genes,
           file = paste0(results_dir, "/top_gene_enrichment_leading_edge.csv"),
           row.names = FALSE)
 
@@ -1632,9 +1550,12 @@ dir_of   = function(x) factor(ifelse(grepl("up$", x), "up", "down"),
                               levels = c("up", "down"))
 dir_cols = c(up = "#0072B2", down = "#E69F00")
 
-curve_df = dplyr::bind_rows(lapply(gsea_raw, function(z)
+# The four frames a figure needs, built from one family's fit. Returned
+# together so a family's curves can never be drawn against another's labels.
+gsea_curves = function(g, sets) {
+ curve_df = dplyr::bind_rows(lapply(g$raw, function(z)
   dplyr::bind_rows(lapply(z$res$pathway, function(st) {
-    es = running_es(z$rank_vec, all_sets[[st]])
+    es = running_es(z$rank_vec, sets[[st]])
     # thinned for drawing, since an svg of seventeen thousand points is large
     # and the line is smooth; the peak and the ends are kept exactly
     step = max(1L, as.integer(length(es) / 600))
@@ -1644,43 +1565,51 @@ curve_df = dplyr::bind_rows(lapply(gsea_raw, function(z)
                stringsAsFactors = FALSE)
   }))))
 
-tick_df = dplyr::bind_rows(lapply(gsea_raw, function(z) {
+ tick_df = dplyr::bind_rows(lapply(g$raw, function(z) {
   ord = names(sort(z$rank_vec, decreasing = TRUE))
   dplyr::bind_rows(lapply(z$res$pathway, function(st)
     data.frame(contrast = z$ax, set = st,
-               rank = match(all_sets[[st]], ord),
+               rank = match(sets[[st]], ord),
                stringsAsFactors = FALSE)))
-})) %>% dplyr::filter(!is.na(rank))
+ })) %>% dplyr::filter(!is.na(rank))
 
-peak_df = curve_df %>%
+ peak_df = curve_df %>%
   dplyr::group_by(contrast, set) %>%
   dplyr::slice_max(abs(es), n = 1, with_ties = FALSE) %>%
   dplyr::ungroup()
 
-# the barcode sits below the curves, one row per set, scaled to the data so it
-# never overlaps the lines
-lo = min(curve_df$es); hi = max(curve_df$es); sp = hi - lo
-bar = tick_df %>%
+ # the barcode sits below the curves, one row per set, scaled to the data so it
+ # never overlaps the lines
+ lo = min(curve_df$es); hi = max(curve_df$es); sp = hi - lo
+ bar = tick_df %>%
   dplyr::mutate(direction = dir_of(set),
                 y0 = ifelse(direction == "up", lo - .10 * sp, lo - .22 * sp),
                 y1 = ifelse(direction == "up", lo - .18 * sp, lo - .30 * sp))
 
-lab = gsea_tab %>%
+ lab = g$tab %>%
   dplyr::mutate(direction = dir_of(set),
                 txt = paste0(direction, ": NES ", signif(NES, 2),
                              ", FDR ", signif(fdr, 2)),
                 y = ifelse(direction == "up", hi + .22 * sp, hi + .10 * sp),
                 contrast = factor(contrast, levels = names(axis_cols)))
 
+ list(curve_df = curve_df, peak_df = peak_df, bar = bar, lab = lab)
+}
+
+cur_pb = gsea_curves(g_pb, our_sets)
+
 # Type and mark sizes are arguments so the same figure can be drawn again at
 # journal size for the composite. The defaults are the sizes this section uses.
 # which_source picks one family of sets, because they are different
 # definitions of our stage genes and overlaying them would put six curves in a
 # panel built for two.
-gsea_figure = function(base_size = 10, pt_size = 2.2, txt_size = 2.9,
-                       line_w = .8, which_source = "pseudobulk",
+gsea_figure = function(cur, base_size = 10, pt_size = 2.2, txt_size = 2.9,
+                       line_w = .8, which_source = NULL,
                        ttl = "Our top genes against the Yasmin et al ranking") {
-  keep = function(d) d[src_of(d$set) == which_source, , drop = FALSE]
+  keep = function(d) if (is.null(which_source)) d else
+    d[src_of(d$set) == which_source, , drop = FALSE]
+  curve_df = cur$curve_df; peak_df = cur$peak_df
+  bar = cur$bar; lab = cur$lab
   ggplot(keep(curve_df) %>%
            dplyr::mutate(direction = dir_of(set),
                          contrast = factor(contrast,
@@ -1719,155 +1648,12 @@ gsea_figure = function(base_size = 10, pt_size = 2.2, txt_size = 2.9,
           strip.background = element_rect(fill = "grey95", colour = NA))
 }
 
-p_gsea = gsea_figure()
+p_gsea = gsea_figure(cur_pb)
 p_gsea
 
 ggsave(p_gsea, file = paste0(results_dir, "/top_gene_enrichment.png"),
        width = 10, height = 7, dpi = 300)
 ```
-
-### Pseudotime genes against the same rankings
-
-```{r, eval=have_pt_sets, fig.width=10, fig.height=7, results="asis"}
-# one figure per run, since a run is a different trajectory over the same cells
-pt_figs = lapply(pt_families, function(fam) {
-  p = gsea_figure(which_source = fam,
-                  ttl = paste0(fam, " genes against the Yasmin et al ranking"))
-  ggsave(p, file = paste0(results_dir, "/",
-                          gsub(" ", "_", fam), "_enrichment.png"),
-         width = 10, height = 7, dpi = 300)
-  p
-})
-
-for (i in seq_along(pt_figs)) {
-  cat("\n\n#### ", pt_families[i], "\n\n", sep = "")
-  print(pt_figs[[i]])
-  cat("\n\n")
-}
-```
-
-`r if (!have_pt_sets) "" else { z = gsea_tab %>% dplyr::filter(source %in% pt_families); paste0(paste0(vapply(split(z, z$source), function(d) { ok = sum(d$as_expected & d$fdr < 0.05); tr = d[grepl("trend", d$contrast), ]; paste0(d$source[1], ": ", ok, " of ", nrow(d), " enrich in the expected direction at FDR < 0.05, ", sum(tr$as_expected & tr$fdr < 0.05), " of ", nrow(tr), " of them on the trend contrasts") }, character(1)), collapse = ". "), ". The trend contrasts are the matched comparison, since both they and pseudotime are regressions on an ordered score, where the endpoints are two-group tests.") }`
-
-#### All paths and contrasts
-
-One panel per trajectory and contrast shape, so the whole set of tests is on
-one page. Color is the normalized enrichment score, which carries both how far toward
-one end of the ranking the set sat and which end it was, capped so that one
-very strong result does not flatten the rest. A marked cell is one reaching
-FDR < 0.05. Grey is a test fgsea could not score.
-
-Each column names the direction the set was built for, so a column of rising
-genes supports the trajectory when it is warm and contradicts it when it is
-cool, and a column of falling genes the reverse.
-
-```{r, eval=have_pt_sets, fig.width=9, fig.height=7}
-gs = gsea_tab %>%
-  dplyr::filter(source %in% pt_families) %>%
-  dplyr::mutate(
-    run   = sub("^pseudotime ([a-z]+) .*$", "\\1", set),
-    path  = sub("^pseudotime [a-z]+ ([^,]+),.*$", "\\1", set),
-    shape = trimws(sub("^[^,]+,", "", contrast)),
-    c_sex = trimws(sub(",.*$", "", contrast)),
-    # the path is the row, and the column is the contrast's sex crossed with
-    # the direction the set was built for, so every path is read against both
-    # sexes in both directions
-    row   = paste0(path, " (", set_sex, ")"),
-    col   = factor(paste0(c_sex, " ", direction),
-                   levels = as.vector(t(outer(
-                     unique(trimws(sub(",.*$", "", names(axis_cols)))),
-                     c("up", "down"), paste)))),
-    score = NES)
-
-# Symmetric about zero, so the two directions are shaded alike, and capped:
-# the strongest score here runs past 3.7 while most sit nearer 1.5, and on the
-# full range everything but that one cell lands in the middle of the scale.
-# Anything beyond the cap is drawn at it.
-hm_lim = 2.5
-hm_fdr = 0.05
-
-grid = gs %>% dplyr::distinct(run, shape) %>%
-  dplyr::arrange(match(run, c("nodes", "fine")),
-                 match(shape, c("endpoint", "trend")))
-
-hm_panel = function(rn, sh) {
-  d = gs %>% dplyr::filter(run == rn, shape == sh) %>%
-    dplyr::mutate(row = factor(row, levels = rev(sort(unique(row)))))
-  ggplot(d, aes(x = col, y = row, fill = score)) +
-    geom_tile(colour = "white", linewidth = .5) +
-    # a disc rather than an asterisk, because the extremes of a diverging
-    # scale are dark at both ends and a single ink color reads over neither
-    geom_point(data = d %>% dplyr::filter(!is.na(fdr), fdr < hm_fdr),
-               aes(shape = paste0("FDR < ", hm_fdr)),
-               fill = "white", colour = "grey20", size = 1.9, stroke = .5) +
-    scale_shape_manual(values = setNames(21, paste0("FDR < ", hm_fdr)),
-                       name = NULL) +
-    scale_fill_distiller(palette = "RdBu", limits = c(-hm_lim, hm_lim),
-                         na.value = "grey90",
-                         name = paste0("NES\n(capped at ", hm_lim, ")"),
-                         oob = function(x, range) pmin(pmax(x, range[1]),
-                                                       range[2])) +
-    scale_x_discrete(expand = c(0, 0)) +
-    scale_y_discrete(expand = c(0, 0)) +
-    labs(x = NULL, y = NULL, title = paste0(rn, " paths, ", sh)) +
-    theme_bw(base_size = 9) +
-    theme(panel.grid = element_blank(),
-          axis.text.x = element_text(angle = 30, hjust = 1),
-          plot.title = element_text(size = 9, face = "plain"))
-}
-
-p_gsea_hm = patchwork::wrap_plots(
-    Map(hm_panel, grid$run, grid$shape),
-    ncol = 2, byrow = TRUE) +
-  patchwork::plot_layout(guides = "collect") +
-  patchwork::plot_annotation(
-    tag_levels = "A",
-    title = "Pseudotime gene sets against the Yasmin et al contrasts",
-    subtitle = paste0("each row is one path, labeled with the arm it came ",
-                      "from; each column one contrast and one direction"),
-    theme = theme(plot.title = element_text(size = 11),
-                  plot.subtitle = element_text(size = 9)))
-
-p_gsea_hm
-
-ggsave(p_gsea_hm, file = paste0(results_dir, "/pseudotime_enrichment_grid.png"),
-       width = 9, height = 7, dpi = 300)
-```
-
-`r if (!have_pt_sets) "" else "The two columns carrying a path's own sex are the matched ones. A path dark there and pale on the other sex is tracking that sex; one dark across all four is tracking something the two sexes share."`
-
-#### Does each arm hit its own sex
-
-A path built on one arm should enrich in that sex's contrasts and not the
-other's. Both are tested, so the comparison is on the page rather than left to
-the reader. Each row is a path and direction, with the strongest normalized
-score it reached on its own sex and on the other, and the contrast each came
-from.
-
-```{r, eval=have_pt_sets}
-cross = gsea_tab %>%
-  dplyr::filter(source %in% pt_families, !is.na(NES)) %>%
-  dplyr::group_by(set, direction, matched) %>%
-  # the contrast where the set went furthest in the direction it was built for
-  dplyr::slice_max(ifelse(direction == "up", NES, -NES), n = 1,
-                   with_ties = FALSE) %>%
-  dplyr::ungroup() %>%
-  dplyr::mutate(side = ifelse(matched, "own sex", "other sex")) %>%
-  dplyr::select(set, direction, side, contrast, NES, fdr) %>%
-  tidyr::pivot_wider(id_cols = c(set, direction), names_from = side,
-                     values_from = c(contrast, NES, fdr)) %>%
-  dplyr::arrange(set, direction)
-
-write.csv(cross, file = paste0(results_dir, "/pseudotime_cross_sex.csv"),
-          row.names = FALSE)
-
-datatable(cross %>% dplyr::mutate(dplyr::across(where(is.numeric),
-                                                ~signif(., 3))),
-          rownames = FALSE, filter = "top", options = list(pageLength = 12))
-```
-
-`r if (!have_pt_sets) "" else { k = gsea_tab %>% dplyr::filter(source %in% pt_families, !is.na(NES), as_expected, fdr < 0.05); paste0(sum(k$matched), " of the ", nrow(k), " pseudotime enrichments that reach FDR < 0.05 in the expected direction are on the path's own sex, and ", sum(!k$matched), " are on the other. A path that clears on its own sex alone is evidence the arm tracks that sex; one that clears on both is tracking something the two sexes share.") }`
-
-`r if (!have_pt_sets) "" else "Pseudotime is not a second name for the larva-to-transformer contrast. 17 and 19 each report how much of it library explains, and the gene lists tested here overlap the pseudobulk lists only slightly. A set enriching here therefore says something the pseudobulk sets above do not. The reverse does not follow: the Yasmin et al series varies stage and little else, so whatever part of pseudotime is not stage has no counterpart in it, and a set that fails to enrich is not evidence against the ordering."`
 
 ## Overlap between the lists
 
@@ -2124,6 +1910,263 @@ ggsave(p_go_shared, file = paste0(results_dir, "/shared_trend_GO_terms.png"),
 `r if (!have_go || nrow(go_shared_trend) == 0) "" else paste0("Each term carries a point from each dataset. A term whose two points sit close together is supported about equally on both sides. One with a long connector is carried mostly by the dataset further to the right. Every term shown passes p < ", params$go_pval, " on both sides, which is what being shared means here.")`
 
 
+# The trajectory comparison
+
+Everything above names our stage genes from the pseudobulk ratio between four
+libraries. This section names them a second way, from the genes that change
+along the germ cell trajectories, and puts those against the same four Yasmin
+et al rankings.
+
+The two families are fitted separately, so each carries its own
+Benjamini-Hochberg correction and an FDR here is adjusted across the paths
+rather than across the pseudobulk lists as well.
+
+## The gene sets
+
+Our pseudobulk effect is a ratio between four libraries over the whole atlas.
+The genes 17 and 19 report as changing along their trajectories come from
+thousands of cells inside the germ compartment. They are a second way to name
+our stage genes, and they are mostly different genes. Both runs are tested
+here and both are left out of the gene ontology section.
+
+Each path is tested on its own, up and down separately. Paths out of the same
+root share most of their genes, so these are not independent tests, and the
+figures are read as one result per run seen from each terminal rather than as
+several. Naming the female terminals is what decides which contrasts a path is
+tested against; every path not named is treated as male.
+
+```{r}
+# Each run contributes two sets per path. The female paths have to be named,
+# because nothing in the gene table says which terminal is which; the document
+# lists the paths it found and skips the run if they are not set.
+pt_sources = list(
+  list(label = "nodes",
+       file  = paste0(germ_dir, "/tscan_pseudotime_genes.csv"),
+       female = as.character(params$pseudotime_female_paths)),
+  list(label = "fine",
+       file  = paste0(fine_dir, "/pseudotime_genes.csv"),
+       female = as.character(params$fine_female_paths)))
+
+pt_found = vapply(pt_sources, function(z) file.exists(z$file), logical(1))
+have_pt_sets = have_fgsea && any(pt_found)
+```
+
+`r if (!have_fgsea || all(pt_found)) "" else paste0("**Not found, so skipped: ", paste(vapply(pt_sources[!pt_found], function(z) z$file, character(1)), collapse = "; "), ".**")`
+
+```{r, eval=have_pt_sets}
+# one run's worth of sets, or NULL with a note if its female paths are unnamed
+pt_build = function(z) {
+  raw = read.csv(z$file, stringsAsFactors = FALSE,
+                 colClasses = c(Path = "character"))
+  stopifnot(all(c("Path", "Direction", "Gene", "logFC") %in% colnames(raw)))
+  paths = sort(unique(raw$Path))
+  fem   = trimws(strsplit(z$female, ",")[[1]])
+  fem   = fem[nzchar(fem)]
+
+  if (length(fem) == 0 || length(setdiff(fem, paths)) > 0)
+    return(list(label = z$label, ok = FALSE, paths = paths, asked = fem))
+
+  keep = raw %>%
+    dplyr::mutate(sex = ifelse(Path %in% fem, "female", "male")) %>%
+    # only genes the bulk comparison can rank, so a set is not scored on genes
+    # that were never in the ranking
+    dplyr::filter(Gene %in% go_pool$Gene)
+
+  rows = keep %>%
+    dplyr::group_by(Path, sex, Direction) %>%
+    dplyr::slice_max(abs(logFC), n = top_ns[1], with_ties = FALSE) %>%
+    dplyr::ungroup() %>%
+    dplyr::transmute(set = paste0("pseudotime ", z$label, " ", Path, ", ",
+                                  sex, ", ", Direction),
+                     Gene, sex, direction = Direction)
+
+  arms = keep %>%
+    dplyr::count(Path, sex, Direction, name = "n_genes") %>%
+    dplyr::mutate(label = z$label)
+
+  list(label = z$label, ok = TRUE, rows = rows, arms = arms)
+}
+
+pt_built = lapply(pt_sources[pt_found], pt_build)
+pt_ok    = Filter(function(z) z$ok, pt_built)
+pt_bad   = Filter(function(z) !z$ok, pt_built)
+
+pt_rows = dplyr::bind_rows(lapply(pt_ok, `[[`, "rows"))
+pt_sets = if (nrow(pt_rows) > 0) split(pt_rows$Gene, pt_rows$set) else list()
+pt_key  = if (nrow(pt_rows) == 0) NULL else pt_rows %>%
+  dplyr::distinct(set, sex, direction) %>%
+  dplyr::mutate(source = "pseudotime")
+pt_arms = dplyr::bind_rows(lapply(pt_ok, `[[`, "arms"))
+
+have_pt_sets = length(pt_sets) > 0
+# one family, and so one figure, per path
+pt_families  = if (have_pt_sets) unique(src_of(pt_rows$set)) else character(0)
+```
+
+`r if (!have_fgsea || length(pt_bad) == 0) "" else paste0("**Skipped, because the female paths are not named: ", paste(vapply(pt_bad, function(z) paste0(z$label, " (paths found: ", paste(z$paths, collapse = ", "), ")"), character(1)), collapse = "; "), ".** Set them and rerun.")`
+
+`r if (!have_pt_sets) "" else { a = dplyr::distinct(pt_arms, label, Path, sex); paste0("Paths tested: ", paste0(a$label, " ", a$Path, " (", a$sex, ")", collapse = "; "), ". Each set is the top ", top_ns[1], " genes of that path and direction by log fold change along it, kept to genes the Yasmin et al comparison ranks.") }`
+
+
+```{r, eval=have_pt_sets}
+# the second fit: these sets only, so the FDR below is adjusted across the
+# paths rather than across the pseudobulk lists as well
+g_pt     = run_gsea(pt_sets, pt_key, cross_sex = TRUE)
+cur_pt   = gsea_curves(g_pt, pt_sets)
+pt_tab   = g_pt$tab
+pt_na    = na_sets(pt_tab)
+
+write.csv(pt_tab, file = paste0(results_dir, "/pseudotime_enrichment.csv"),
+          row.names = FALSE)
+write.csv(g_pt$genes,
+          file = paste0(results_dir, "/pseudotime_enrichment_leading_edge.csv"),
+          row.names = FALSE)
+```
+
+`r if (!have_pt_sets || nrow(pt_na) == 0) "" else paste0("**", nrow(pt_na), " set(s) returned NA rather than a score: ", paste0(pt_na$set, " on ", pt_na$contrast, collapse = "; "), ".** Raise fgsea_nperm_simple above ", params$fgsea_nperm_simple, " and knit again.")`
+
+## Against the four rankings
+
+```{r, eval=have_pt_sets, fig.width=10, fig.height=7, results="asis"}
+# one figure per run, since a run is a different trajectory over the same cells
+pt_figs = lapply(pt_families, function(fam) {
+  p = gsea_figure(cur_pt, which_source = fam,
+                  ttl = paste0(fam, " genes against the Yasmin et al ranking"))
+  ggsave(p, file = paste0(results_dir, "/",
+                          gsub(" ", "_", fam), "_enrichment.png"),
+         width = 10, height = 7, dpi = 300)
+  p
+})
+
+for (i in seq_along(pt_figs)) {
+  cat("\n\n#### ", pt_families[i], "\n\n", sep = "")
+  print(pt_figs[[i]])
+  cat("\n\n")
+}
+```
+
+`r if (!have_pt_sets) "" else { z = pt_tab; paste0(paste0(vapply(split(z, z$source), function(d) { ok = sum(d$as_expected & d$fdr < 0.05); tr = d[grepl("trend", d$contrast), ]; paste0(d$source[1], ": ", ok, " of ", nrow(d), " enrich in the expected direction at FDR < 0.05, ", sum(tr$as_expected & tr$fdr < 0.05), " of ", nrow(tr), " of them on the trend contrasts") }, character(1)), collapse = ". "), ". The trend contrasts are the matched comparison, since both they and pseudotime are regressions on an ordered score, where the endpoints are two-group tests.") }`
+
+### All paths and contrasts
+
+One panel per trajectory and contrast shape, so the whole set of tests is on
+one page. Color is the normalized enrichment score, which carries both how far toward
+one end of the ranking the set sat and which end it was, capped so that one
+very strong result does not flatten the rest. A marked cell is one reaching
+FDR < 0.05. Grey is a test fgsea could not score.
+
+Each column names the direction the set was built for, so a column of rising
+genes supports the trajectory when it is warm and contradicts it when it is
+cool, and a column of falling genes the reverse.
+
+```{r, eval=have_pt_sets, fig.width=9, fig.height=7}
+gs = pt_tab %>%
+  dplyr::mutate(
+    run   = sub("^pseudotime ([a-z]+) .*$", "\\1", set),
+    path  = sub("^pseudotime [a-z]+ ([^,]+),.*$", "\\1", set),
+    shape = trimws(sub("^[^,]+,", "", contrast)),
+    c_sex = trimws(sub(",.*$", "", contrast)),
+    # the path is the row, and the column is the contrast's sex crossed with
+    # the direction the set was built for, so every path is read against both
+    # sexes in both directions
+    row   = paste0(path, " (", set_sex, ")"),
+    col   = factor(paste0(c_sex, " ", direction),
+                   levels = as.vector(t(outer(
+                     unique(trimws(sub(",.*$", "", names(axis_cols)))),
+                     c("up", "down"), paste)))),
+    score = NES)
+
+# Symmetric about zero, so the two directions are shaded alike, and capped:
+# the strongest score here runs past 3.7 while most sit nearer 1.5, and on the
+# full range everything but that one cell lands in the middle of the scale.
+# Anything beyond the cap is drawn at it.
+hm_lim = 2.5
+hm_fdr = 0.05
+
+grid = gs %>% dplyr::distinct(run, shape) %>%
+  dplyr::arrange(match(run, c("nodes", "fine")),
+                 match(shape, c("endpoint", "trend")))
+
+hm_panel = function(rn, sh) {
+  d = gs %>% dplyr::filter(run == rn, shape == sh) %>%
+    dplyr::mutate(row = factor(row, levels = rev(sort(unique(row)))))
+  ggplot(d, aes(x = col, y = row, fill = score)) +
+    geom_tile(colour = "white", linewidth = .5) +
+    # a disc rather than an asterisk, because the extremes of a diverging
+    # scale are dark at both ends and a single ink color reads over neither
+    geom_point(data = d %>% dplyr::filter(!is.na(fdr), fdr < hm_fdr),
+               aes(shape = paste0("FDR < ", hm_fdr)),
+               fill = "white", colour = "grey20", size = 1.9, stroke = .5) +
+    scale_shape_manual(values = setNames(21, paste0("FDR < ", hm_fdr)),
+                       name = NULL) +
+    scale_fill_distiller(palette = "RdBu", limits = c(-hm_lim, hm_lim),
+                         na.value = "grey90",
+                         name = paste0("NES\n(capped at ", hm_lim, ")"),
+                         oob = function(x, range) pmin(pmax(x, range[1]),
+                                                       range[2])) +
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) +
+    labs(x = NULL, y = NULL, title = paste0(rn, " paths, ", sh)) +
+    theme_bw(base_size = 9) +
+    theme(panel.grid = element_blank(),
+          axis.text.x = element_text(angle = 30, hjust = 1),
+          plot.title = element_text(size = 9, face = "plain"))
+}
+
+p_gsea_hm = patchwork::wrap_plots(
+    Map(hm_panel, grid$run, grid$shape),
+    ncol = 2, byrow = TRUE) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(
+    tag_levels = "A",
+    title = "Pseudotime gene sets against the Yasmin et al contrasts",
+    subtitle = paste0("each row is one path, labeled with the arm it came ",
+                      "from; each column one contrast and one direction"),
+    theme = theme(plot.title = element_text(size = 11),
+                  plot.subtitle = element_text(size = 9)))
+
+p_gsea_hm
+
+ggsave(p_gsea_hm, file = paste0(results_dir, "/pseudotime_enrichment_grid.png"),
+       width = 9, height = 7, dpi = 300)
+```
+
+`r if (!have_pt_sets) "" else "The two columns carrying a path's own sex are the matched ones. A path dark there and pale on the other sex is tracking that sex; one dark across all four is tracking something the two sexes share."`
+
+### Does each arm hit its own sex
+
+A path built on one arm should enrich in that sex's contrasts and not the
+other's. Both are tested, so the comparison is on the page rather than left to
+the reader. Each row is a path and direction, with the strongest normalized
+score it reached on its own sex and on the other, and the contrast each came
+from.
+
+```{r, eval=have_pt_sets}
+cross = pt_tab %>%
+  dplyr::filter(!is.na(NES)) %>%
+  dplyr::group_by(set, direction, matched) %>%
+  # the contrast where the set went furthest in the direction it was built for
+  dplyr::slice_max(ifelse(direction == "up", NES, -NES), n = 1,
+                   with_ties = FALSE) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(side = ifelse(matched, "own sex", "other sex")) %>%
+  dplyr::select(set, direction, side, contrast, NES, fdr) %>%
+  tidyr::pivot_wider(id_cols = c(set, direction), names_from = side,
+                     values_from = c(contrast, NES, fdr)) %>%
+  dplyr::arrange(set, direction)
+
+write.csv(cross, file = paste0(results_dir, "/pseudotime_cross_sex.csv"),
+          row.names = FALSE)
+
+datatable(cross %>% dplyr::mutate(dplyr::across(where(is.numeric),
+                                                ~signif(., 3))),
+          rownames = FALSE, filter = "top", options = list(pageLength = 12))
+```
+
+`r if (!have_pt_sets) "" else { k = pt_tab %>% dplyr::filter(!is.na(NES), as_expected, fdr < 0.05); paste0(sum(k$matched), " of the ", nrow(k), " pseudotime enrichments that reach FDR < 0.05 in the expected direction are on the path's own sex, and ", sum(!k$matched), " are on the other. A path that clears on its own sex alone is evidence the arm tracks that sex; one that clears on both is tracking something the two sexes share.") }`
+
+`r if (!have_pt_sets) "" else "Pseudotime is not a second name for the larva-to-transformer contrast. 17 and 19 each report how much of it library explains, and the gene lists tested here overlap the pseudobulk lists only slightly. A set enriching here therefore says something the pseudobulk sets above do not. The reverse does not follow: the Yasmin et al series varies stage and little else, so whatever part of pseudotime is not stage has no counterpart in it, and a set that fails to enrich is not evidence against the ordering."`
+
 # Germ signatures in the series
 
 A germ cell signature scored across the Yasmin et al samples asks whether their series
@@ -2283,6 +2326,14 @@ node_group = dplyr::bind_rows(lapply(names(score_mats), function(src) {
                    .groups = "drop") %>%
   dplyr::mutate(yas_group = factor(yas_group, levels = yas_levels))
 
+# the figure grows with the number of rows it has to draw, so a run with forty
+# nodes is not squeezed into the height a run with ten needs
+# 1.3 inches of it is the angled group names under the bottom panel, which
+# are long and sit outside every panel's own share of the height
+corr_h = { n = dplyr::distinct(node_group, source, group)
+           max(6, 2.5 + .17 * nrow(n) +
+                  1.1 * dplyr::n_distinct(node_group$source)) }
+
 # the group each signature scores highest in
 node_peak = node_group %>%
   dplyr::group_by(source, group) %>%
@@ -2298,7 +2349,7 @@ datatable(node_group %>%
           rownames = FALSE, filter = "top", options = list(pageLength = 16))
 ```
 
-```{r, eval=have_cl_markers, fig.width=9, fig.height=6}
+```{r, eval=have_cl_markers, fig.width=9, fig.height=corr_h}
 # Rows run in pseudotime where there is one, so the panel can be read against
 # the trajectory. The atlas has no pseudotime and falls back to its own names.
 # one limit across both panels, so the two fill scales are identical and
@@ -2346,13 +2397,16 @@ corr_panel = function(src, last) {
 }
 
 srcs_c = unique(node_group$source)
+# Heights follow the row counts, with the bottom panel given the equivalent of
+# eight extra rows: it is the only one spelling out the group names, and
+# without the allowance the angled text is cut off at the foot of the figure.
+corr_n = vapply(srcs_c, function(x)
+  dplyr::n_distinct(node_group$group[node_group$source == x]), integer(1))
+corr_n[length(corr_n)] = corr_n[length(corr_n)] + 8L
+
 p_corr = patchwork::wrap_plots(Map(corr_panel, srcs_c,
                                    seq_along(srcs_c) == length(srcs_c)),
-                               ncol = 1,
-                               heights = vapply(srcs_c, function(x)
-                                 dplyr::n_distinct(
-                                   node_group$group[node_group$source == x]),
-                                 integer(1))) +
+                               ncol = 1, heights = corr_n) +
   patchwork::plot_layout(guides = "collect") +
   patchwork::plot_annotation(
     tag_levels = "A",
@@ -2365,10 +2419,8 @@ p_corr = patchwork::wrap_plots(Map(corr_panel, srcs_c,
 p_corr
 
 ggsave(p_corr, file = paste0(results_dir, "/germ_signature_by_group.png"),
-       width = 9, height = 6, dpi = 300)
+       width = 9, height = corr_h, dpi = 300, limitsize = FALSE)
 ```
-
-`r if (!have_cl_markers) "" else { ns = intersect(names(source_dir), unique(node_peak$source)); if (length(ns) == 0) "" else paste0(paste0(vapply(ns, function(sr) { pk = node_peak[node_peak$source == sr, ]; o = if (have_pt) node_pt$mean_pseudotime[match(paste(sr, pk$group), paste(node_pt$source, node_pt$group))] else seq_len(nrow(pk)); pk = pk[order(o), ]; paste0("Peak group for the ", sr, ", in pseudotime order: ", paste0(pk$group, " in ", as.character(pk$yas_group), collapse = "; ")) }, character(1)), collapse = ". "), ".") }`
 
 ## Sex specificity
 
@@ -2394,25 +2446,39 @@ datatable(sex_tab %>% mutate(across(where(is.numeric), ~signif(., 3))),
 `r if (have_cl_markers) "Mid males against mid females, mean score in each. A signature that separates the sexes is measuring a germ cell state. One that does not is measuring how much germ cell content the gonad has, which every germ signature shares." else ""`
 
 ```{r, eval=have_cl_markers}
-# Pseudotime is per run and the two node runs are not on a common scale, so one
-# source carries it through the panels below.
-pt_src = "germ subclusters"
+# Every source that carries a pseudotime gets the same treatment.
+pt_srcs = if (!have_pt) character(0) else
+  intersect(unique(sex_tab$source), unique(node_pt$source))
+
+# Each run's pseudotime comes from its own tree, so the raw values are not
+# comparable between runs. Position within a run is, so the connectors are
+# colored by where a node sits along its own trajectory, from root to furthest.
+sex_tab$pt_rel = NA_real_
+for (sr in pt_srcs) {
+  i = sex_tab$source == sr & is.finite(sex_tab$mean_pseudotime)
+  r = range(sex_tab$mean_pseudotime[i])
+  sex_tab$pt_rel[i] = if (diff(r) > 0)
+    (sex_tab$mean_pseudotime[i] - r[1]) / diff(r) else .5
+}
 
 # The size of the gap between the sexes, not its sign, so a node that scores
-# far apart counts the same whichever sex is higher. Spearman because a dozen
-# nodes cannot support a parametric correlation, and because the question is
-# monotone rather than linear.
-pt_cor = if (!have_pt) NULL else {
-  d = sex_tab %>% dplyr::filter(source == pt_src,
-                                is.finite(mean_pseudotime))
+# far apart counts the same whichever sex is higher. Spearman because a few
+# dozen nodes cannot support a parametric correlation, and because the question
+# is monotone rather than linear.
+pt_cor = setNames(lapply(pt_srcs, function(sr) {
+  d = sex_tab %>% dplyr::filter(source == sr, is.finite(mean_pseudotime))
   list(n = nrow(d),
        size = suppressWarnings(stats::cor.test(d$mean_pseudotime,
                                                abs(d$difference),
                                                method = "spearman")))
-}
+}), pt_srcs)
+
+# the same for the dumbbell figure, which has one row per signature
+sex_h = max(6, 1.2 + .17 * nrow(sex_tab) +
+               1.1 * dplyr::n_distinct(sex_tab$source))
 ```
 
-```{r, eval=have_cl_markers, fig.width=9, fig.height=6}
+```{r, eval=have_cl_markers, fig.width=10, fig.height=sex_h}
 # One ordering per marker source, since the two sources name different groups
 # and a global sort would interleave them.
 sex_long = sex_tab %>%
@@ -2429,11 +2495,10 @@ sex_long = sex_tab %>%
 # above .9 it is close enough to white to disappear against the panel. What is
 # left runs blue to yellow-green, which collides with neither sex.
 pt_scale = function()
-  scale_colour_viridis_c(name = "mean pseudotime", begin = .3, end = .9,
-                         limits = range(
-                           sex_tab$mean_pseudotime[
-                             sex_tab$source == pt_src],
-                           na.rm = TRUE),
+  scale_colour_viridis_c(name = "position along the trajectory",
+                         begin = .3, end = .9, limits = c(0, 1),
+                         breaks = c(0, .5, 1),
+                         labels = c("root", "", "furthest"),
                          guide = guide_colorbar(
                            barheight = grid::unit(3, "mm"),
                            barwidth  = grid::unit(24, "mm")))
@@ -2446,9 +2511,9 @@ sex_panel = function(src) {
   d = sex_long %>% dplyr::filter(source == src)
   # the atlas clusters have no pseudotime, so only the subcluster panel colors
   # its connectors and the atlas keeps flat grey
-  by_pt = have_pt && src == pt_src
+  by_pt = src %in% pt_srcs
   connector = if (by_pt)
-    geom_line(aes(group = group, colour = mean_pseudotime), linewidth = .8) else
+    geom_line(aes(group = group, colour = pt_rel), linewidth = .8) else
     geom_line(aes(group = group), colour = "grey65", linewidth = .4)
 
   ggplot(d, aes(x = score, y = reorder(group, difference))) +
@@ -2469,22 +2534,22 @@ sex_panel = function(src) {
           panel.grid.minor.x = element_blank())
 }
 
-pt_panel = function() {
-  d = sex_tab %>% dplyr::filter(source == pt_src,
-                                is.finite(mean_pseudotime))
+pt_panel = function(src) {
+  d = sex_tab %>% dplyr::filter(source == src, is.finite(mean_pseudotime))
   ggplot(d, aes(x = mean_pseudotime, y = abs(difference))) +
     geom_smooth(method = "lm", formula = y ~ x, se = FALSE,
                 colour = "grey45", linewidth = .4, linetype = "22") +
-    geom_point(aes(colour = mean_pseudotime), size = 2.6) +
+    geom_point(aes(colour = pt_rel), size = 2.6) +
     pt_scale() +
     ggrepel::geom_text_repel(aes(label = group), size = 2.5, colour = "grey15",
                              segment.colour = "grey65", bg.color = "white",
-                             bg.r = .12, min.segment.length = 0, seed = 1) +
+                             bg.r = .12, min.segment.length = 0, seed = 1,
+                             max.overlaps = 30) +
     labs(x = "mean pseudotime", y = "size of the sex difference",
-         title = paste0(pt_src, ", by pseudotime"),
+         title = paste0(src, ", by pseudotime"),
          subtitle = sprintf("Spearman rho = %.2f, p = %.3f, n = %d nodes",
-                            unname(pt_cor$size$estimate),
-                            pt_cor$size$p.value, pt_cor$n)) +
+                            unname(pt_cor[[src]]$size$estimate),
+                            pt_cor[[src]]$size$p.value, pt_cor[[src]]$n)) +
     theme_bw(base_size = 9) +
     theme(plot.title = element_text(size = 9, face = "plain"),
           plot.subtitle = element_text(size = 8, colour = "grey30"),
@@ -2499,13 +2564,14 @@ n_by = vapply(srcs, function(x) sum(sex_tab$source == x), integer(1))
 # from so the two read as one statement. Pseudotime is per run and the two runs
 # are not on a common scale, so only one source carries it.
 rows   = lapply(srcs, function(x)
-  if (have_pt && x == pt_src) dumb[[x]] | pt_panel() else dumb[[x]])
+  if (x %in% pt_srcs) dumb[[x]] | pt_panel(x) else dumb[[x]])
 
 p_sex = patchwork::wrap_plots(rows, ncol = 1)
 hts   = unname(n_by[srcs])
 # the scatter is tagged right after the dumbbell it sits beside
-pt_tag = if (!have_pt || !pt_src %in% srcs) "" else
-  LETTERS[match(pt_src, srcs) + 1]
+# tags run in plot order, so a scatter takes the letter after its dumbbell
+tag_of = setNames(LETTERS[cumsum(1 + (srcs %in% pt_srcs))], srcs)
+pt_tag = setNames(as.character(tag_of[pt_srcs]), pt_srcs)
 
 p_sex = p_sex +
   patchwork::plot_layout(heights = hts, guides = "collect") +
@@ -2522,12 +2588,12 @@ p_sex = p_sex +
 p_sex
 
 ggsave(p_sex, file = paste0(results_dir, "/germ_signature_sex.png"),
-       width = 9, height = 6, dpi = 300)
+       width = 10, height = sex_h, dpi = 300, limitsize = FALSE)
 ```
 
 `r if (!have_cl_markers) "" else { n_m = sum(sex_tab$difference > 0); n_f = sum(sex_tab$difference < 0); paste0("Scores are averages of genes standardized across all 28 samples, so zero is the series mean rather than no expression. Of ", nrow(sex_tab), " signatures, ", n_m, " score higher in the mid males and ", n_f, " higher in the mid females. A signature whose two points nearly coincide is not reading identity, whatever it was built from.") }`
 
-`r if (!have_cl_markers || !have_pt) "" else sprintf("Panel %s sets the size of each subcluster's sex difference against its mean pseudotime, taken over the cells in that node. The sign is dropped, so a node whose two scores sit far apart counts the same whichever sex is higher. Spearman rho is %.2f, p = %.3f, across %d nodes. Pseudotime is the average over the paths out of the root, so a node on a branch carries a blended value.", pt_tag, unname(pt_cor$size$estimate), pt_cor$size$p.value, pt_cor$n)`
+`r if (!have_cl_markers || length(pt_srcs) == 0) "" else paste0("The scatter beside each node panel sets the size of that node's sex difference against its mean pseudotime. The sign is dropped, so a node whose two scores sit far apart counts the same whichever sex is higher. ", paste0(vapply(pt_srcs, function(sr) sprintf("Panel %s, %s: rho %.2f, p = %.3f, across %d nodes", pt_tag[[sr]], sr, unname(pt_cor[[sr]]$size$estimate), pt_cor[[sr]]$size$p.value, pt_cor[[sr]]$n), character(1)), collapse = ". "), ". Pseudotime is the average over the paths out of the root, so a node on a branch carries a blended value, and the two runs are on their own scales.")`
 
 
 # Summary figure
@@ -2560,8 +2626,8 @@ panel = function(p, ttl) p + labs(title = ttl, subtitle = NULL) +
 # two facets wide and carries a three line annotation inside the panel, so half
 # the page width clips that text. Stacking also keeps the enrichment panel from
 # spreading across the whole width, which flattens the curves.
-gsea_j = gsea_figure(base_size = jrnl_base, pt_size = 1.3, txt_size = 2.1,
-                     line_w = .5)
+gsea_j = gsea_figure(cur_pb, base_size = jrnl_base, pt_size = 1.3,
+                     txt_size = 2.1, line_w = .5)
 # five gene labels rather than ten; at this panel size ten collide whatever the
 # repel does with them
 end_j   = agreement_figure(c("male, endpoint", "female, endpoint"),
@@ -2637,12 +2703,14 @@ file_notes = c(
   "bulk_agreement_scatter.png"     = "Our log fold change against that of Yasmin et al for every measurable gene, one panel per axis.",
   "top_gene_GO_pvalues.csv"        = "GO enrichment of the top stage genes from both sides, up and down taken separately, one row per term and gene set.",
   "top_gene_GO_overlaps.csv"       = "The genes behind each enriched term.",
-  "top_gene_enrichment.csv"        = "Each of our top gene lists tested for enrichment in each Yasmin et al contrast's ranking, with the enrichment score, its normalized value, the permutation p-value and FDR, and whether the direction came out as expected.",
+  "top_gene_enrichment.csv"        = "Each of our top gene lists tested for enrichment in each Yasmin et al contrast's ranking, with the enrichment score, its normalized value, the permutation p-value and FDR, and whether the direction came out as expected. The pseudotime sets are fitted separately and are in pseudotime_enrichment.csv.",
   "top_gene_enrichment_leading_edge.csv" = "The genes carrying each enrichment, with our effect size and the Yasmin et al test statistic.",
   "top_gene_enrichment.png"        = "Normalized enrichment score per set and contrast, with the up and down sets colored and significance marked.",
   "top_gene_list_upset.png"        = "Intersections of our top gene lists with Yasmin et al trend lists, largest first, as an UpSet plot.",
   "shared_trend_GO_terms.csv"      = "Terms enriched in our top genes and in Yasmin et al trend genes on the same sex in the same direction, with each side's p-value, FDR and gene count.",
   "shared_trend_GO_terms.png"      = "The strongest of those shared terms, each with a point per dataset, faceted by sex and direction.",
+  "pseudotime_enrichment.csv"      = "Each pseudotime gene set against each Yasmin et al contrast, with its enrichment score, FDR and whether the contrast matched the path's own sex. Adjusted across the pseudotime sets alone.",
+  "pseudotime_enrichment_leading_edge.csv" = "The genes carrying each of those enrichments.",
   "pseudotime_enrichment_grid.png" = "Every pseudotime path and direction against every Yasmin et al contrast, colored by FDR, split by trajectory and contrast shape.",
   "pseudotime_cross_sex.csv"       = "Each pseudotime path and direction with the strongest enrichment it reached on its own sex and on the other, and the contrast each came from.",
   "germ_signature_by_group.csv"    = "Mean germ signature score in each of the eight Yasmin et al groups, one row per signature and group, with the number of animals behind each mean.",
