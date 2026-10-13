@@ -54,6 +54,10 @@ GROUP_COL="${GROUP_COL:-group_suppT1labels}"
 N_PERM="${N_PERM:-200}"
 N_BOOT="${N_BOOT:-2000}"
 MIN_PB="${MIN_PB:-10}"
+# How close a group has to sit to a signature's best group to be outlined
+# alongside it, as a fraction of that signature's own range across the eight
+# groups. 0.1 marks a second group on about half of them.
+TIE_FRAC="${TIE_FRAC:-0.1}"
 CORES="${SLURM_CPUS_PER_TASK:-1}"
 OUT_DIR="${PROJECT_DIR}/html"
 
@@ -190,6 +194,7 @@ Rscript -e "
                          n_perm_labels        = ${N_PERM},
                          n_boot               = ${N_BOOT},
                          min_pseudobulk_count = ${MIN_PB},
+                         signature_tie_frac   = ${TIE_FRAC},
                          germ_marker_suffix   = '${GERM_SUFFIX}',
                          pseudotime_female_paths = '${FEM_PATHS}',
                          fine_marker_suffix   = '${FINE_SUFFIX}',
