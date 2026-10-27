@@ -287,7 +287,9 @@ marker_bubble_plot = function(df, group_levels, title, subtitle = NULL) {
   ggplot(df, aes(x = group, y = label,
                  size = pct_expressing, colour = mean_logexpr)) +
     geom_point() +
-    scale_colour_viridis_c() +
+    # inferno, as on the tree; viridis is pseudotime. Stopped short of the near
+    # white top so the highest values stay visible.
+    scale_colour_viridis_c(option = "inferno", end = .9) +
     scale_size_continuous(range = c(0.4, 5)) +
     facet_grid(set ~ ., scales = "free_y", space = "free_y") +
     theme_bw() +
@@ -1443,8 +1445,10 @@ set_panel = function(st) {
                    point.padding = .2, min.segment.length = 0,
                    segment.size = .15, segment.colour = "grey65",
                    seed = 1) +
+    # inferno, because viridis is pseudotime everywhere else in this document.
+    # Its top tenth is near white and would vanish on the page, so it stops short.
     scale_colour_viridis_c(name = "expression, relative\nto the set maximum",
-                           limits = c(0, 1)) +
+                           option = "inferno", end = .9, limits = c(0, 1)) +
     scale_size_continuous(name = "% of cells detecting",
                           range = c(1, 4.5), limits = c(0, 100)) +
     scale_x_continuous(expand = expansion(mult = .10)) +
@@ -1475,6 +1479,92 @@ if (length(graph_sets) > 0) {
 ```
 
 `r if (length(graph_sets) == 0) "No set named in graph_marker_sets was scored." else ""`
+
+## Figure 6
+
+```{r}
+# panel letter to set; all three are in germ_sets, so set_scores always has them
+fig6_sets = c(B = "Primordial germ cells", C = "Spermatocytes", D = "Oocyte")
+
+# nodes off every path have no pseudotime and so no place on the y axis
+fig6_nodes = node_stats %>%
+  dplyr::filter(is.finite(mean_pseudo)) %>%
+  dplyr::arrange(mean_pseudo)
+# earliest at the top
+fig6_levels = rev(fig6_nodes$name)
+
+fig6_lib = as.data.frame(colData(merged)) %>%
+  dplyr::mutate(node = as.character(node)) %>%
+  dplyr::filter(node %in% fig6_levels) %>%
+  dplyr::count(node, library, name = "n") %>%
+  dplyr::group_by(node) %>%
+  dplyr::mutate(frac = n / sum(n)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(node = factor(node, levels = fig6_levels))
+
+write.csv(fig6_lib %>%
+            dplyr::left_join(fig6_nodes %>%
+                               dplyr::select(node = name, mean_pseudotime = mean_pseudo),
+                             by = "node") %>%
+            dplyr::arrange(mean_pseudotime, library),
+          file = paste0(results_dir, "/figure6_node_by_library.csv"),
+          row.names = FALSE)
+
+# the gene symbols of each set, for the legend
+fig6_genes = all_sets %>%
+  dplyr::filter(CellTypeMarkerSet %in% fig6_sets,
+                loc_id %in% rownames(combined)) %>%
+  dplyr::distinct(CellTypeMarkerSet, symbol) %>%
+  dplyr::group_by(CellTypeMarkerSet) %>%
+  dplyr::summarise(symbols = paste(sort(symbol), collapse = ", "), .groups = "drop")
+fig6_symbols = setNames(fig6_genes$symbols, fig6_genes$CellTypeMarkerSet)
+```
+
+```{r, fig.width=14, fig.height=13}
+p_fig6_strip = ggplot(fig6_nodes %>%
+                        dplyr::mutate(name = factor(name, levels = fig6_levels)),
+                      aes(x = 1, y = name, fill = mean_pseudo)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "mean pseudotime") +
+  scale_x_continuous(expand = c(0, 0)) +
+  theme_minimal(base_size = 8) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.y = element_text(size = 6)) +
+  labs(x = NULL, y = NULL)
+
+p_fig6_lib = ggplot(fig6_lib, aes(x = frac, y = node, fill = library)) +
+  geom_col(width = .85) +
+  scale_fill_manual(values = lib_cols) +
+  scale_x_continuous(expand = c(0, 0), labels = scales::percent) +
+  theme_bw(base_size = 8) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_blank()) +
+  labs(x = "cells in the node", y = NULL, fill = "library")
+
+p_fig6_a = (p_fig6_strip | p_fig6_lib) +
+  patchwork::plot_layout(widths = c(.05, 1), guides = "collect")
+
+p_fig6 = patchwork::wrap_plots(p_fig6_a, set_panel(fig6_sets[["B"]]),
+                               set_panel(fig6_sets[["C"]]),
+                               set_panel(fig6_sets[["D"]]), ncol = 2) +
+  patchwork::plot_layout(guides = "collect") +
+  # the strip takes the A, the bars beside it take none
+  patchwork::plot_annotation(tag_levels = list(c("A", "", "B", "C", "D"))) &
+  theme(legend.position = "right", legend.box = "vertical",
+        legend.key.size = unit(.35, "cm"),
+        legend.title = element_text(size = 7),
+        legend.text  = element_text(size = 6),
+        plot.tag     = element_text(size = 11, face = "bold"))
+
+p_fig6
+ggsave(p_fig6, file = paste0(results_dir, "/figure6.png"),
+       width = 14, height = 13, dpi = 300)
+ggsave(p_fig6, file = paste0(results_dir, "/figure6.pdf"),
+       width = 14, height = 13)
+```
+
+`r paste0("**Figure 6. Library composition and germ cell marker sets along the trajectory.** **(A)** Library composition of the ", length(fig6_levels), " trajectory nodes. Nodes are on the y axis, ordered by the mean pseudotime of their cells, with the earliest at the top. Each bar is the percentage of the node's cells from each library. The strip beside the axis is colored by the node's mean pseudotime.", if (nrow(node_stats) > length(fig6_levels)) paste0(" ", nrow(node_stats) - length(fig6_levels), " node(s) lie on no path and have no pseudotime, so they are not shown.") else "", " **(B-D)** The node graph colored by the ", fig6_sets[['B']], " (B; ", fig6_symbols[[fig6_sets[['B']]]], "), ", fig6_sets[['C']], " (C; ", fig6_symbols[[fig6_sets[['C']]]], ") and ", fig6_sets[['D']], " (D; ", fig6_symbols[[fig6_sets[['D']]]], ") marker sets. Node color is the set's mean log expression, scaled to the set's maximum across nodes. That maximum is given in each panel title. Point size is the mean, over the set's genes, of the percentage of the node's cells detecting the gene. Node positions are the distance-weighted layout of the node graph, so edge length approximates the distance between node centroids in the corrected space.", if (use_cut) " Edge color is the edge's length as a percentage of the outgroup threshold." else "")`
 
 # What the ordering says
 
