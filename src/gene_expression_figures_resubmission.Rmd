@@ -47,18 +47,24 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 ```{r}
-altas_results_dir = paste0(params$project_dir, "/results/20260813_no_doublets")
+altas_results_dir  = paste0(params$project_dir, "/results/20260813_no_doublets")
+atlas_dir          = paste0(params$project_dir, "/results/20260813_atlas")
 pseudo_results_dir = paste0(params$project_dir, "/results/20260813_pseudotime_fine_all")
-data_dir    = paste0(params$project_dir, "/data")
+data_dir           = paste0(params$project_dir, "/data")
+results_dir        = paste0(params$project_dir, "/results/20260813_figures")
+if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
 ```
 
 ```{r, echo=FALSE}
 # load pre-computed objects for rendering
-scatter_markers      = read.csv(paste0(altas_results_dir, "/scatter_cluster_marker_genes.csv"),row.names = 1)
+# markers of the final labels from 13, filtered there to FDR < 0.01 and mean
+# log fold change >= 1, so a star on a violin marks a marker by 13's definition
+cluster_markers      = read.csv(paste0(atlas_dir, "/cluster_marker_genes.csv"))
 gene_descriptions    = read.csv(paste0(altas_results_dir, "/gene_descritption.csv"))
 lineage_ob = readRDS(paste0(pseudo_results_dir, "/Robjects/lineage_objects.Rds"))
 germ_pseudotime = read.csv(paste0(pseudo_results_dir, "/pseudotime_per_cell.csv"))
-cluster_comp = read.csv(paste0(params$project_dir, "/results/20260813_atlas/cluster_composition_after_split.csv"))
+cluster_comp = read.csv(paste0(atlas_dir, "/cluster_composition_after_split.csv"))
+combined.sce = readRDS(paste0(altas_results_dir, "/combined.sce.Rds"))
 ```
 
 ## Make cell meta data table
@@ -66,6 +72,8 @@ cluster_comp = read.csv(paste0(params$project_dir, "/results/20260813_atlas/clus
 # Cell metadata export
 
 ```{r}
+# keyed by final_label from 13; the order here is the order of every legend
+# and axis below
 anno = c("1"              = "1. Fibroblasts",
          "2"              = "2. Mesonephric cells",
          "3"              = "3. Migrating erythrocytes",
@@ -86,44 +94,57 @@ anno = c("1"              = "1. Fibroblasts",
          "17"             = "17. Spermatocytes II",
          "18"             = "18. Migrating spermatocytes")
 
-# load the all-cells merged object for the full metadata join
+level_order = names(anno)
+anno_order  = unname(anno)
+# the number in front of each name, "12T" and "12L" for the split cluster, for
+# labels drawn on the plots
+anno_short  = setNames(sub("\\..*$", "", anno), names(anno))
+
 all_clusters = 
-  read.csv(paste0(params$project_dir, "/results/20260813_atlas/cell_cluster_labels.csv")) %>%
+  read.csv(paste0(atlas_dir, "/cell_cluster_labels.csv")) %>%
   dplyr::mutate(cell_type = unname(anno[as.character(final_label)])) %>%
   dplyr::select(barcode, final_label, cell_type) %>%
   dplyr::rename(cluster = "final_label")
+
+# every label must have an annotation and every annotation a label
+stopifnot(setequal(level_order, unique(all_clusters$cluster)))
 
 all.sce  = readRDS(paste0(altas_results_dir, "/all.sce.Rds"))
 
 cell_meta = dplyr::bind_rows(lapply(all.sce, function(x)
   as.data.frame(colData(x)) %>%
-    dplyr::mutate(dplyr::across(dplyr::where(~ inherits(.x, "outlier.filter")),
+    dplyr::mutate(barcode = colnames(x),
+                  dplyr::across(dplyr::where(~ inherits(.x, "outlier.filter")),
                                 as.logical)))) %>%
   dplyr::select(barcode, sum, detected, subsets_Mito_percent) %>%
-  left_join(all_clusters, by = "barcode")
+  dplyr::left_join(all_clusters, by = "barcode") %>%
+  dplyr::mutate(cluster_label = unname(anno_short[cluster]))
 
 merged.sce  = readRDS(paste0(altas_results_dir, "/merged.sce.Rds"))  
 
+# the embeddings are attached by position, so the cells must be in the same order
+stopifnot(identical(cell_meta$barcode, colnames(merged.sce)))
+
 all_tsne      = reducedDim(merged.sce, "TSNE")
 all_corrected = reducedDim(merged.sce, "corrected")
-colnames(all_corrected) = paste0("fastMNN.corrected.", 1:50)
+colnames(all_corrected) = paste0("fastMNN.corrected.", seq_len(ncol(all_corrected)))
 
 cell_meta$TSNE1 = all_tsne[, "TSNE1"]
 cell_meta$TSNE2 = all_tsne[, "TSNE2"]
 cell_meta = cbind(cell_meta, all_corrected)
 
 germ_corrected = as.data.frame(reducedDim(lineage_ob$corrected, "corrected"))
-colnames(germ_corrected) = paste0("germ.fastMNN.corrected.", 1:50)
+colnames(germ_corrected) = paste0("germ.fastMNN.corrected.", seq_len(ncol(germ_corrected)))
 germ_corrected$barcode = rownames(germ_corrected)
 
 germ_meta = 
-  left_join(germ_pseudotime, germ_corrected, by = "barcode") %>%
-  select(-cluster, -annotation, -library, -stage)
+  dplyr::left_join(germ_pseudotime, germ_corrected, by = "barcode") %>%
+  dplyr::select(-cluster, -annotation, -library, -stage)
 
 meta_final =
   cell_meta %>%
   dplyr::left_join(germ_meta, by = "barcode", relationship = "one-to-one") %>%
-  rename(trajectory.node = "node")
+  dplyr::rename(trajectory.node = "node")
 
 write.table(meta_final,
             file      = paste0(altas_results_dir, "/cell_metadata.tsv"),
@@ -131,8 +152,12 @@ write.table(meta_final,
             sep       = "\t",
             quote     = FALSE)
 
-zip(zipfile = paste0(altas_results_dir, "/cell_metadata.tsv.gz"),
-    files   = paste0(altas_results_dir, "/cell_metadata.tsv"))
+# gzip, which is what the .gz extension says; zip() writes a zip archive
+write.table(meta_final,
+            file      = gzfile(paste0(altas_results_dir, "/cell_metadata.tsv.gz")),
+            row.names = FALSE,
+            sep       = "\t",
+            quote     = FALSE)
 ```
 
 ### Add meta data
@@ -153,51 +178,8 @@ rowData(combined.sce) = DataFrame(gene_descriptions_ordered)
 
 All cells
 ```{r}
-anno = c("1"              = "1. Fibroblasts",
-         "2"              = "2. Mesonephric cells",
-         "3"              = "3. Migrating erythrocytes",
-         "4"              = "4. Granulosa cells",
-         "5"              = "5. PGCs/oogonia/oocytes",
-         "6"              = "6. Endothelial cells",
-         "7"              = "7. Podocytes",
-         "8"              = "8. Erythrocytes",
-         "9"              = "9. Migrating pre-granulosa cells",
-         "10"             = "10. Hemopoietic stem cells",
-         "11"             = "11. Migrating leukocytes",
-         "12_transformer" = "12T. Bipotential gonadal supporting cells",
-         "12_larva"       = "12L. Mitotic macrophages",
-         "13"             = "13. Macrophages",
-         "14"             = "14. Migrating/mitotic pre-granulosa cells",
-         "15"             = "15. Mitotic spermatogonia",
-         "16"             = "16. Spermatocytes I",
-         "17"             = "17. Spermatocytes II",
-         "18"             = "18. Migrating spermatocytes")
-
-
-level_order = 1:19
-combined.sce$cluster <- factor(combined.sce$cluster, levels = level_order)
-
-anno_order = 
-  c("1. Fibroblasts", 
-    "2. Mesonephric cells", 
-    "3. Migrating erythrocytes", 
-    "4. Granulosa cells", 
-    "5. PGCs/oogonia/oocytes", 
-    "6. Endothelial cells", 
-    "7. Podocytes", 
-    "8. Erythrocytes", 
-    "9. Migrating pre-granulosa cells", 
-    "10. Hemopoietic stem cells", 
-    "11. Migrating leukocytes", 
-    "12. Mitotic macrophages", 
-    "13. Macrophages", 
-    "14. Migrating/mitotic pre-granulosa cells", 
-    "15. Mitotic spermatogonia", 
-    "16. Spermatocytes I", 
-    "17. Spermatocytes II", 
-    "18. Migrating spermatocytes")
-
-combined.sce$CellType <- anno_order[as.integer(as.character(combined.sce$cluster))]
+combined.sce$cluster  <- factor(combined.sce$cluster, levels = level_order)
+combined.sce$CellType <- factor(combined.sce$cell_type, levels = anno_order)
 
 all_label_colors <- c("#1F77B4", "#AEC7E8", "#FF7F0E", "#FFBB78",
                       "#2CA02C", "#98DF8A", "#D62728", "#FF9896",
@@ -209,16 +191,18 @@ publication_palette <- setNames(all_label_colors, anno_order)
 
 ### Fig.1: All cell tSNE
 
-```{r, fig.width=8, fig.height=5}
-level_order = 1:19
-cell_meta$cluster = factor(cell_meta$cluster, levels = level_order)
+A, every cell on the tSNE, colored by cell type. B, the share of each cluster's
+cells from each library, from `cluster_composition_after_split.csv` written by
+13.
 
+```{r, fig.width=12, fig.height=5}
 cell_meta <- cell_meta %>%
-  mutate(CellType = anno_order[as.integer(cluster)])
+  dplyr::mutate(cluster  = factor(cluster, levels = level_order),
+                CellType = factor(cell_type, levels = anno_order))
 
-p_fig1 <- plot_tsne(df           = cell_meta,
+p_tsne <- plot_tsne(df           = cell_meta,
                     color_col    = "CellType",
-                    label_col    = "cluster",
+                    label_col    = "cluster_label",
                     palette      = publication_palette,
                     color_levels = anno_order,
                     point_size   = 0.5,
@@ -228,8 +212,42 @@ p_fig1 <- plot_tsne(df           = cell_meta,
   theme(panel.background = element_rect(fill = "black", color = NA),
         legend.key       = element_rect(fill = "white", color = NA))
 
+# the library colors used in 19, so a library is the same color in every figure
+lib_cols = c("Female"             = "#FF6DB6",
+             "Male"               = "#006ddb",
+             "Undifferentiated.1" = "#009292",
+             "Undifferentiated.2" = "#b66ddf")
+
+comp_long = cluster_comp %>%
+  dplyr::mutate(label = as.character(label)) %>%
+  dplyr::select(label, dplyr::all_of(names(lib_cols))) %>%
+  tidyr::pivot_longer(-label, names_to = "library", values_to = "n") %>%
+  dplyr::group_by(label) %>%
+  dplyr::mutate(frac = n / sum(n)) %>%
+  dplyr::ungroup() %>%
+  # cluster 1 at the top, in the order of the tSNE legend
+  dplyr::mutate(cluster = factor(unname(anno_short[label]),
+                                 levels = rev(unname(anno_short))),
+                library = factor(library, levels = names(lib_cols)))
+
+stopifnot(setequal(unique(comp_long$label), level_order))
+
+p_comp <- ggplot(comp_long, aes(x = frac, y = cluster, fill = library)) +
+  geom_col(width = .85) +
+  scale_fill_manual(values = lib_cols) +
+  scale_x_continuous(expand = c(0, 0), labels = scales::percent) +
+  theme_classic(base_size = 8) +
+  theme(axis.ticks.y = element_blank(),
+        axis.line.y  = element_blank()) +
+  labs(x = "cells in the cluster", y = NULL, fill = "library")
+
+p_fig1 <- (p_tsne | p_comp) +
+  patchwork::plot_layout(widths = c(2.2, 1)) +
+  patchwork::plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 11, face = "bold"))
+
 p_fig1
-ggsave(paste0(results_dir, "/Fig1_tsne.png"), width = 8, height = 5)
+ggsave(p_fig1, file = paste0(results_dir, "/Fig1_tsne.png"), width = 12, height = 5)
 ```
 
 ### Fig.14 Chr 81 genes 
@@ -257,13 +275,13 @@ goi =
   pull(WangGeneID)
 
 plot_violin_goi(sce              = combined.sce,
-                markers          = scatter_markers,
+                markers          = cluster_markers,
                 goi              = goi,
                 gene_description = gene_descriptions,
                 anno             = anno_order,
                 palette          = publication_palette,
-                label_col        = "label",
-                level_order      = 1:19,
+                label_col        = "cluster",
+                level_order      = level_order,
                 title            = NULL,
                 ncol             = 2)
 
@@ -274,13 +292,14 @@ ggsave(paste0(results_dir, "/Fig14_Chr81_genes.png"), width = 7.5, height = 8)
 
 ```{r, fig.width=5, fig.height=3}
 plot_violin_goi_single(sce              = combined.sce,
-                       markers          = scatter_markers,
+                       markers          = cluster_markers,
                        goi              = "PIWIL1",
                        gene_description = gene_descriptions,
                        anno             = anno_order,
                        palette          = publication_palette,
+                       label_col        = "cluster",
                        title            = "PIWIL1",
-                       level_order = 1:19)
+                       level_order      = level_order)
 
   
 ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3)
@@ -290,13 +309,14 @@ ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3)
 
 ```{r, fig.width=5, fig.height=3}
 plot_violin_goi_single(sce              = combined.sce,
-                       markers          = scatter_markers,
+                       markers          = cluster_markers,
                        goi              = "SYCP3",
                        gene_description = gene_descriptions,
                        anno             = anno_order,
                        palette          = publication_palette,
+                       label_col        = "cluster",
                        title            = "SYCP3",
-                       level_order = 1:19)
+                       level_order      = level_order)
 
   
 ggsave(paste0(results_dir, "/S9_SYCP3.png"), width = 5, height = 3)

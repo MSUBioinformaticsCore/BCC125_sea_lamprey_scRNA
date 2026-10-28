@@ -1116,9 +1116,10 @@ plot_marker_overlap_heatmap <- function(known_markers, test_genes,
 #' @param palette character vector of colors (one per cluster)
 #' @param label_col colData column for x-axis grouping; accepts a column name
 #'   (character) or column number (integer index into colData). Default "label".
-#' @param level_order integer vector of cluster numbers in the same order as anno
-#'   (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)). Required when anno is not
-#'   indexed directly by cluster number.
+#' @param level_order vector of cluster labels in the same order as anno, either
+#'   numbers (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)) or the labels
+#'   themselves (e.g. c("11", "12_transformer", "12_larva")). Required when anno
+#'   is not indexed directly by cluster number.
 #' @param title optional plot title
 
 plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
@@ -1149,9 +1150,13 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
   )
   anno_n <- unname(anno_lookup[as.character(if (!is.null(level_order)) level_order else seq_along(anno))])
 
+  # "cluster_01" and "1" both resolve to "1"; a label that is not a number,
+  # such as "12_larva", is looked up as it stands
   .to_celltype <- function(x) {
-    num <- as.character(as.numeric(gsub("cluster_", "", as.character(x))))
-    unname(anno_lookup[num])
+    key <- gsub("cluster_", "", as.character(x))
+    num <- suppressWarnings(as.numeric(key))
+    key <- ifelse(is.na(num), key, as.character(num))
+    unname(anno_lookup[key])
   }
 
   goi_loc <- gene_description %>%
@@ -1218,7 +1223,7 @@ plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
               inherit.aes = FALSE, size = 2.8, vjust = 0, fontface = "bold",
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
-    scale_x_discrete(labels = function(x) sub("^(\\d+)\\..*", "\\1", x)) +
+    scale_x_discrete(labels = function(x) sub("^(\\d+[A-Za-z]*)\\..*", "\\1", x)) +
     coord_cartesian(clip = "off", ylim = c(0, NA)) +
     facet_wrap(~ Feature, ncol = ncol, scales = "free_y") +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
@@ -1366,13 +1371,16 @@ plot_violin_goi_named <- function(sce, markers, goi, gene_description, anno,
 #' @param gene_description gene descriptions df with Gene and WangGeneID columns
 #' @param anno character vector mapping numeric cluster index to cell type name
 #' @param palette character vector of colors (one per cluster)
-#' @param level_order integer vector of cluster numbers in the same order as anno
-#'   (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)). Required when anno is not
-#'   indexed directly by cluster number.
+#' @param level_order vector of cluster labels in the same order as anno, either
+#'   numbers (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)) or the labels
+#'   themselves (e.g. c("11", "12_transformer", "12_larva")). Required when anno
+#'   is not indexed directly by cluster number.
+#' @param label_col colData column holding the cluster labels. Default "label".
 #' @param title optional plot title
 
 plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
-                                    palette, level_order = NULL, title = NULL) {
+                                    palette, label_col = "label",
+                                    level_order = NULL, title = NULL) {
 
   fdr_to_stars <- function(fdr) {
     dplyr::case_when(
@@ -1387,16 +1395,20 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     anno_lookup <- setNames(anno, as.character(seq_along(anno)))
   }
 
-  count_tab   <- table(as.character(colData(sce)[["label"]]))
+  count_tab   <- table(as.character(colData(sce)[[label_col]]))
   anno_lookup <- setNames(
     paste0(anno_lookup, " (n=", count_tab[names(anno_lookup)], ")"),
     names(anno_lookup)
   )
   anno_n <- unname(anno_lookup[as.character(if (!is.null(level_order)) level_order else seq_along(anno))])
 
+  # "cluster_01" and "1" both resolve to "1"; a label that is not a number,
+  # such as "12_larva", is looked up as it stands
   .to_celltype <- function(x) {
-    num <- as.character(as.numeric(gsub("cluster_", "", as.character(x))))
-    unname(anno_lookup[num])
+    key <- gsub("cluster_", "", as.character(x))
+    num <- suppressWarnings(as.numeric(key))
+    key <- ifelse(is.na(num), key, as.character(num))
+    unname(anno_lookup[key])
   }
 
   plot_df <- plotExpression(
@@ -1405,7 +1417,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
     scattermore   = TRUE,
     point_size    = 0,
     swap_rownames = "WangGeneID",
-    x             = "label",
+    x             = label_col,
     ncol          = 1
   )$data %>%
     mutate(
@@ -1444,7 +1456,7 @@ plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
               inherit.aes = FALSE, size = 2.8, vjust = 0.5, fontface = "bold",
               color = "#2e2e2e") +
     scale_fill_manual(values = cluster_colors, name = "Cell Type") +
-    scale_x_discrete(labels = function(x) sub("^(\\d+)\\..*", "\\1", x)) +
+    scale_x_discrete(labels = function(x) sub("^(\\d+[A-Za-z]*)\\..*", "\\1", x)) +
     coord_flip(clip = "off", ylim = c(0, NA)) +
     labs(x = NULL, y = "Log-normalized expression", title = title) +
     theme_classic(base_size = 8) +
@@ -1702,7 +1714,7 @@ plot_tsne <- function(df,
     label_df <- df %>%
       group_by(.data[[label_col]]) %>%
       summarise(TSNE1 = median(TSNE1), TSNE2 = median(TSNE2), .groups = "drop") %>%
-      rename(.label = all_of(label_col))
+      dplyr::rename(.label = dplyr::all_of(label_col))
 
     p <- p +
       geom_point(
