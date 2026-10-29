@@ -15,7 +15,13 @@ params:
 ---
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      dev = vec_dev, dpi = 300, fig.retina = 1)
+
+# Compute nodes have no X11, and the default png device asks for it. Cairo
+# renders off screen.
+if (isTRUE(capabilities("cairo"))) options(bitmapType = "cairo")
 ```
 
 ```{r, echo=FALSE, results="asis"}
@@ -57,9 +63,11 @@ if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
 
 ```{r, echo=FALSE}
 # load pre-computed objects for rendering
-# markers of the final labels from 13, filtered there to FDR < 0.01 and mean
-# log fold change >= 1, so a star on a violin marks a marker by 13's definition
-cluster_markers      = read.csv(paste0(atlas_dir, "/cluster_marker_genes.csv"))
+# markers of the final labels from 13, every gene against every cluster, kept
+# at 13's FDR < 0.01 with no fold change cutoff, so a star on a violin marks a
+# significant gene whatever its effect size
+cluster_markers      = read.csv(paste0(atlas_dir, "/cluster_marker_genes_unfiltered.csv")) %>%
+  dplyr::filter(FDR < 0.01)
 gene_descriptions    = read.csv(paste0(altas_results_dir, "/gene_descritption.csv"))
 lineage_ob = readRDS(paste0(pseudo_results_dir, "/Robjects/lineage_objects.Rds"))
 germ_pseudotime = read.csv(paste0(pseudo_results_dir, "/pseudotime_per_cell.csv"))
@@ -192,7 +200,7 @@ A, every cell on the tSNE, colored by cell type. B, the share of each cluster's
 cells from each library, from `cluster_composition_after_split.csv` written by
 13.
 
-```{r, fig.width=12, fig.height=5}
+```{r, fig.width=12, fig.height=5, dev = "png", dpi = 600}
 cell_meta <- cell_meta %>%
   dplyr::mutate(cluster  = factor(cluster, levels = level_order),
                 CellType = factor(cell_type, levels = anno_order))
@@ -244,12 +252,12 @@ p_fig1 <- (p_tsne | p_comp) +
   theme(plot.tag = element_text(size = 11, face = "bold"))
 
 p_fig1
-ggsave(p_fig1, file = paste0(results_dir, "/Fig1_tsne.png"), width = 12, height = 5)
+ggsave(p_fig1, file = paste0(results_dir, "/Fig1_tsne.png"), width = 12, height = 5, dpi = 600)
 ```
 
 ### Fig.9 Chr 81 genes 
 
-```{r, fig.width=7.5, fig.height=8}
+```{r, fig.width=7.5, fig.height=8, dev = "png", dpi = 600}
 id_oi = c("LOC116957683",
           "LOC116957684",
           "LOC116957694",
@@ -282,12 +290,12 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/Fig14_Chr81_genes.png"), width = 7.5, height = 8)
+ggsave(paste0(results_dir, "/Fig9_Chr81_genes.png"), width = 7.5, height = 8, dpi = 600)
 ```
 
 ### S6: PIWIL1
 
-```{r, fig.width=5, fig.height=3}
+```{r, fig.width=5, fig.height=3, dev = "png", dpi = 600}
 plot_violin_goi_single(sce              = combined.sce,
                        markers          = cluster_markers,
                        goi              = "PIWIL1",
@@ -299,12 +307,12 @@ plot_violin_goi_single(sce              = combined.sce,
                        level_order      = level_order)
 
   
-ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3)
+ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3, dpi = 600)
 ```
 
 ### S18: pfn2 and mmp19 enriched in immune cells, and zp and alox5 enriched in oogonia and oocytes 
-
-```{r, fig.width=7.5, fig.height=8}
+ 
+```{r, fig.width=7.5, fig.height=8, dev = "png", dpi = 600}
 zp_id = 
   gene_descriptions %>%
   filter(grepl("ZP", WangGeneID),
