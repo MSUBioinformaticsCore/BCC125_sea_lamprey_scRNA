@@ -67,9 +67,7 @@ cluster_comp = read.csv(paste0(atlas_dir, "/cluster_composition_after_split.csv"
 combined.sce = readRDS(paste0(altas_results_dir, "/combined.sce.Rds"))
 ```
 
-## Make cell meta data table
-
-# Cell metadata export
+## Cell metadata export
 
 ```{r}
 # keyed by final_label from 13; the order here is the order of every legend
@@ -160,7 +158,7 @@ write.table(meta_final,
             quote     = FALSE)
 ```
 
-### Add meta data
+## Add meta data
 
 ```{r}
 # set coldata
@@ -174,9 +172,8 @@ gene_descriptions_ordered = gene_descriptions[rownames(combined.sce), , drop = F
 rowData(combined.sce) = DataFrame(gene_descriptions_ordered)
 ```
 
-### Set cluster annotations and pallettes
+## Set cluster annotations and pallettes
 
-All cells
 ```{r}
 combined.sce$cluster  <- factor(combined.sce$cluster, levels = level_order)
 combined.sce$CellType <- factor(combined.sce$cell_type, levels = anno_order)
@@ -250,7 +247,7 @@ p_fig1
 ggsave(p_fig1, file = paste0(results_dir, "/Fig1_tsne.png"), width = 12, height = 5)
 ```
 
-### Fig.14 Chr 81 genes 
+### Fig.9 Chr 81 genes 
 
 ```{r, fig.width=7.5, fig.height=8}
 id_oi = c("LOC116957683",
@@ -288,7 +285,7 @@ plot_violin_goi(sce              = combined.sce,
 ggsave(paste0(results_dir, "/Fig14_Chr81_genes.png"), width = 7.5, height = 8)
 ```
 
-### S8: PIWIL1
+### S6: PIWIL1
 
 ```{r, fig.width=5, fig.height=3}
 plot_violin_goi_single(sce              = combined.sce,
@@ -305,19 +302,35 @@ plot_violin_goi_single(sce              = combined.sce,
 ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3)
 ```
 
-### S9: SYCP3
+### S18: pfn2 and mmp19 enriched in immune cells, and zp and alox5 enriched in oogonia and oocytes 
 
-```{r, fig.width=5, fig.height=3}
-plot_violin_goi_single(sce              = combined.sce,
-                       markers          = cluster_markers,
-                       goi              = "SYCP3",
-                       gene_description = gene_descriptions,
-                       anno             = anno_order,
-                       palette          = publication_palette,
-                       label_col        = "cluster",
-                       title            = "SYCP3",
-                       level_order      = level_order)
+```{r, fig.width=7.5, fig.height=8}
+zp_id = 
+  gene_descriptions %>%
+  filter(grepl("ZP", WangGeneID),
+         WangGeneID != "ZPR1") %>%
+  pull(Gene)
 
-  
-ggsave(paste0(results_dir, "/S9_SYCP3.png"), width = 5, height = 3)
+id_oi = c("LOC116952631",
+          "LOC116938704",
+          "ALOX5",
+          zp_id)
+
+goi = 
+  gene_descriptions %>%
+  filter(Gene %in% id_oi) %>%
+  pull(WangGeneID)
+
+plot_violin_goi(sce              = combined.sce,
+                markers          = cluster_markers,
+                goi              = goi,
+                gene_description = gene_descriptions,
+                anno             = anno_order,
+                palette          = publication_palette,
+                label_col        = "cluster",
+                level_order      = level_order,
+                title            = NULL,
+                ncol             = 2)
+
+ggsave(paste0(results_dir, "/FigS18_genes.png"), width = 7.5, height = 11)
 ```
