@@ -196,10 +196,6 @@ publication_palette <- setNames(all_label_colors, anno_order)
 
 ### Fig.1: All cell tSNE
 
-A, every cell on the tSNE, colored by cell type. B, the share of each cluster's
-cells from each library, from `cluster_composition_after_split.csv` written by
-13.
-
 ```{r, fig.width=12, fig.height=5, dev = "png", dpi = 600}
 cell_meta <- cell_meta %>%
   dplyr::mutate(cluster  = factor(cluster, levels = level_order),
@@ -254,6 +250,8 @@ p_fig1 <- (p_tsne | p_comp) +
 p_fig1
 ggsave(p_fig1, file = paste0(results_dir, "/Fig1_tsne.png"), width = 12, height = 5, dpi = 600)
 ```
+
+`r paste0("**Figure 1. Clusters of all cells and their library composition.** **(A)** tSNE of the ", format(nrow(cell_meta), big.mark = ","), " cells from four libraries: two undifferentiated larvae and one female and one male transformer. The tSNE is computed on the fastMNN-corrected space of the four libraries. Cells are colored by cell type, and each number marks the median position of its cluster's cells. The legend gives the number of cells of each type. Clusters are Louvain communities of a shared nearest neighbor graph (k = 30) built on the corrected space. Cluster 12 is split into a transformer half (12T) and a larval half (12L). Its larval and transformer cells did not match each other by marker gene overlap in either direction. **(B)** The percentage of each cluster's cells from each library. Clusters are in the order of the legend in A.")`
 
 ### Fig.9 Chr 81 genes 
 
