@@ -15,18 +15,6 @@ params:
 ---
 
 ```{r setup, include=FALSE}
-# html_document renders inline figures at knitr's 72 dpi doubled by
-# fig.retina, so 144, while every ggsave here writes at 300. Rendering inline
-# at 300 as well puts the figure in the document at the resolution of the file
-# on disk. fig.retina is set to 1 so the two are not multiplied.
-# Figures are vector by default. A raster figure in html_document is rendered
-# at a fixed pixel size and then scaled to the page, so it is only ever as sharp
-# as that size; svg has no resolution to run out of. The chunks that draw one
-# mark per cell set dev = "png" individually, because an svg of forty thousand
-# tiles is tens of megabytes where the png is a couple of hundred kilobytes.
-# dpi applies to those, and fig.retina is 1 so it is not doubled again.
-# svglite if it is installed, otherwise the grDevices svg device, which needs
-# the cairo capability enabled below
 vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       dev = vec_dev, dpi = 300, fig.retina = 1)
@@ -90,27 +78,7 @@ source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
 ```
 
 TSCAN pseudotime for the germ cells, male and female together, with **every**
-cluster subclustered finely before anything is removed.
-
-The tree TSCAN fits is a minimum spanning tree over one centroid per node, so
-the number of nodes is the number of points the trajectory is fitted to. Using
-the atlas clusters as nodes gives it around a dozen, of which four are whole
-clusters holding thousands of cells each. A tree on twelve points is coarse and
-moves whenever a node moves.
-
-This document treats nodes as waypoints rather than cell types. Every cluster is
-cut into small subclusters at a fixed `sub_k`, which gives the tree many more
-points to follow. Nothing here needs a node to be interpretable, so nothing here
-depends on the subclustering being stable or on any node carrying a label.
-
-The collaborators' annotation is carried **per cell**, by barcode, from the
-earlier coarse-node trajectory, where it was assigned to whole nodes. It is
-never attached to a node here. Re-clustering therefore cannot break it, and the
-interpretation is read off the composition of the trajectory rather than off
-node names.
-
-The settings below are the ones the manuscript uses. They are fixed here rather
-than passed as knit parameters, so the document reproduces one analysis.
+cluster subclustered finely before anything is removed. TSCAN fits a minimum spanning tree over one centroid per node. Every cluster is cut into small subclusters at a fixed `sub_k`, which gives the tree many more points to follow than using the orginal germ clusters. Nodes are treated as waypoints rather than cell types.
 
 ```{r}
 results_date      = "20260813"
@@ -139,22 +107,6 @@ graph_sets        = c("Primordial germ cells", "Migrating germ cells",
 marker_file       = "canonical_markers_S1_only_2026-08-14.csv"
 extra_marker_file = c("neural_crest_markers_2026-09-25.csv",
                       "immediate_early_markers_2026-10-06.csv")
-# per-cell nodes of the earlier coarse-node trajectory, and the collaborators'
-# names for those nodes, which become the per-cell annotation
-prev_nodes_file   = paste0(params$project_dir, "/results/", results_date,
-                           "_pseudotime_tscan_all/pseudotime_per_cell_annotated.csv")
-node_annotation   = c("5.1" = "Migrating neural crest cells",
-                      "5.2" = "Oogonia",
-                      "5.3" = "Oocytes",
-                      "5.4" = "Migrating female germ cells (FGC I)",
-                      "5.5" = "Granulosa",
-                      "5.6" = "Migrating female germ cells (FGC II)",
-                      "5.7" = "Primordial germ cells (PGCs)",
-                      "5.8" = "Migrating PGCs",
-                      "15"  = "Spermatogonia",
-                      "16"  = "Spermatocytes I",
-                      "17"  = "Spermatocytes II",
-                      "18"  = "Spermatocytes III")
 lfc_thresh        = 1
 fdr_cut           = 0.01
 go_pval           = 0.05
@@ -339,28 +291,9 @@ if (length(absent) > 0)
        paste(sort(unique(cell_labels$final_label)), collapse = ", "))
 
 lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
-
-# the annotation, per cell, by barcode
-stopifnot(file.exists(prev_nodes_file))
-prev = read.csv(prev_nodes_file, stringsAsFactors = FALSE)
-stopifnot(all(c("barcode", "node") %in% colnames(prev)))
-old = prev$node[match(lineage_key$barcode, prev$barcode)]
-cell_anno = unname(node_annotation[as.character(old)])
-cell_anno[is.na(cell_anno) & !is.na(old)] = as.character(old)[is.na(cell_anno) & !is.na(old)]
-lineage_key$annotation = ifelse(is.na(cell_anno), "unannotated", cell_anno)
-
-
-comp_tab = lineage_key %>%
-  dplyr::count(final_label, annotation, name = "n") %>%
-  tidyr::pivot_wider(names_from = annotation, values_from = n, values_fill = 0)
-
-write.csv(comp_tab, file = paste0(results_dir, "/cluster_by_annotation.csv"),
-          row.names = FALSE)
-
-datatable(comp_tab, rownames = FALSE, options = list(dom = "t", scrollX = TRUE))
 ```
 
-`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ". Nothing is removed here: the subclustering runs on every cell, and whatever is removed is removed afterwards, on the strength of what the nodes turn out to express. ", format(sum(lineage_key$annotation != "unannotated"), big.mark = ","), " carry an annotation from ", basename(prev_nodes_file), ".")`
+`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ". Nothing is removed here: the subclustering runs on every cell, and whatever is removed is removed afterwards, on the strength of what the nodes turn out to express.")`
 
 ```{r}
 obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
@@ -386,7 +319,6 @@ stopifnot(!anyNA(key_idx))
 merged$library     = lineage_key$library[key_idx]
 merged$stage       = lineage_key$stage[key_idx]
 merged$final_label = lineage_key$final_label[key_idx]
-merged$annotation  = lineage_key$annotation[key_idx]
 
 lib_tab = data.frame(batch   = names(objs$n_by_library),
                      n_cells = as.integer(objs$n_by_library),
@@ -473,43 +405,12 @@ per_cluster = node_tab %>%
 datatable(per_cluster, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 ```
 
-## What the nodes are made of
-
-Nodes are not cell types, so the question is not what each one is but how the
-annotation is distributed over them. A node drawn from one annotation is a
-waypoint inside that population. A node mixing several is a waypoint on a
-boundary, which is expected wherever the biology is continuous.
-
-```{r, fig.width=12, fig.height=5}
-anno_by_node = as.data.frame(colData(merged)) %>%
-  dplyr::count(node, annotation, name = "n") %>%
-  dplyr::group_by(node) %>%
-  dplyr::mutate(frac = n / sum(n)) %>%
-  dplyr::ungroup()
-
-write.csv(anno_by_node, file = paste0(results_dir, "/node_by_annotation.csv"),
-          row.names = FALSE)
-
-p_anno = ggplot(anno_by_node, aes(x = node, y = frac, fill = annotation)) +
-  geom_col() +
-  theme_bw() +
-  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 7),
-        legend.text = element_text(size = 7)) +
-  labs(x = NULL, y = "fraction of the node", fill = NULL,
-       title = "Annotation composition of each node")
-
-p_anno
-ggsave(p_anno, file = paste0(results_dir, "/node_by_annotation.png"),
-       width = 12, height = 5, dpi = 300)
-```
-
 ## Depth and technical content
 
 Nodes that differ by sequencing depth rather than by cell state show a
 characteristic pattern. The shallower node's markers are the abundant genes of
 the deeper one at lower magnitude, and housekeeping genes climb its marker list.
-Cutting every cluster finely makes this more likely, not less, so it is measured
-directly here.
+Cutting every cluster finely makes this more likely.
 
 ```{r}
 cnt = counts(combined)
@@ -611,17 +512,10 @@ if (!is.null(depth_tests) && nrow(depth_tests) > 0) {
 
 `r if (is.null(depth_tests) || nrow(depth_tests) == 0) "" else { tt = depth_tests %>% dplyr::filter(measure == "total"); paste0("Median total counts across the subclusters of cluster ", paste(tt$cluster, collapse = ", "), " differ by a factor of ", paste(tt$fold_range, collapse = ", "), " between the deepest and shallowest node (Kruskal-Wallis p ", paste(tt$kruskal_p, collapse = ", "), "). A large factor is the signature of a depth split. It does not prove one, because a real cell state can also carry more RNA.") }`
 
-## Node identity
+## Marker sets across the nodes
 
-Every node is scored against **all** the marker sets available, somatic ones
-included, rather than only the germ sets the root rule uses. Every cell is still
-here: nothing has been removed at this point, and this table is what any removal
-below is decided on. A node scoring high on a somatic set and low on every germ
-set is not a germ cell state.
-
-The sets named by `removal_evidence_sets` are left out of the figure and drawn
-on their own under Removal. They are still in the table and in
-`node_identity_scores.csv`.
+Which known expression programs does each node's cells carry. Every node is scored against
+**all** the marker sets available.
 
 ```{r}
 if (nrow(set_containment) > 0)
@@ -629,18 +523,16 @@ if (nrow(set_containment) > 0)
             options = list(dom = "t", paging = FALSE))
 ```
 
-`r if (nrow(set_containment) > 0) paste0("**", nrow(set_containment), " marker set(s) sit entirely inside another set.** A node scoring high on one of these is also scoring high on the set that contains it. The two cannot be read as separate evidence. Judge these from the per-gene plot rather than the set score.") else "No marker set sits entirely inside another. Each set score is its own measurement."`
-
 ```{r}
-id_genes = all_sets %>%
+prog_genes = all_sets %>%
   dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id) %>%
   dplyr::filter(gene %in% rownames(combined)) %>%
   dplyr::distinct()
 
-id_scores = score_marker_sets(combined, merged$node, id_genes) %>%
+prog_scores = score_marker_sets(combined, merged$node, prog_genes) %>%
   dplyr::rename(node = group)
 
-id_table = id_scores %>%
+prog_table = prog_scores %>%
   dplyr::left_join(set_origin, by = c("set" = "CellTypeMarkerSet")) %>%
   dplyr::left_join(set_flag, by = "set") %>%
   dplyr::mutate(node = factor(node, levels = node_levels),
@@ -651,40 +543,35 @@ id_table = id_scores %>%
   dplyr::select(node, set, origin, contained_in, n_genes, n_cells,
                 mean_logexpr, pct_detected)
 
-write.csv(id_table, file = paste0(results_dir, "/node_identity_scores.csv"),
+write.csv(prog_table, file = paste0(results_dir, "/node_all_marker_set_scores.csv"),
           row.names = FALSE)
 
 # one row per gene per set, so the height follows the gene count. Fixed, the
 # facets compress as sets are added.
-id_rows = nrow(dplyr::distinct(
+prog_rows = nrow(dplyr::distinct(
   all_sets %>% dplyr::filter(!CellTypeMarkerSet %in% ev_sets),
   CellTypeMarkerSet, loc_id))
-id_h    = max(9, round(0.17 * id_rows + 3))
+prog_h    = max(9, round(0.17 * prog_rows + 3))
 
-datatable(id_table, rownames = FALSE, filter = "top",
+datatable(prog_table, rownames = FALSE, filter = "top",
           options = list(pageLength = 20, scrollX = TRUE))
 ```
 
-```{r, fig.width=11, fig.height=if (exists("id_h")) id_h else 13}
-id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
-write.csv(id_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
+```{r, fig.width=11, fig.height=if (exists("prog_h")) prog_h else 13}
+prog_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
+write.csv(prog_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
           row.names = FALSE)
 
-p_identity = marker_bubble_plot(
-  id_bubble %>% dplyr::filter(!set %in% ev_sets), node_levels,
+p_programs = marker_bubble_plot(
+  prog_bubble %>% dplyr::filter(!set %in% ev_sets), node_levels,
   title = "Marker expression by node, every set")
 
-p_identity
-ggsave(p_identity, file = paste0(results_dir, "/node_identity_scores.png"),
-       width = 11, height = id_h, dpi = 300)
+p_programs
+ggsave(p_programs, file = paste0(results_dir, "/node_all_marker_set_scores.png"),
+       width = 11, height = prog_h, dpi = 300)
 ```
 
 # Removal
-
-Every node above was defined on every cell, with nothing taken out, and scored
-against every marker set. A node is removed here only on the strength of what it
-turned out to express. Removing on the strength of the label it was given would
-make the trajectory unable to say anything about that label.
 
 The set drawn below is Dissociation response, which holds the AP-1 and
 immediate-early genes that enzymatic digestion induces. A node carrying them is
@@ -708,7 +595,7 @@ ev_h = max(5, round(0.19 * ev_rows + 2))
 
 ```{r, fig.width=9, fig.height=if (exists("ev_h")) ev_h else 7}
 p_ev = marker_bubble_plot(
-  id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,
+  prog_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,
   title    = paste(ev_sets, collapse = ", "),
   subtitle = paste0("removed: ", paste(drop_nodes, collapse = ", ")))
 p_ev
@@ -716,7 +603,7 @@ ggsave(p_ev, file = paste0(results_dir, "/removal_evidence_bubble.png"),
        width = 9, height = ev_h, dpi = 300)
 ```
 
-`r { es = id_table %>% dplyr::filter(set %in% ev_sets) %>% dplyr::arrange(dplyr::desc(mean_logexpr)); paste0("The highest scoring node on ", es$set[1], " is ", es$node[1], " at ", signif(es$mean_logexpr[1], 3), ", detected in ", round(es$pct_detected[1], 1), " percent of its cells, against ", signif(es$mean_logexpr[2], 3), " for the next node. The per-node values are in node_identity_scores.csv.") }`
+`r { es = prog_table %>% dplyr::filter(set %in% ev_sets) %>% dplyr::arrange(dplyr::desc(mean_logexpr)); paste0("The highest scoring node on ", es$set[1], " is ", es$node[1], " at ", signif(es$mean_logexpr[1], 3), ", detected in ", round(es$pct_detected[1], 1), " percent of its cells, against ", signif(es$mean_logexpr[2], 3), " for the next node. The per-node values are in node_all_marker_set_scores.csv.") }`
 
 ```{r}
 drop_tab = data.frame(node = drop_nodes, stringsAsFactors = FALSE) %>%
@@ -743,8 +630,8 @@ datatable(drop_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
 # Root
 
 Every node is scored on the germ cell marker sets. The root is the node with the
-highest mean expression of the `r root_set` set. This does not consult the
-annotation, so the root does not depend on any label being right.
+highest mean expression of the `r root_set` set, so the root does not depend
+on any label being right.
 
 ```{r}
 germ_sets = c("Primordial germ cells", "Migrating germ cells",
@@ -975,8 +862,8 @@ taken whole every time and its centroid cannot move. Read it as a stress test
 rather than as a p-value.
 
 A low `separation` is expected between consecutive waypoints on a trajectory.
-It is the reading to question where the two nodes carry annotations for distinct
-cell types. Combined with the ranks it separates cases that look alike on the
+It is the reading to question where the two nodes carry different marker set
+programs. Combined with the ranks it separates cases that look alike on the
 figure.
 
 | `separation` | `nn_rank` | reading |
@@ -986,8 +873,8 @@ figure.
 | high | 1 and 1 | two distinct groups with a genuine link between them |
 | high | high | a long edge to a node that sits near nothing |
 
-No column says whether a low `separation` means the annotation is wrong or the
-subclustering was cut too fine. That comes from the marker sets.
+No column says whether a low `separation` means two nodes are one population
+or the subclustering was cut too fine. That comes from the marker sets.
 
 ```{r}
 edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
@@ -1113,7 +1000,7 @@ if (!is.null(extra_tab) && nrow(extra_tab) > 0)
 
 `r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::mutate(worst = pmax(nn_rank_1, nn_rank_2)) %>% dplyr::filter(worst > 2) %>% dplyr::arrange(dplyr::desc(worst)); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "None reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest, the furthest being ", far$node_1[1], " to ", far$node_2[1], " at ranks ", far$nn_rank_1[1], " and ", far$nn_rank_2[1], "."), " ", if (nrow(ov) == 0) "Every pair sits at least one standard deviation apart." else paste0(nrow(ov), " pair(s) sit under one standard deviation apart, the closest being ", ov$node_1[which.min(ov$separation)], " to ", ov$node_2[which.min(ov$separation)], " at ", min(ov$separation), "."), " The per-edge values are in mst_edges.csv.") }`
 
-```{r, fig.width=13, fig.height=5, dev = "png", dpi = 600}
+```{r, fig.width=6.5, fig.height=5, dev = "png", dpi = 600}
 by_node = aggregateAcrossCells(
   merged, ids = merged$node,
   use.assay.type = if ("reconstructed" %in% assayNames(merged))
@@ -1121,25 +1008,21 @@ by_node = aggregateAcrossCells(
 edges_umap = reportEdges(by_node, mst = pseudo$mst, clusters = NULL,
                          use.dimred = "UMAP")
 
-p_anno_umap = plotUMAP(merged, colour_by = "annotation", point_size = .4) +
-  geom_line(data = edges_umap, aes(x = UMAP1, y = UMAP2, group = edge)) +
-  ggtitle("Annotation, carried per cell")
 p_pt_umap = plotUMAP(merged, colour_by = "pseudotime", point_size = .4) +
   geom_line(data = edges_umap, aes(x = UMAP1, y = UMAP2, group = edge)) +
   ggtitle("Pseudotime")
 
-p_anno_umap | p_pt_umap
-ggsave(p_anno_umap | p_pt_umap,
-       file = paste0(results_dir, "/trajectory_umap.png"), width = 13, height = 5)
+p_pt_umap
+ggsave(p_pt_umap,
+       file = paste0(results_dir, "/trajectory_umap.png"), width = 6.5, height = 5)
 ```
 
 ## Node graph
 
 The tree on its own, laid out by its own structure rather than on the UMAP. With
 many small nodes the shape of the tree is the thing to read, and a UMAP can put
-adjacent nodes far apart. Nodes are sized by cell count, colored by mean
-pseudotime in the first panel and by the annotation holding the most cells in the
-second. Edge color is the edge's length as a percentage of the outgroup
+adjacent nodes far apart. Nodes are sized by cell count and colored by mean
+pseudotime. Edge color is the edge's length as a percentage of the outgroup
 threshold, blue for short and red for past it. The numbers are omitted with this
 many nodes; they are in `mst_edges.csv` along with the subsampling frequency.
 
@@ -1148,16 +1031,13 @@ distance between nodes, so a long edge means the two nodes are far apart in the
 corrected space. Those distances are the `length` column of `mst_edges.csv`. The
 reproduction is not exact, because a tree in fifty dimensions cannot always be
 drawn faithfully in two, but it is close to a uniform rescale rather than
-arbitrary. If the message about a failed layout appears above, the figure fell
-back to an unweighted layout and edge lengths mean nothing.
+arbitrary. 
 
-```{r, fig.width=11, fig.height=13}
+```{r, fig.width=11, fig.height=6.5}
 node_stats = as.data.frame(colData(merged)) %>%
   dplyr::group_by(node) %>%
   dplyr::summarise(n_cells = dplyr::n(),
                    mean_pseudo = mean(pseudotime, na.rm = TRUE),
-                   top_anno = names(sort(table(annotation),
-                                         decreasing = TRUE))[1],
                    .groups = "drop") %>%
   dplyr::rename(name = node) %>%
   dplyr::mutate(name = as.character(name))
@@ -1176,13 +1056,6 @@ gr = as_tbl_graph(pseudo$mst) %>%
   mutate(conf = as.numeric(e_ig$frequency),
          cut_pct = as.numeric(e_ig$pct_of_cut))
 
-# Layout by real distance. The stress layout ignores edge weights by default and
-# draws every edge at roughly the same length, so the picture says nothing about
-# how far apart nodes are. graphlayouts treats weights as similarities, not
-# distances, so the reciprocal is what is passed: a long edge then has a weak
-# pull and is drawn long. On test trees this reproduces the true edge lengths to
-# a near-uniform scale factor, correlation 0.999. It also survives a tree split
-# into components, which a distance-matrix layout does not.
 layout_by_distance = function(graph, lengths) {
   w = as.numeric(lengths)
   w[!is.finite(w) | w <= 0] = min(w[is.finite(w) & w > 0], na.rm = TRUE) / 1000
@@ -1214,18 +1087,6 @@ lay_span = max(diff(range(lay$x)), diff(range(lay$y)))
 # node sizes scaled to how tightly the distance-faithful layout packs them
 size_hi = max(2.5, min(9, 55 * min(lay_d) / lay_span))
 
-# color alone; width carried no information color was not already carrying
-# Edge colour is the length as a percentage of the outgroup threshold, not the
-# subsampling frequency. Frequency reads 100 for an edge the tree was forced to
-# draw, because a node that belongs nowhere is attached to the same place in
-# every resample. The threshold says how long the edge is, which that cannot
-# hide. Blue is short, red is past the threshold; the numbers are in
-# mst_edges.csv along with the frequency.
-# Edges are drawn as shallow arcs and stopped short of the node glyphs. Drawn
-# straight and to the centers, a long edge passing near an unrelated node looks
-# like it terminates there, and a chain then reads as a cycle the tree cannot
-# contain. The bow costs about one percent in drawn length against the straight
-# chord, far less than the layout already approximates.
 edge_cap = circle(2.2, "mm")
 edge_aes = list(
   geom_edge_arc(aes(edge_colour = cut_pct), edge_width = .9, strength = 0.12,
@@ -1243,32 +1104,19 @@ g_pt = ggraph(lay) +
   theme_void(base_size = 9) +
   coord_fixed() + labs(colour = "mean pseudotime", size = "cells")
 
-g_an = ggraph(lay) +
-  edge_aes +
-  geom_node_point(aes(size = n_cells, colour = top_anno)) +
-  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
-  scale_size_continuous(range = c(max(1, size_hi / 4), size_hi)) +
-  theme_void(base_size = 9) +
-  coord_fixed() + labs(colour = "most common annotation", size = "cells")
-
-p_node_graph = (g_pt / g_an) +
-  patchwork::plot_layout(guides = "collect") +
-  patchwork::plot_annotation(tag_levels = "A") &
+p_node_graph = g_pt +
   theme(legend.position = "right", legend.box = "vertical",
         legend.key.size = unit(.4, "cm"),
         legend.title = element_text(size = 8),
-        legend.text  = element_text(size = 7),
-        plot.tag     = element_text(size = 11, face = "bold"))
+        legend.text  = element_text(size = 7))
 
 p_node_graph
 
 ggsave(p_node_graph, file = paste0(results_dir, "/node_graph.png"),
-       width = 11, height = 13, dpi = 300)
+       width = 11, height = 6.5, dpi = 300)
 ggsave(p_node_graph, file = paste0(results_dir, "/node_graph.pdf"),
-       width = 11, height = 13)
+       width = 11, height = 6.5)
 ```
-
-`r paste0("Panel B labels each node by whichever annotation holds the most of its cells. That is a summary, not a claim about the node: a node can be 51 percent one annotation and still be mixed. The full composition is in the stacked bar above and in node_by_annotation.csv.")`
 
 ## Which node reached for which
 
@@ -1379,137 +1227,7 @@ ggsave(p_set_graph, file = paste0(results_dir, "/node_graph_marker_sets.pdf"),
        width = 14, height = 12)
 ```
 
-## Figure 6
-
-```{r}
-# panel letter to set; all three are in germ_sets, so set_scores always has them
-fig6_sets = c(B = "Primordial germ cells", C = "Spermatocytes", D = "Oocyte")
-
-# nodes off every path have no pseudotime and so no place on the y axis
-fig6_nodes = node_stats %>%
-  dplyr::filter(is.finite(mean_pseudo)) %>%
-  dplyr::arrange(mean_pseudo)
-# earliest at the top
-fig6_levels = rev(fig6_nodes$name)
-
-fig6_lib = as.data.frame(colData(merged)) %>%
-  dplyr::mutate(node = as.character(node)) %>%
-  dplyr::filter(node %in% fig6_levels) %>%
-  dplyr::count(node, library, name = "n") %>%
-  dplyr::group_by(node) %>%
-  dplyr::mutate(frac = n / sum(n)) %>%
-  dplyr::ungroup() %>%
-  dplyr::mutate(node = factor(node, levels = fig6_levels))
-
-write.csv(fig6_lib %>%
-            dplyr::left_join(fig6_nodes %>%
-                               dplyr::select(node = name, mean_pseudotime = mean_pseudo),
-                             by = "node") %>%
-            dplyr::arrange(mean_pseudotime, library),
-          file = paste0(results_dir, "/figure6_node_by_library.csv"),
-          row.names = FALSE)
-
-# the gene symbols of each set, for the legend
-fig6_genes = all_sets %>%
-  dplyr::filter(CellTypeMarkerSet %in% fig6_sets,
-                loc_id %in% rownames(combined)) %>%
-  dplyr::distinct(CellTypeMarkerSet, symbol) %>%
-  dplyr::group_by(CellTypeMarkerSet) %>%
-  dplyr::summarise(symbols = paste(sort(symbol), collapse = ", "), .groups = "drop")
-fig6_symbols = setNames(fig6_genes$symbols, fig6_genes$CellTypeMarkerSet)
-```
-
-```{r, fig.width=14, fig.height=13}
-p_fig6_strip = ggplot(fig6_nodes %>%
-                        dplyr::mutate(name = factor(name, levels = fig6_levels)),
-                      aes(x = 1, y = name, fill = mean_pseudo)) +
-  geom_tile() +
-  scale_fill_viridis_c(name = "mean pseudotime") +
-  scale_x_continuous(expand = c(0, 0)) +
-  theme_minimal(base_size = 8) +
-  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
-        panel.grid = element_blank(),
-        axis.text.y = element_text(size = 6)) +
-  labs(x = NULL, y = NULL)
-
-p_fig6_lib = ggplot(fig6_lib, aes(x = frac, y = node, fill = library)) +
-  geom_col(width = .85) +
-  scale_fill_manual(values = lib_cols) +
-  scale_x_continuous(expand = c(0, 0), labels = scales::percent) +
-  theme_bw(base_size = 8) +
-  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
-        panel.grid.major.y = element_blank()) +
-  labs(x = "cells in the node", y = NULL, fill = "library")
-
-p_fig6_a = (p_fig6_strip | p_fig6_lib) +
-  patchwork::plot_layout(widths = c(.05, 1), guides = "collect")
-
-p_fig6 = patchwork::wrap_plots(p_fig6_a, set_panel(fig6_sets[["B"]]),
-                               set_panel(fig6_sets[["C"]]),
-                               set_panel(fig6_sets[["D"]]), ncol = 2) +
-  patchwork::plot_layout(guides = "collect") +
-  # the strip takes the A, the bars beside it take none
-  patchwork::plot_annotation(tag_levels = list(c("A", "", "B", "C", "D"))) &
-  theme(legend.position = "right", legend.box = "vertical",
-        legend.key.size = unit(.35, "cm"),
-        legend.title = element_text(size = 7),
-        legend.text  = element_text(size = 6),
-        plot.tag     = element_text(size = 11, face = "bold"))
-
-p_fig6
-ggsave(p_fig6, file = paste0(results_dir, "/figure6.png"),
-       width = 14, height = 13, dpi = 300)
-ggsave(p_fig6, file = paste0(results_dir, "/figure6.pdf"),
-       width = 14, height = 13)
-```
-
-`r paste0("**Figure 6. Library composition and germ cell marker sets along the trajectory.** **(A)** Library composition of the ", length(fig6_levels), " trajectory nodes. Nodes are on the y axis, ordered by the mean pseudotime of their cells, with the earliest at the top. Each bar is the percentage of the node's cells from each library. The strip beside the axis is colored by the node's mean pseudotime.", if (nrow(node_stats) > length(fig6_levels)) paste0(" ", nrow(node_stats) - length(fig6_levels), " node(s) lie on no path and have no pseudotime, so they are not shown.") else "", " **(B-D)** The node graph colored by the ", fig6_sets[['B']], " (B; ", fig6_symbols[[fig6_sets[['B']]]], "), ", fig6_sets[['C']], " (C; ", fig6_symbols[[fig6_sets[['C']]]], ") and ", fig6_sets[['D']], " (D; ", fig6_symbols[[fig6_sets[['D']]]], ") marker sets. Node color is the set's mean log expression, scaled to the set's maximum across nodes. That maximum is given in each panel title. Point size is the mean, over the set's genes, of the percentage of the node's cells detecting the gene. Node positions are the distance-weighted layout of the node graph, so edge length approximates the distance between node centroids in the corrected space. Edge color is the edge's length as a percentage of the outgroup threshold.")`
-
-# What the ordering says
-
-This is where the trajectory is interpreted, and it is done from the cells
-rather than from node names. The annotation is the collaborators' expert call
-carried by barcode, so its distribution along pseudotime is the claim.
-
-```{r, fig.width=12, fig.height=5, dev = "png", dpi = 600}
-pt_df = as.data.frame(colData(merged))
-pt_df$barcode = colnames(merged)
-
-p_anno_pt = ggplot(pt_df %>% dplyr::filter(!is.na(pseudotime)),
-                   aes(x = pseudotime, y = reorder(annotation, pseudotime,
-                                                   FUN = median))) +
-  geom_boxplot(outlier.size = .2) +
-  theme_bw() + labs(x = "pseudotime", y = NULL,
-                    title = "Annotation along the ordering")
-p_lib_pt = ggplot(pt_df %>% dplyr::filter(!is.na(pseudotime)),
-                  aes(x = pseudotime, y = library, fill = library)) +
-  geom_boxplot(outlier.size = .2) +
-  scale_fill_manual(values = lib_cols) +
-  theme_bw() + theme(legend.position = "none") +
-  labs(x = "pseudotime", y = NULL, title = "Library")
-
-p_anno_pt | p_lib_pt
-ggsave(p_anno_pt | p_lib_pt,
-       file = paste0(results_dir, "/pseudotime_by_annotation.png"),
-       width = 12, height = 5)
-```
-
-```{r}
-anno_order = pt_df %>%
-  dplyr::filter(!is.na(pseudotime)) %>%
-  dplyr::group_by(annotation) %>%
-  dplyr::summarise(n_cells = dplyr::n(),
-                   median_pseudotime = signif(median(pseudotime), 3),
-                   q1 = signif(quantile(pseudotime, .25), 3),
-                   q3 = signif(quantile(pseudotime, .75), 3),
-                   .groups = "drop") %>%
-  dplyr::arrange(median_pseudotime)
-
-write.csv(anno_order, file = paste0(results_dir, "/annotation_pseudotime.csv"),
-          row.names = FALSE)
-
-datatable(anno_order, rownames = FALSE, options = list(dom = "t", paging = FALSE))
-```
+# Checks on the ordering
 
 ## How much of the ordering is the library
 
@@ -1541,6 +1259,7 @@ ordering was separating animals. Evidence from outside this dataset is in
 against a bulk series collected by a different group.
 
 ```{r, fig.width=7, fig.height=5}
+pt_df    = as.data.frame(colData(merged))
 pt_var   = pseudotime_variance(pt_df, lib_cols)
 lib_r2   = pt_var$lib_r2
 stage_r2 = pt_var$stage_r2
@@ -1640,33 +1359,46 @@ The 25 most significant genes in each direction along each path. Cells are
 restricted to that path and ordered by their position on it, so a cell on two
 paths appears in both panels at the place each path puts it.
 
-```{r, results="asis"}
-for (pth in colnames(pseudo_mat)) {
+```{r}
+# The top genes of one path and direction, drawn over that path's cells. The
+# pseudotime bar is scaled within the path, so ordering and color both describe
+# this path rather than the average over all of them. NULL when there are too
+# few cells or genes to draw.
+path_heatmap = function(pth, dir, n_top = 25) {
   on_path = rownames(pseudo_mat)[!is.na(pseudo_mat[, pth])]
-  if (length(on_path) < 20) next
+  if (length(on_path) < 20) return(NULL)
 
-  # the bar is scaled within the path, so ordering and color both describe this
-  # path rather than the average over all of them
   pv  = pseudo_mat[on_path, pth]
   rng = range(pv, na.rm = TRUE)
-  combined$pseudotime_scaled = NA_real_
-  combined$pseudotime_scaled[match(on_path, colnames(combined))] =
+  sce = combined
+  sce$pseudotime_scaled = NA_real_
+  sce$pseudotime_scaled[match(on_path, colnames(sce))] =
     if (diff(rng) > 0) (pv - rng[1]) / diff(rng) else 0
 
-  for (dir in c("up", "down")) {
-    top = pt_tab %>%
-      dplyr::filter(Path == pth, Direction == dir) %>%
-      dplyr::arrange(FDR, dplyr::desc(abs(logFC))) %>%
-      dplyr::slice_head(n = 25)
-    # hclust on the gene rows needs at least two of them
-    if (nrow(top) < 2) next
+  top = pt_tab %>%
+    dplyr::filter(Path == pth, Direction == dir) %>%
+    dplyr::arrange(FDR, dplyr::desc(abs(logFC))) %>%
+    dplyr::slice_head(n = n_top)
+  # hclust on the gene rows needs at least two of them
+  if (nrow(top) < 2) return(NULL)
 
-    labs_wang = ifelse(is.na(top$WangGeneID), top$Gene, top$WangGeneID)
-    hm = plot_pseudotime_heatmap(combined, top$Gene, labs_wang, on_path,
-                                 pseudotime_column = "pseudotime_scaled")
+  labs_wang = ifelse(is.na(top$WangGeneID), top$Gene, top$WangGeneID)
+  hm = plot_pseudotime_heatmap(sce, top$Gene, labs_wang, on_path,
+                               pseudotime_column = "pseudotime_scaled")
+  list(bar = hm[[1]], heatmap = hm[[2]], n_genes = nrow(top),
+       n_cells = length(on_path))
+}
+```
+
+```{r, results="asis"}
+for (pth in colnames(pseudo_mat)) {
+  for (dir in c("up", "down")) {
+    hm = path_heatmap(pth, dir)
+    if (is.null(hm)) next
+
     # guides = "collect" is what the function sets; rebuilding to change the
     # heights would drop it and clip the pseudotime legend title away
-    hp = (hm[[1]] / hm[[2]]) +
+    hp = (hm$bar / hm$heatmap) +
       plot_layout(heights = c(0.03, 1), guides = "collect")
 
     f = paste0(results_dir, "/pseudotime_heatmap_",
@@ -1707,13 +1439,181 @@ datatable(path_go %>% dplyr::mutate(dplyr::across(where(is.numeric),
           filter = "top", rownames = FALSE)
 ```
 
+# Figures
+
+## Figure 6
+
+```{r}
+# panel letter to set; all three are in germ_sets, so set_scores always has them
+fig6_sets = c(B = "Primordial germ cells", C = "Spermatocytes", D = "Oocyte")
+
+# nodes off every path have no pseudotime and so no place on the y axis
+fig6_nodes = node_stats %>%
+  dplyr::filter(is.finite(mean_pseudo)) %>%
+  dplyr::arrange(mean_pseudo)
+# earliest at the top
+fig6_levels = rev(fig6_nodes$name)
+
+fig6_lib = as.data.frame(colData(merged)) %>%
+  dplyr::mutate(node = as.character(node)) %>%
+  dplyr::filter(node %in% fig6_levels) %>%
+  dplyr::count(node, library, name = "n") %>%
+  dplyr::group_by(node) %>%
+  dplyr::mutate(frac = n / sum(n)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(node = factor(node, levels = fig6_levels))
+
+write.csv(fig6_lib %>%
+            dplyr::left_join(fig6_nodes %>%
+                               dplyr::select(node = name, mean_pseudotime = mean_pseudo),
+                             by = "node") %>%
+            dplyr::arrange(mean_pseudotime, library),
+          file = paste0(results_dir, "/figure6_node_by_library.csv"),
+          row.names = FALSE)
+
+# the gene symbols of each set, for the legend
+fig6_genes = all_sets %>%
+  dplyr::filter(CellTypeMarkerSet %in% fig6_sets,
+                loc_id %in% rownames(combined)) %>%
+  dplyr::distinct(CellTypeMarkerSet, symbol) %>%
+  dplyr::group_by(CellTypeMarkerSet) %>%
+  dplyr::summarise(symbols = paste(sort(symbol), collapse = ", "), .groups = "drop")
+fig6_symbols = setNames(fig6_genes$symbols, fig6_genes$CellTypeMarkerSet)
+```
+
+```{r, fig.width=14, fig.height=13}
+p_fig6_strip = ggplot(fig6_nodes %>%
+                        dplyr::mutate(name = factor(name, levels = fig6_levels)),
+                      aes(x = 1, y = name, fill = mean_pseudo)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "mean pseudotime") +
+  scale_x_continuous(expand = c(0, 0)) +
+  theme_minimal(base_size = 8) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.y = element_text(size = 6)) +
+  labs(x = NULL, y = NULL)
+
+p_fig6_lib = ggplot(fig6_lib, aes(x = frac, y = node, fill = library)) +
+  geom_col(width = .85) +
+  scale_fill_manual(values = lib_cols) +
+  scale_x_continuous(expand = c(0, 0), labels = scales::percent) +
+  theme_bw(base_size = 8) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_blank()) +
+  labs(x = "cells in the node", y = NULL, fill = "library")
+
+p_fig6_a = (p_fig6_strip | p_fig6_lib) +
+  patchwork::plot_layout(widths = c(.05, 1), guides = "collect")
+
+p_fig6 = patchwork::wrap_plots(p_fig6_a, set_panel(fig6_sets[["B"]]),
+                               set_panel(fig6_sets[["C"]]),
+                               set_panel(fig6_sets[["D"]]), ncol = 2) +
+  patchwork::plot_layout(guides = "collect") +
+  # the strip takes the A, the bars beside it take none
+  patchwork::plot_annotation(tag_levels = list(c("A", "", "B", "C", "D"))) &
+  theme(legend.position = "right", legend.box = "vertical",
+        legend.key.size = unit(.35, "cm"),
+        legend.title = element_text(size = 7),
+        legend.text  = element_text(size = 6),
+        plot.tag     = element_text(size = 11, face = "bold"))
+
+p_fig6
+ggsave(p_fig6, file = paste0(results_dir, "/figure6.png"),
+       width = 14, height = 13, dpi = 300)
+ggsave(p_fig6, file = paste0(results_dir, "/figure6.pdf"),
+       width = 14, height = 13)
+```
+
+`r paste0("**Figure 6. Library composition and germ cell marker sets along the trajectory.** **(A)** Library composition of the ", length(fig6_levels), " trajectory nodes. Nodes are on the y axis, ordered by the mean pseudotime of their cells, with the earliest at the top. Each bar is the percentage of the node's cells from each library. The strip beside the axis is colored by the node's mean pseudotime.", if (nrow(node_stats) > length(fig6_levels)) paste0(" ", nrow(node_stats) - length(fig6_levels), " node(s) lie on no path and have no pseudotime, so they are not shown.") else "", " **(B-D)** The node graph colored by the ", fig6_sets[['B']], " (B; ", fig6_symbols[[fig6_sets[['B']]]], "), ", fig6_sets[['C']], " (C; ", fig6_symbols[[fig6_sets[['C']]]], ") and ", fig6_sets[['D']], " (D; ", fig6_symbols[[fig6_sets[['D']]]], ") marker sets. Node color is the set's mean log expression, scaled to the set's maximum across nodes. That maximum is given in each panel title. Point size is the mean, over the set's genes, of the percentage of the node's cells detecting the gene. Node positions are the distance-weighted layout of the node graph, so edge length approximates the distance between node centroids in the corrected space. Edge color is the edge's length as a percentage of the outgroup threshold.")`
+
+## Figure 8
+
+```{r}
+# the path drawn, and how the legend names it
+fig8_path  = "5.4"
+fig8_label = "the female trajectory path, ending in node 5.4 (oocytes)"
+fig9_path  = "15.2"
+fig9_label = "the path ending in node 15.2"
+stopifnot(c(fig8_path, fig9_path) %in% colnames(pseudo_mat))
+
+# up in A on the left, down in B on the right. Both panels share the pseudotime
+# and expression scales, so collecting the guides leaves one of each.
+path_figure = function(pth) {
+  up   = path_heatmap(pth, "up")
+  down = path_heatmap(pth, "down")
+  stopifnot(!is.null(up), !is.null(down))
+  p = ((up$bar / up$heatmap) +
+         plot_layout(heights = c(0.03, 1)) |
+       (down$bar / down$heatmap) +
+         plot_layout(heights = c(0.03, 1))) +
+    plot_layout(guides = "collect") +
+    # the bars take the letters, the heatmaps under them take none
+    plot_annotation(tag_levels = list(c("A", "", "B", ""))) &
+    theme(plot.tag = element_text(size = 11, face = "bold"))
+  list(plot = p, n_up = up$n_genes, n_down = down$n_genes,
+       n_cells = up$n_cells)
+}
+
+# The legend text for one of these figures. The numbers come from the run.
+path_legend = function(fig_no, pth, label, fig) {
+  n_sig = pt_tab %>% dplyr::filter(Path == pth) %>% dplyr::count(Direction)
+  n_dir = function(d) sum(n_sig$n[n_sig$Direction == d])
+  paste0("**Figure ", fig_no, ". Genes that change along the path to node ", pth,
+         ".** Heatmaps of the ", fig$n_up, " genes most significantly ",
+         "up-regulated (A) and the ", fig$n_down, " most significantly ",
+         "down-regulated (B) along ", label, ". The path runs from the root, node ",
+         root, ", to node ", pth, ", and holds ",
+         format(fig$n_cells, big.mark = ","), " cells. ",
+         "Genes were tested for association with pseudotime using ",
+         "TSCAN::testPseudotime. It fits a natural cubic spline with five degrees ",
+         "of freedom to log-normalized expression along each path and tests the ",
+         "spline coefficients with an F-test against an intercept-only model. ",
+         "P-values were corrected for multiple comparisons with the ",
+         "Benjamini-Hochberg procedure within each path. ",
+         "A gene's direction is the sign of a linear fit of its expression on ",
+         "pseudotime. ",
+         format(n_dir("up") + n_dir("down"), big.mark = ","),
+         " genes are significant on this path at FDR < ", fdr_cut, ": ",
+         format(n_dir("up"), big.mark = ","), " up and ",
+         format(n_dir("down"), big.mark = ","), " down. ",
+         "Genes are ranked by FDR, and the top of each direction is shown. ",
+         "Each column is one cell, ordered by pseudotime from early (left) to ",
+         "late (right). The bar above each heatmap is pseudotime scaled from 0 ",
+         "to 1 within the path. Fill is log-normalized expression z-scored ",
+         "within each gene across the path's cells (blue, low; yellow, mid; red, ",
+         "high; limits -4 to 5, with values beyond them drawn in the end ",
+         "colors). Rows are ordered by hierarchical clustering ",
+         "(Ward's method).")
+}
+```
+
+```{r, fig.width=14, fig.height=5, dev = "png", dpi = 600}
+fig8 = path_figure(fig8_path)
+fig8$plot
+ggsave(fig8$plot, file = paste0(results_dir, "/figure8.png"),
+       width = 14, height = 5, dpi = 600)
+```
+
+`r path_legend(8, fig8_path, fig8_label, fig8)`
+
+## Figure 9
+
+```{r, fig.width=14, fig.height=5, dev = "png", dpi = 600}
+fig9 = path_figure(fig9_path)
+fig9$plot
+ggsave(fig9$plot, file = paste0(results_dir, "/figure9.png"),
+       width = 14, height = 5, dpi = 600)
+```
+
+`r path_legend(9, fig9_path, fig9_label, fig9)`
+
 # Export
 
 ```{r}
 out = data.frame(barcode    = colnames(merged),
                  node       = as.character(merged$node),
                  cluster    = as.character(merged$final_label),
-                 annotation = as.character(merged$annotation),
                  library    = as.character(merged$library),
                  stage      = as.character(merged$stage),
                  pseudotime = merged$pseudotime,
@@ -1725,42 +1625,38 @@ write.csv(out, file = paste0(results_dir, "/pseudotime_per_cell.csv"),
 
 ## Everything written by this document
 
-Built by listing the results directory and looking each file up, rather than by
-keeping a list by hand. A file with no description, or a description with no
-file, is reported below instead of passing unnoticed.
-
 ```{r}
 file_notes = c(
-  "pseudotime_per_cell.csv" = "One row per cell: node, cluster, annotation carried by barcode, library, stage and pseudotime.",
-  "cluster_by_annotation.csv" = "How the annotation is distributed across the atlas clusters, before subclustering.",
+  "pseudotime_per_cell.csv" = "One row per cell: node, cluster, library, stage and pseudotime.",
   "node_composition.csv"      = "Cells per node and the cluster each node came from.",
-  "node_by_annotation.csv"    = "Annotation composition of every node, as counts and fractions. The evidence behind panel B of the node graph.",
   "node_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
   "node_graph_layout.csv"        = "Where each node sits on the node graph figure, so the same tree can be drawn elsewhere.",
   "mst_edges.csv"             = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance in standard deviations of the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
-  "annotation_pseudotime.csv" = "Median and quartiles of pseudotime for each annotation. The ordering claim in numbers.",
   "pseudotime_vs_technical.csv"   = "Pseudotime regressed on depth, mitochondrial, rRNA and ribosomal content, pooled and within each library.",
   "node_depth_and_technical.csv" = "Depth, genes detected, percent mitochondrial, rRNA and ribosomal per node.",
   "node_depth_tests.csv"      = "Kruskal-Wallis of each measure across the subclusters of a cluster, with the fold range in median depth.",
-  "node_marker_expression.csv" = "The per-gene values behind the node identity bubble plot.",
+  "node_marker_expression.csv" = "The per-gene values behind the bubble plot of every marker set across the nodes.",
   "node_marker_genes.csv"     = "Markers of each node against the other germ cell nodes.",
   "node_marker_GO_overlaps.csv" = "Which marker genes carry each enriched GO term, per node.",
   "node_marker_GO_pvalues.csv" = "GO enrichment of each node's marker genes.",
   "pseudotime_GO_overlaps.csv" = "Which genes carry each enriched GO term, per path and direction.",
   "pseudotime_GO_pvalues.csv" = "GO enrichment of the pseudotime-associated genes, per path and direction.",
   "pseudotime_genes.csv"      = "Genes whose expression changes along each path, one row per gene per path with its direction.",
-  "trajectory_umap.png"       = "UMAP colored by annotation and by pseudotime, with the tree drawn over it.",
-  "node_graph.png"            = "The tree laid out by its own structure: nodes sized by cell count, colored by mean pseudotime and by most common annotation.",
+  "trajectory_umap.png"       = "UMAP colored by pseudotime, with the tree drawn over it.",
+  "node_graph.png"            = "The tree laid out by its own structure: nodes sized by cell count and colored by mean pseudotime.",
   "node_graph.pdf"            = "The node graph as a vector file, for figure assembly.",
-  "node_by_annotation.png"    = "Annotation composition of each node as stacked bars.",
-  "pseudotime_by_annotation.png" = "Pseudotime distribution per annotation and per library.",
   "pseudotime_variance_by_library.png" = "Pseudotime within each library, and the share of its variance that sits between libraries rather than within them.",
   "pseudotime_variance_by_library.csv" = "That share split into stage, what separating the libraries adds over stage, and the remainder within libraries.",
-  "node_identity_scores.csv"  = "Each node against all marker sets, somatic ones included, with a contained_in flag where one set sits inside another.",
+  "node_all_marker_set_scores.csv"  = "Each node against all marker sets, somatic ones included, with a contained_in flag where one set sits inside another.",
+  "figure6.png"               = "Figure 6: library composition of the trajectory nodes and the germ cell marker sets on the tree.",
+  "figure6.pdf"               = "Figure 6 as a vector file, for figure assembly.",
+  "figure6_node_by_library.csv" = "The values behind Figure 6A: cells per node from each library, with the node's mean pseudotime.",
+  "figure8.png"               = "Figure 8: the top up- and down-regulated genes along the path to node 5.4.",
+  "figure9.png"               = "Figure 9: the top up- and down-regulated genes along the path to node 15.2.",
   "pseudotime_by_node.png"    = "Pseudotime distribution per node and per library.",
   "node_depth_and_technical.png" = "Depth and technical content per node.",
   "removal_evidence_bubble.png" = "The Dissociation response set per node, with the removed node first on the axis. The evidence behind the removal.",
-  "node_identity_scores.png"  = "Marker expression per node, one dot per gene, every set.",
+  "node_all_marker_set_scores.png"  = "Marker expression per node, one dot per gene, every set.",
   "node_graph_ranks.png" = "The tree with two arrows per pair, each colored by how the node it points to ranks among the neighbors of the node it leaves.",
   "node_graph_ranks.pdf" = "The rank graph as a vector file.",
   "node_graph_marker_sets.png" = "The tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
@@ -1829,7 +1725,7 @@ settings = data.frame(
               "min_node_cells", "dist.method", "outgroup", "edge_boot",
               "edge_boot_cells", "root_set", "min_detect_pct", "drop_nodes",
               "removal_evidence_sets", "graph_sets", "marker_file",
-              "extra_marker_file", "prev_nodes_file", "lfc_thresh", "fdr_cut",
+              "extra_marker_file", "lfc_thresh", "fdr_cut",
               "go_pval", "genome_dir"),
   value   = c(results_date, paste(clusters, collapse = ", "), min_library_cells,
               sub_k, min_node_cells, "simple", "FALSE", edge_boot,
@@ -1837,21 +1733,11 @@ settings = data.frame(
               paste(drop_nodes, collapse = ", "),
               paste(removal_evidence_sets, collapse = ", "),
               paste(graph_sets, collapse = ", "), marker_file,
-              paste(extra_marker_file, collapse = ", "), prev_nodes_file,
+              paste(extra_marker_file, collapse = ", "),
               lfc_thresh, fdr_cut, go_pval, genome_dir),
   stringsAsFactors = FALSE)
 
 datatable(settings, rownames = FALSE,
-          options = list(dom = "t", ordering = FALSE, paging = FALSE))
-```
-
-The per-cell annotation carried from the coarse-node trajectory maps its nodes
-to these names.
-
-```{r}
-datatable(data.frame(node = names(node_annotation),
-                     annotation = unname(node_annotation)),
-          rownames = FALSE,
           options = list(dom = "t", ordering = FALSE, paging = FALSE))
 ```
 
