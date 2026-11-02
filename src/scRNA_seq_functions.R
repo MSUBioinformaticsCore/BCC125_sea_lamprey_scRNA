@@ -572,7 +572,10 @@ plot_pseudotime_heatmap <- function(
       high = "firebrick2",
       midpoint = 0,
       na.value = "white",
-      limits = heatmap_limits
+      limits = heatmap_limits,
+      # values past the limits take the end colors; without this they become
+      # NA and are drawn white, which reads as mid-range expression
+      oob = scales::squish
     ) +
     ggplot2::scale_x_discrete(expand = c(0, 0)) +
     ggplot2::theme_minimal(base_size = 8) +

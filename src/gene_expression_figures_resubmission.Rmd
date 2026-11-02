@@ -70,7 +70,6 @@ cluster_markers      = read.csv(paste0(atlas_dir, "/cluster_marker_genes_unfilte
 gene_descriptions    = read.csv(paste0(altas_results_dir, "/gene_descritption.csv"))
 lineage_ob = readRDS(paste0(pseudo_results_dir, "/Robjects/lineage_objects.Rds"))
 germ_pseudotime = read.csv(paste0(pseudo_results_dir, "/pseudotime_per_cell.csv"))
-cluster_comp = read.csv(paste0(atlas_dir, "/cluster_composition_after_split.csv"))
 combined.sce = readRDS(paste0(altas_results_dir, "/combined.sce.Rds"))
 ```
 
@@ -192,65 +191,6 @@ all_label_colors <- c("#1F77B4", "#AEC7E8", "#FF7F0E", "#FFBB78",
                       "#BCBD22", "#DBDB8D", "#17BECF")
 publication_palette <- setNames(all_label_colors, anno_order)
 ```
-
-### Fig.1: All cell tSNE
-
-```{r, fig.width=12, fig.height=5, dev = "png", dpi = 600}
-cell_meta <- cell_meta %>%
-  dplyr::mutate(cluster  = factor(cluster, levels = level_order),
-                CellType = factor(cell_type, levels = anno_order))
-
-p_tsne <- plot_tsne(df           = cell_meta,
-                    color_col    = "CellType",
-                    label_col    = "cluster_label",
-                    palette      = publication_palette,
-                    color_levels = anno_order,
-                    point_size   = 0.5,
-                    text_color   = "black",
-                    bg_color     = "white",
-                    text_size    = 2) +
-  theme(panel.background = element_rect(fill = "black", color = NA),
-        legend.key       = element_rect(fill = "white", color = NA))
-
-# the library colors used in 19, so a library is the same color in every figure
-lib_cols = c("Female"             = "#FF6DB6",
-             "Male"               = "#006ddb",
-             "Undifferentiated.1" = "#009292",
-             "Undifferentiated.2" = "#b66ddf")
-
-comp_long = cluster_comp %>%
-  dplyr::mutate(label = as.character(label)) %>%
-  dplyr::select(label, dplyr::all_of(names(lib_cols))) %>%
-  tidyr::pivot_longer(-label, names_to = "library", values_to = "n") %>%
-  dplyr::group_by(label) %>%
-  dplyr::mutate(frac = n / sum(n)) %>%
-  dplyr::ungroup() %>%
-  # cluster 1 at the top, in the order of the tSNE legend
-  dplyr::mutate(cluster = factor(unname(anno_short[label]),
-                                 levels = rev(unname(anno_short))),
-                library = factor(library, levels = names(lib_cols)))
-
-stopifnot(setequal(unique(comp_long$label), level_order))
-
-p_comp <- ggplot(comp_long, aes(x = frac, y = cluster, fill = library)) +
-  geom_col(width = .85) +
-  scale_fill_manual(values = lib_cols) +
-  scale_x_continuous(expand = c(0, 0), labels = scales::percent) +
-  theme_classic(base_size = 8) +
-  theme(axis.ticks.y = element_blank(),
-        axis.line.y  = element_blank()) +
-  labs(x = "cells in the cluster", y = NULL, fill = "library")
-
-p_fig1 <- (p_tsne | p_comp) +
-  patchwork::plot_layout(widths = c(2.2, 1)) +
-  patchwork::plot_annotation(tag_levels = "A") &
-  theme(plot.tag = element_text(size = 11, face = "bold"))
-
-p_fig1
-ggsave(p_fig1, file = paste0(results_dir, "/Fig1_tsne.png"), width = 12, height = 5, dpi = 600)
-```
-
-`r paste0("**Figure 1. Clusters of all cells and their library composition.** **(A)** tSNE of the ", format(nrow(cell_meta), big.mark = ","), " cells from four libraries: two undifferentiated larvae and one female and one male transformer. The tSNE is computed on the fastMNN-corrected space of the four libraries. Cells are colored by cell type, and each number marks the median position of its cluster's cells. The legend gives the number of cells of each type. Clusters are Louvain communities of a shared nearest neighbor graph (k = 30) built on the corrected space. Cluster 12 is split into a transformer half (12T) and a larval half (12L). Its larval and transformer cells did not match each other by marker gene overlap in either direction. **(B)** The percentage of each cluster's cells from each library. Clusters are in the order of the legend in A.")`
 
 ### Fig.9 Chr 81 genes 
 

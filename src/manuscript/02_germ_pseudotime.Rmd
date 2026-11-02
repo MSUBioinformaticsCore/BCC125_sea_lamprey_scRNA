@@ -1,0 +1,1862 @@
+---
+title: "02_germ_pseudotime"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+---
+
+```{r setup, include=FALSE}
+# html_document renders inline figures at knitr's 72 dpi doubled by
+# fig.retina, so 144, while every ggsave here writes at 300. Rendering inline
+# at 300 as well puts the figure in the document at the resolution of the file
+# on disk. fig.retina is set to 1 so the two are not multiplied.
+# Figures are vector by default. A raster figure in html_document is rendered
+# at a fixed pixel size and then scaled to the page, so it is only ever as sharp
+# as that size; svg has no resolution to run out of. The chunks that draw one
+# mark per cell set dev = "png" individually, because an svg of forty thousand
+# tiles is tens of megabytes where the png is a couple of hundred kilobytes.
+# dpi applies to those, and fig.retina is 1 so it is not doubled again.
+# svglite if it is installed, otherwise the grDevices svg device, which needs
+# the cairo capability enabled below
+vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      dev = vec_dev, dpi = 300, fig.retina = 1)
+
+# Compute nodes have no X11, and the default png device asks for it. Cairo
+# renders off screen.
+if (isTRUE(capabilities("cairo"))) options(bitmapType = "cairo")
+```
+
+<style>
+/* html_document leaves pandoc's markdown tables unstyled: no padding, no row
+   rules, cells aligned on their last line. Selected as direct children of a
+   section, which a DT widget's table never is, so the interactive tables keep
+   their own styling. */
+div.section > table, div.main-container > table {
+  border-collapse: collapse;
+  margin: 1.1em 0;
+  font-size: 0.93em;
+  line-height: 1.35;
+}
+div.section > table th, div.main-container > table th,
+div.section > table td, div.main-container > table td {
+  vertical-align: top;
+  text-align: left;
+  padding: 7px 16px 7px 0;
+  border-top: 1px solid #e3e3e3;
+}
+div.section > table th, div.main-container > table th {
+  border-top: none;
+  border-bottom: 2px solid #b0b0b0;
+  font-weight: 600;
+}
+div.section > table code, div.main-container > table code {
+  white-space: nowrap;
+  background: none;
+  padding: 0;
+  color: #333;
+}
+</style>
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+```
+
+```{r}
+library(tidyverse)
+library(SingleCellExperiment)
+library(scater)
+library(scran)
+library(batchelor)
+library(BiocSingular)
+library(TSCAN)
+library(patchwork)
+library(DT)
+library(ggraph)
+library(tidygraph)
+library(ggrepel)
+source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+```
+
+TSCAN pseudotime for the germ cells, male and female together, with **every**
+cluster subclustered finely before anything is removed.
+
+The tree TSCAN fits is a minimum spanning tree over one centroid per node, so
+the number of nodes is the number of points the trajectory is fitted to. Using
+the atlas clusters as nodes gives it around a dozen, of which four are whole
+clusters holding thousands of cells each. A tree on twelve points is coarse and
+moves whenever a node moves.
+
+This document treats nodes as waypoints rather than cell types. Every cluster is
+cut into small subclusters at a fixed `sub_k`, which gives the tree many more
+points to follow. Nothing here needs a node to be interpretable, so nothing here
+depends on the subclustering being stable or on any node carrying a label.
+
+The collaborators' annotation is carried **per cell**, by barcode, from the
+earlier coarse-node trajectory, where it was assigned to whole nodes. It is
+never attached to a node here. Re-clustering therefore cannot break it, and the
+interpretation is read off the composition of the trajectory rather than off
+node names.
+
+The settings below are the ones the manuscript uses. They are fixed here rather
+than passed as knit parameters, so the document reproduces one analysis.
+
+```{r}
+results_date      = "20260813"
+# the germ cell clusters of the atlas: 5 is PGCs, oogonia and oocytes, and 15 to
+# 18 are spermatogonia and spermatocytes
+clusters          = c("5", "15", "16", "17", "18")
+# a library contributing fewer germ cells than this is left out of the merge
+min_library_cells = 50
+# neighbors in each cluster's SNN graph; smaller gives more, smaller nodes
+sub_k             = 10
+# a subcluster below this many cells is merged into its nearest neighbor
+min_node_cells    = 30
+# cells drawn per node, with replacement, in each of edge_boot resampled trees
+edge_boot         = 100
+edge_boot_cells   = 100
+# the root is the node with the highest mean expression of this set
+root_set          = "Primordial germ cells"
+# a root detected in fewer than this percentage of its cells is flagged as weak
+min_detect_pct    = 5
+# the node removed on the evidence of removal_evidence_sets, under Removal
+drop_nodes        = "5.1"
+removal_evidence_sets = "Dissociation response"
+# the germ sets drawn on the tree
+graph_sets        = c("Primordial germ cells", "Migrating germ cells",
+                      "Spermatocytes", "Oocyte")
+marker_file       = "canonical_markers_S1_only_2026-08-14.csv"
+extra_marker_file = c("neural_crest_markers_2026-09-25.csv",
+                      "immediate_early_markers_2026-10-06.csv")
+# per-cell nodes of the earlier coarse-node trajectory, and the collaborators'
+# names for those nodes, which become the per-cell annotation
+prev_nodes_file   = paste0(params$project_dir, "/results/", results_date,
+                           "_pseudotime_tscan_all/pseudotime_per_cell_annotated.csv")
+node_annotation   = c("5.1" = "Migrating neural crest cells",
+                      "5.2" = "Oogonia",
+                      "5.3" = "Oocytes",
+                      "5.4" = "Migrating female germ cells (FGC I)",
+                      "5.5" = "Granulosa",
+                      "5.6" = "Migrating female germ cells (FGC II)",
+                      "5.7" = "Primordial germ cells (PGCs)",
+                      "5.8" = "Migrating PGCs",
+                      "15"  = "Spermatogonia",
+                      "16"  = "Spermatocytes I",
+                      "17"  = "Spermatocytes II",
+                      "18"  = "Spermatocytes III")
+lfc_thresh        = 1
+fdr_cut           = 0.01
+go_pval           = 0.05
+genome_dir        = "/mnt/research/bioinformaticsCore/shared/Genomes/Petromyzon_marinus"
+```
+
+```{r}
+object_dir      = paste0(params$project_dir, "/results/", results_date,
+                         "_no_doublets")
+atlas_dir       = paste0(params$project_dir, "/results/", results_date,
+                         "_atlas")
+results_dir     = paste0(params$project_dir, "/results/", results_date,
+                         "_germ_pseudotime_manuscript")
+Robject_out_dir = paste0(results_dir, "/Robjects")
+if (!dir.exists(Robject_out_dir)) dir.create(Robject_out_dir, recursive = TRUE)
+
+label_file = paste0(atlas_dir, "/cell_cluster_labels.csv")
+if (!file.exists(label_file))
+  stop("missing ", label_file, ". Run 01_atlas.Rmd first.")
+
+cell_labels      = read.csv(label_file, stringsAsFactors = FALSE)
+all.sce          = readRDS(paste0(object_dir, "/all.sce.Rds"))
+gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE) %>%
+  dplyr::distinct(Gene, .keep_all = TRUE)
+
+lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
+             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+
+```
+
+```{r}
+# Read here rather than at the point of use, because the checks on the annotated
+# run's nodes happen before the corrected space exists.
+tech       = technical_gene_ids(gene_description)
+mito_ids   = tech$mito
+rrna_ids   = tech$rrna
+ribo_ids   = tech$ribo
+tech_genes = tech$all
+
+# The pipeline computed subsets_Mito_percent before the cells were filtered on
+# it, so that is the number the filtering was applied to and the one to report.
+# Recomputing it here from the annotation would be a second, unvalidated
+# definition of the same quantity.
+mito_src = try(dplyr::bind_rows(lapply(all.sce, function(x) {
+  cd = as.data.frame(colData(x))
+  if (!"subsets_Mito_percent" %in% colnames(cd)) return(NULL)
+  data.frame(barcode = colnames(x), pct_mito = cd$subsets_Mito_percent,
+             stringsAsFactors = FALSE)
+})), silent = TRUE)
+
+have_mito_src = !inherits(mito_src, "try-error") && is.data.frame(mito_src) &&
+                nrow(mito_src) > 0
+```
+
+`r paste0(format(length(mito_ids), big.mark = ","), " mitochondrially encoded genes, ", length(rrna_ids), " cytoplasmic rRNA genes and ", format(length(ribo_ids), big.mark = ","), " ribosomal proteins are identified from the annotation. ", if (have_mito_src) "Percent mitochondrial is taken from subsets_Mito_percent in the per-library objects, which is the quantity the cells were filtered on upstream." else "**subsets_Mito_percent was not found in the per-library objects**, so percent mitochondrial is recomputed here from the annotation and may not match the filter applied upstream.", " Cytoplasmic 28S and 18S rRNA are counted separately, because they are not mitochondrial and are abundant enough to distort that fraction if folded into it.")`
+
+```{r}
+# Every set, not only the germ ones: a node scoring on a somatic set is the
+# thing the fine cuts are most likely to turn up.
+s1_sets = read.csv(paste0(params$project_dir, "/data/", marker_file),
+                   stringsAsFactors = FALSE) %>%
+  dplyr::mutate(loc_id = trimws(loc_id), origin = "S1 sheet")
+
+# sets that did not come from the S1 sheet
+extra_path = paste0(params$project_dir, "/data/", extra_marker_file)
+stopifnot(all(file.exists(extra_path)))
+
+all_sets = dplyr::bind_rows(s1_sets,
+                            dplyr::bind_rows(lapply(extra_path, function(p)
+                              read.csv(p, stringsAsFactors = FALSE) %>%
+                                dplyr::mutate(loc_id = trimws(loc_id),
+                                              origin = "extra"))))
+
+# The sets that justify a removal are drawn on their own under Removal, so they
+# are left out of the all-sets plot rather than drawn twice.
+ev_sets = intersect(removal_evidence_sets, unique(all_sets$CellTypeMarkerSet))
+
+set_origin = all_sets %>%
+  dplyr::distinct(CellTypeMarkerSet, origin) %>%
+  dplyr::group_by(CellTypeMarkerSet) %>%
+  dplyr::summarise(origin = paste(sort(unique(origin)), collapse = ", "),
+                   .groups = "drop")
+
+# A set whose genes all sit inside another set is not a separate measurement.
+# Scoring high on it says nothing about it that the larger set does not already
+# say. The one-gene sets are where this bites.
+set_genes = lapply(split(all_sets$loc_id, all_sets$CellTypeMarkerSet), unique)
+set_containment = dplyr::bind_rows(lapply(names(set_genes), function(a)
+  dplyr::bind_rows(lapply(setdiff(names(set_genes), a), function(b)
+    if (length(set_genes[[a]]) > 0 && all(set_genes[[a]] %in% set_genes[[b]]))
+      data.frame(set = a, contained_in = b, n_genes = length(set_genes[[a]]),
+                 genes = paste(sort(set_genes[[a]]), collapse = ", "),
+                 stringsAsFactors = FALSE)
+    else NULL))))
+
+# carried onto every set-score table, so a contained set is flagged where it is
+# read rather than in a note further up the page
+set_flag = if (nrow(set_containment) > 0) {
+  set_containment %>%
+    dplyr::group_by(set) %>%
+    dplyr::summarise(contained_in = paste(sort(contained_in), collapse = ", "),
+                     .groups = "drop")
+} else data.frame(set = character(0), contained_in = character(0),
+                  stringsAsFactors = FALSE)
+
+# one row per marker gene per group, for the bubble plots. A gene belonging to
+# two sets appears once per set, so the rows line up with sets_df positionally.
+marker_bubble_df = function(lc, groups, sets_df) {
+  present = sets_df %>%
+    dplyr::distinct(CellTypeMarkerSet, loc_id, symbol) %>%
+    dplyr::filter(loc_id %in% rownames(lc))
+  groups  = as.character(groups)
+  dplyr::bind_rows(lapply(unique(groups), function(gr) {
+    m = as.matrix(lc[present$loc_id, groups == gr, drop = FALSE])
+    data.frame(group          = gr,
+               set            = present$CellTypeMarkerSet,
+               gene           = present$loc_id,
+               symbol         = present$symbol,
+               n_cells        = sum(groups == gr),
+               pct_expressing = 100 * rowMeans(m > 0),
+               mean_logexpr   = rowMeans(m),
+               stringsAsFactors = FALSE)
+  }))
+}
+
+marker_bubble_plot = function(df, group_levels, title, subtitle = NULL) {
+  df = df %>%
+    dplyr::mutate(group = factor(group, levels = group_levels),
+                  label = ifelse(is.na(symbol) | !nzchar(symbol), gene, symbol))
+  ggplot(df, aes(x = group, y = label,
+                 size = pct_expressing, colour = mean_logexpr)) +
+    geom_point() +
+    # inferno, as on the tree; viridis is pseudotime. Stopped short of the near
+    # white top so the highest values stay visible.
+    scale_colour_viridis_c(option = "inferno", end = .9) +
+    scale_size_continuous(range = c(0.4, 5)) +
+    facet_grid(set ~ ., scales = "free_y", space = "free_y") +
+    theme_bw() +
+    theme(strip.text.y     = element_text(angle = 0, size = 6),
+          axis.text.y      = element_text(size = 6),
+          axis.text.x      = element_text(size = 8, angle = 45, hjust = 1),
+          panel.grid.major = element_line(linewidth = .2)) +
+    labs(x = NULL, y = NULL, title = title, subtitle = subtitle,
+         size = "% expressing", colour = "mean log expression")
+}
+```
+
+```{r}
+gaf_file      = file.path(genome_dir,
+                          "GCF_010993605.1_kPetMar1.pri_gene_ontology.gaf")
+go_names_file = file.path(genome_dir, "GOs_names.txt")
+stopifnot(file.exists(gaf_file), file.exists(go_names_file))
+```
+
+```{r}
+gaf = read.delim(gaf_file, header = FALSE, comment = "!") %>%
+  dplyr::filter(!grepl("NOT", V4)) %>%
+  dplyr::select(V3, V5) %>%
+  dplyr::rename(GOID = "V5", Gene = "V3") %>%
+  dplyr::distinct()
+
+# terms too small are noise, terms too large are uninformative
+keep_go = gaf %>%
+  dplyr::count(GOID) %>%
+  dplyr::filter(n > 10, n < 200) %>%
+  dplyr::pull(GOID)
+gaf = gaf %>% dplyr::filter(GOID %in% keep_go)
+
+go_names = read.delim(go_names_file, header = FALSE)
+colnames(go_names) = c("GOID", "GOName")
+```
+
+
+# Cells
+
+```{r}
+absent = setdiff(clusters, cell_labels$final_label)
+if (length(absent) > 0)
+  stop("cluster(s) ", paste(absent, collapse = ", "), " are not in ", label_file,
+       ". Labels present: ",
+       paste(sort(unique(cell_labels$final_label)), collapse = ", "))
+
+lineage_key = cell_labels %>% dplyr::filter(final_label %in% clusters)
+
+# the annotation, per cell, by barcode
+stopifnot(file.exists(prev_nodes_file))
+prev = read.csv(prev_nodes_file, stringsAsFactors = FALSE)
+stopifnot(all(c("barcode", "node") %in% colnames(prev)))
+old = prev$node[match(lineage_key$barcode, prev$barcode)]
+cell_anno = unname(node_annotation[as.character(old)])
+cell_anno[is.na(cell_anno) & !is.na(old)] = as.character(old)[is.na(cell_anno) & !is.na(old)]
+lineage_key$annotation = ifelse(is.na(cell_anno), "unannotated", cell_anno)
+
+
+comp_tab = lineage_key %>%
+  dplyr::count(final_label, annotation, name = "n") %>%
+  tidyr::pivot_wider(names_from = annotation, values_from = n, values_fill = 0)
+
+write.csv(comp_tab, file = paste0(results_dir, "/cluster_by_annotation.csv"),
+          row.names = FALSE)
+
+datatable(comp_tab, rownames = FALSE, options = list(dom = "t", scrollX = TRUE))
+```
+
+`r paste0(format(nrow(lineage_key), big.mark = ","), " cells from cluster(s) ", paste(clusters, collapse = ", "), ". Nothing is removed here: the subclustering runs on every cell, and whatever is removed is removed afterwards, on the strength of what the nodes turn out to express. ", format(sum(lineage_key$annotation != "unannotated"), big.mark = ","), " carry an annotation from ", basename(prev_nodes_file), ".")`
+
+```{r}
+obj_file     = paste0(Robject_out_dir, "/lineage_objects.Rds")
+obj_sig_file = paste0(Robject_out_dir, "/lineage_objects_signature.txt")
+obj_sig      = paste("all", paste(sort(clusters), collapse = ","),
+                     nrow(lineage_key), min_library_cells, sep = "|")
+
+if (file.exists(obj_file) && file.exists(obj_sig_file) &&
+    identical(readLines(obj_sig_file, warn = FALSE)[1], obj_sig)) {
+  objs = readRDS(obj_file)
+} else {
+  objs = build_lineage_sce(all.sce, lineage_key$barcode,
+                           min_library_cells = min_library_cells)
+  saveRDS(objs, file = obj_file)
+  writeLines(obj_sig, obj_sig_file)
+}
+
+merged   = objs$corrected
+combined = objs$combined
+
+key_idx = match(colnames(merged), lineage_key$barcode)
+stopifnot(!anyNA(key_idx))
+merged$library     = lineage_key$library[key_idx]
+merged$stage       = lineage_key$stage[key_idx]
+merged$final_label = lineage_key$final_label[key_idx]
+merged$annotation  = lineage_key$annotation[key_idx]
+
+lib_tab = data.frame(batch   = names(objs$n_by_library),
+                     n_cells = as.integer(objs$n_by_library),
+                     kept    = names(objs$n_by_library) %in% objs$kept_batches,
+                     stringsAsFactors = FALSE) %>%
+  dplyr::left_join(dplyr::distinct(cell_labels, batch, library), by = "batch")
+
+datatable(lib_tab, rownames = FALSE, options = list(dom = "t"))
+```
+
+`r paste0(format(ncol(merged), big.mark = ","), " cells from ", length(objs$kept_batches), " librar", if (length(objs$kept_batches) == 1) "y" else "ies", " are kept.")`
+
+
+# Fine nodes
+
+Every cluster is subclustered in the shared corrected space, using only that
+cluster's cells, at a fixed `sub_k`. A smaller `sub_k` gives more and smaller
+subclusters. There is no stability sweep, because nothing downstream asks a node
+to be a reproducible cell type.
+
+Subclusters below `min_node_cells` are merged into the nearest subcluster of the
+same parent cluster, by centroid distance. A node of five cells gives a centroid
+that is mostly noise, and the tree is fitted on centroids.
+
+```{r}
+set.seed(1)
+sub_of = rep(NA_character_, ncol(merged))
+names(sub_of) = colnames(merged)
+
+for (cl in clusters) {
+  cl_cells = colnames(merged)[merged$final_label == cl]
+  if (length(cl_cells) < 2 * min_node_cells) {
+    sub_of[cl_cells] = paste0(cl, ".1")
+    next
+  }
+  set.seed(1)
+  snn = buildSNNGraph(merged[, cl_cells], k = sub_k,
+                      use.dimred = "corrected")
+  mem = igraph::cluster_louvain(snn)$membership
+  names(mem) = cl_cells
+
+  # merge anything too small into the nearest surviving subcluster
+  co = reducedDim(merged, "corrected")[cl_cells, , drop = FALSE]
+  repeat {
+    tab   = table(mem)
+    small = names(tab)[tab < min_node_cells]
+    if (length(small) == 0 || length(tab) <= 1) break
+    cent = do.call(rbind, lapply(names(tab), function(g)
+      colMeans(co[mem == g, , drop = FALSE])))
+    rownames(cent) = names(tab)
+    d = as.matrix(dist(cent))
+    diag(d) = Inf
+    s = small[which.min(tab[small])]
+    mem[mem == s] = names(tab)[which.min(d[s, ])]
+  }
+  sub_of[cl_cells] = paste0(cl, ".", match(mem, sort(unique(mem))))
+}
+
+stopifnot(!anyNA(sub_of))
+
+node_levels = unique(sub_of)
+node_levels = node_levels[order(match(sub(
+  "\\..*$", "", node_levels), clusters),
+  as.integer(sub("^.*\\.", "", node_levels)))]
+merged$node   = factor(sub_of, levels = node_levels)
+combined$node = merged$node
+
+node_tab = as.data.frame(colData(merged)) %>%
+  dplyr::count(node, final_label, name = "n_cells") %>%
+  dplyr::arrange(node)
+
+write.csv(node_tab, file = paste0(results_dir, "/node_composition.csv"),
+          row.names = FALSE)
+
+datatable(node_tab, rownames = FALSE, options = list(pageLength = 15))
+```
+
+`r paste0(length(node_levels), " nodes from ", length(clusters), " clusters, at sub_k = ", sub_k, ", with a floor of ", min_node_cells, " cells. Median node size ", round(median(as.integer(table(merged$node)))), " cells, smallest ", min(as.integer(table(merged$node))), ", largest ", max(as.integer(table(merged$node))), ". ", if (length(node_levels) < 2) "**Fewer than two nodes, so no tree can be built.**" else "")`
+
+```{r}
+per_cluster = node_tab %>%
+  dplyr::count(final_label, name = "n_nodes") %>%
+  dplyr::arrange(match(final_label, clusters))
+datatable(per_cluster, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## What the nodes are made of
+
+Nodes are not cell types, so the question is not what each one is but how the
+annotation is distributed over them. A node drawn from one annotation is a
+waypoint inside that population. A node mixing several is a waypoint on a
+boundary, which is expected wherever the biology is continuous.
+
+```{r, fig.width=12, fig.height=5}
+anno_by_node = as.data.frame(colData(merged)) %>%
+  dplyr::count(node, annotation, name = "n") %>%
+  dplyr::group_by(node) %>%
+  dplyr::mutate(frac = n / sum(n)) %>%
+  dplyr::ungroup()
+
+write.csv(anno_by_node, file = paste0(results_dir, "/node_by_annotation.csv"),
+          row.names = FALSE)
+
+p_anno = ggplot(anno_by_node, aes(x = node, y = frac, fill = annotation)) +
+  geom_col() +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5, size = 7),
+        legend.text = element_text(size = 7)) +
+  labs(x = NULL, y = "fraction of the node", fill = NULL,
+       title = "Annotation composition of each node")
+
+p_anno
+ggsave(p_anno, file = paste0(results_dir, "/node_by_annotation.png"),
+       width = 12, height = 5, dpi = 300)
+```
+
+## Depth and technical content
+
+Nodes that differ by sequencing depth rather than by cell state show a
+characteristic pattern. The shallower node's markers are the abundant genes of
+the deeper one at lower magnitude, and housekeeping genes climb its marker list.
+Cutting every cluster finely makes this more likely, not less, so it is measured
+directly here.
+
+```{r}
+cnt = counts(combined)
+tot = Matrix::colSums(cnt)
+
+# built once, with everything the later sections need: the node for this
+# section, the library and pseudotime for What else the ordering tracks
+qc = data.frame(
+  barcode   = colnames(combined),
+  node      = as.character(merged$node),
+  library   = as.character(merged$library),
+  total     = as.numeric(tot),
+  detected  = as.numeric(Matrix::colSums(cnt > 0)),
+  pct_rrna  = 100 * as.numeric(Matrix::colSums(
+                cnt[intersect(rrna_ids, rownames(cnt)), , drop = FALSE])) / tot,
+  pct_ribo  = 100 * as.numeric(Matrix::colSums(
+                cnt[intersect(ribo_ids, rownames(cnt)), , drop = FALSE])) / tot,
+  stringsAsFactors = FALSE)
+
+qc = if (have_mito_src) {
+  qc %>% dplyr::left_join(mito_src, by = "barcode")
+} else qc %>% dplyr::mutate(
+  pct_mito = 100 * as.numeric(Matrix::colSums(
+               cnt[intersect(mito_ids, rownames(cnt)), , drop = FALSE])) / tot)
+
+qc_tab = qc %>%
+  dplyr::group_by(node) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   median_total    = round(median(total)),
+                   median_detected = round(median(detected)),
+                   median_pct_mito = round(median(pct_mito), 1),
+                   median_pct_rrna = round(median(pct_rrna), 1),
+                   median_pct_ribo = round(median(pct_ribo), 1),
+                   .groups = "drop") %>%
+  dplyr::mutate(node = factor(node, levels = node_levels)) %>%
+  dplyr::arrange(node)
+
+write.csv(qc_tab, file = paste0(results_dir, "/node_depth_and_technical.csv"),
+          row.names = FALSE)
+
+datatable(qc_tab, rownames = FALSE, filter = "top",
+          options = list(pageLength = 15, scrollX = TRUE))
+```
+
+```{r, fig.width=11, fig.height=11, dev = "png", dpi = 600}
+qc_long = qc %>%
+  dplyr::mutate(node = factor(node, levels = node_levels)) %>%
+  tidyr::pivot_longer(c(total, detected, pct_mito, pct_rrna, pct_ribo),
+                      names_to = "measure", values_to = "value") %>%
+  dplyr::mutate(measure = factor(measure,
+                  levels = c("total", "detected", "pct_mito", "pct_rrna",
+                             "pct_ribo"),
+                  labels = c("total counts", "genes detected",
+                             "percent mitochondrial", "percent 28S/18S rRNA",
+                             "percent ribosomal protein")))
+
+p_qc = ggplot(qc_long, aes(x = node, y = value)) +
+  geom_violin(scale = "width", fill = "grey90", colour = NA) +
+  geom_boxplot(width = .18, outlier.size = .2) +
+  facet_wrap(~ measure, scales = "free_y", ncol = 2) +
+  scale_y_continuous(trans = "log1p") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5)) +
+  labs(x = NULL, y = NULL, title = "Depth and technical content by node",
+       subtitle = "log1p scale")
+
+p_qc
+ggsave(p_qc, file = paste0(results_dir, "/node_depth_and_technical.png"),
+       width = 11, height = 11, dpi = 300)
+```
+
+```{r}
+# Does node membership track depth within a cluster? Every cluster is cut here,
+# so the test runs on all of them: Kruskal-Wallis across the subclusters of one
+# cluster, plus how far apart the extreme nodes sit in median depth.
+depth_tests = dplyr::bind_rows(lapply(clusters, function(cl) {
+  sub = qc %>% dplyr::filter(grepl(paste0("^", cl, "\\."), node))
+  if (dplyr::n_distinct(sub$node) < 2) return(NULL)
+  med = sub %>% dplyr::group_by(node) %>%
+    dplyr::summarise(m = median(total), .groups = "drop")
+  dplyr::bind_rows(lapply(c("total", "detected", "pct_mito", "pct_rrna",
+                            "pct_ribo"), function(v) {
+    kt = kruskal.test(sub[[v]] ~ factor(sub$node))
+    data.frame(cluster = cl, measure = v,
+               kruskal_p  = signif(kt$p.value, 3),
+               fold_range = signif(max(med$m) / min(med$m), 3),
+               stringsAsFactors = FALSE)
+  }))
+}))
+
+if (!is.null(depth_tests) && nrow(depth_tests) > 0) {
+  depth_tests$fold_range[depth_tests$measure != "total"] = NA
+  write.csv(depth_tests, file = paste0(results_dir, "/node_depth_tests.csv"),
+            row.names = FALSE)
+  datatable(depth_tests, rownames = FALSE,
+            options = list(pageLength = 15, scrollX = TRUE))
+}
+```
+
+`r if (is.null(depth_tests) || nrow(depth_tests) == 0) "" else { tt = depth_tests %>% dplyr::filter(measure == "total"); paste0("Median total counts across the subclusters of cluster ", paste(tt$cluster, collapse = ", "), " differ by a factor of ", paste(tt$fold_range, collapse = ", "), " between the deepest and shallowest node (Kruskal-Wallis p ", paste(tt$kruskal_p, collapse = ", "), "). A large factor is the signature of a depth split. It does not prove one, because a real cell state can also carry more RNA.") }`
+
+## Node identity
+
+Every node is scored against **all** the marker sets available, somatic ones
+included, rather than only the germ sets the root rule uses. Every cell is still
+here: nothing has been removed at this point, and this table is what any removal
+below is decided on. A node scoring high on a somatic set and low on every germ
+set is not a germ cell state.
+
+The sets named by `removal_evidence_sets` are left out of the figure and drawn
+on their own under Removal. They are still in the table and in
+`node_identity_scores.csv`.
+
+```{r}
+if (nrow(set_containment) > 0)
+  datatable(set_containment, rownames = FALSE,
+            options = list(dom = "t", paging = FALSE))
+```
+
+`r if (nrow(set_containment) > 0) paste0("**", nrow(set_containment), " marker set(s) sit entirely inside another set.** A node scoring high on one of these is also scoring high on the set that contains it. The two cannot be read as separate evidence. Judge these from the per-gene plot rather than the set score.") else "No marker set sits entirely inside another. Each set score is its own measurement."`
+
+```{r}
+id_genes = all_sets %>%
+  dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id) %>%
+  dplyr::filter(gene %in% rownames(combined)) %>%
+  dplyr::distinct()
+
+id_scores = score_marker_sets(combined, merged$node, id_genes) %>%
+  dplyr::rename(node = group)
+
+id_table = id_scores %>%
+  dplyr::left_join(set_origin, by = c("set" = "CellTypeMarkerSet")) %>%
+  dplyr::left_join(set_flag, by = "set") %>%
+  dplyr::mutate(node = factor(node, levels = node_levels),
+                contained_in = tidyr::replace_na(contained_in, ""),
+                mean_logexpr = signif(mean_logexpr, 3),
+                pct_detected = round(pct_detected, 1)) %>%
+  dplyr::arrange(node, dplyr::desc(mean_logexpr)) %>%
+  dplyr::select(node, set, origin, contained_in, n_genes, n_cells,
+                mean_logexpr, pct_detected)
+
+write.csv(id_table, file = paste0(results_dir, "/node_identity_scores.csv"),
+          row.names = FALSE)
+
+# one row per gene per set, so the height follows the gene count. Fixed, the
+# facets compress as sets are added.
+id_rows = nrow(dplyr::distinct(
+  all_sets %>% dplyr::filter(!CellTypeMarkerSet %in% ev_sets),
+  CellTypeMarkerSet, loc_id))
+id_h    = max(9, round(0.17 * id_rows + 3))
+
+datatable(id_table, rownames = FALSE, filter = "top",
+          options = list(pageLength = 20, scrollX = TRUE))
+```
+
+```{r, fig.width=11, fig.height=if (exists("id_h")) id_h else 13}
+id_bubble = marker_bubble_df(logcounts(combined), merged$node, all_sets)
+write.csv(id_bubble, file = paste0(results_dir, "/node_marker_expression.csv"),
+          row.names = FALSE)
+
+p_identity = marker_bubble_plot(
+  id_bubble %>% dplyr::filter(!set %in% ev_sets), node_levels,
+  title = "Marker expression by node, every set")
+
+p_identity
+ggsave(p_identity, file = paste0(results_dir, "/node_identity_scores.png"),
+       width = 11, height = id_h, dpi = 300)
+```
+
+# Removal
+
+Every node above was defined on every cell, with nothing taken out, and scored
+against every marker set. A node is removed here only on the strength of what it
+turned out to express. Removing on the strength of the label it was given would
+make the trajectory unable to say anything about that label.
+
+The set drawn below is Dissociation response, which holds the AP-1 and
+immediate-early genes that enzymatic digestion induces. A node carrying them is
+defined by how the tissue was handled rather than by the animal. Node
+`r drop_nodes` is removed on the strength of this figure.
+
+```{r}
+absent = setdiff(drop_nodes, node_levels)
+if (length(absent) > 0)
+  stop("node(s) to drop do not exist: ", paste(absent, collapse = ", "),
+       ". Nodes: ", paste(node_levels, collapse = ", "))
+
+# the nodes being removed first on the axis, so the comparison is immediate
+ev_levels = c(drop_nodes, setdiff(node_levels, drop_nodes))
+
+ev_rows = nrow(dplyr::distinct(
+  all_sets %>% dplyr::filter(CellTypeMarkerSet %in% ev_sets),
+  CellTypeMarkerSet, loc_id))
+ev_h = max(5, round(0.19 * ev_rows + 2))
+```
+
+```{r, fig.width=9, fig.height=if (exists("ev_h")) ev_h else 7}
+p_ev = marker_bubble_plot(
+  id_bubble %>% dplyr::filter(set %in% ev_sets), ev_levels,
+  title    = paste(ev_sets, collapse = ", "),
+  subtitle = paste0("removed: ", paste(drop_nodes, collapse = ", ")))
+p_ev
+ggsave(p_ev, file = paste0(results_dir, "/removal_evidence_bubble.png"),
+       width = 9, height = ev_h, dpi = 300)
+```
+
+`r { es = id_table %>% dplyr::filter(set %in% ev_sets) %>% dplyr::arrange(dplyr::desc(mean_logexpr)); paste0("The highest scoring node on ", es$set[1], " is ", es$node[1], " at ", signif(es$mean_logexpr[1], 3), ", detected in ", round(es$pct_detected[1], 1), " percent of its cells, against ", signif(es$mean_logexpr[2], 3), " for the next node. The per-node values are in node_identity_scores.csv.") }`
+
+```{r}
+drop_tab = data.frame(node = drop_nodes, stringsAsFactors = FALSE) %>%
+  dplyr::left_join(as.data.frame(table(node = as.character(merged$node)),
+                                 stringsAsFactors = FALSE) %>%
+                     dplyr::rename(cells = Freq), by = "node")
+
+# The space and the node definitions are kept as they are. Rebuilding them
+# without these cells would change every node, which is the thing this
+# ordering was meant to avoid.
+keep = !(as.character(merged$node) %in% drop_nodes)
+merged   = merged[, keep]
+combined = combined[, keep]
+merged$node = droplevels(factor(as.character(merged$node),
+                                levels = node_levels))
+node_levels = levels(merged$node)
+qc = qc %>% dplyr::filter(barcode %in% colnames(merged))
+
+datatable(drop_tab, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r paste0(format(sum(drop_tab$cells), big.mark = ","), " cells in ", nrow(drop_tab), " node(s) are removed. ", length(node_levels), " nodes and ", format(ncol(merged), big.mark = ","), " cells go forward. The space and the node boundaries are the ones fitted above, so the nodes that remain are unchanged by the removal.")`
+
+# Root
+
+Every node is scored on the germ cell marker sets. The root is the node with the
+highest mean expression of the `r root_set` set. This does not consult the
+annotation, so the root does not depend on any label being right.
+
+```{r}
+germ_sets = c("Primordial germ cells", "Migrating germ cells",
+              "Spermatogonial stem cells", "Spermatocytes", "Oocyte")
+
+set_genes = read.csv(paste0(params$project_dir, "/data/", marker_file),
+                     stringsAsFactors = FALSE) %>%
+  dplyr::mutate(loc_id = trimws(loc_id)) %>%
+  dplyr::filter(CellTypeMarkerSet %in% germ_sets) %>%
+  dplyr::transmute(set = CellTypeMarkerSet, gene = loc_id)
+
+set_scores = score_marker_sets(combined, merged$node, set_genes) %>%
+  dplyr::rename(node = group)
+
+# one row per node, two columns per set, which reads better than the long form
+set_table = set_scores %>%
+  dplyr::mutate(set          = factor(set, levels = germ_sets),
+                node         = factor(node, levels = node_levels),
+                mean_logexpr = signif(mean_logexpr, 3),
+                pct_detected = round(pct_detected, 1)) %>%
+  dplyr::arrange(set, node) %>%
+  tidyr::pivot_wider(id_cols = c(node, n_cells), names_from = set,
+                     values_from = c(mean_logexpr, pct_detected),
+                     names_glue = "{set}: {.value}") %>%
+  dplyr::arrange(node)
+
+write.csv(set_table, file = paste0(results_dir, "/node_marker_set_scores.csv"),
+          row.names = FALSE)
+
+datatable(set_table, rownames = FALSE, filter = "top",
+          options = list(pageLength = 15, scrollX = TRUE))
+
+cand = set_scores %>% dplyr::filter(set == root_set, !is.na(mean_logexpr))
+stopifnot(nrow(cand) > 0)
+pick      = which.max(cand$mean_logexpr)
+root      = as.character(cand$node[pick])
+root_pct  = cand$pct_detected[pick]
+weak_root = root_pct < min_detect_pct
+```
+
+`r paste0("Rooted at **", root, "**, the node with the highest mean expression of the ", root_set, " set, detected in ", round(root_pct, 1), " percent of its cells.", if (weak_root) paste0(" **That is below ", min_detect_pct, " percent, so the root rests on weak evidence.**") else "", " The root is an assumption. Rooting elsewhere gives a different ordering.")`
+
+# Node markers
+
+Markers for each trajectory node from `findMarkers` on uncorrected log counts,
+comparing each node with every other germ cell node (`direction = "up"`,
+`pval.type = "some"`). Library is not blocked: a node drawn mostly from one
+library has no within-library comparison, so its markers include library
+differences. Genes are kept at FDR < 0.01 with a mean log fold change of at
+least `r lfc_thresh`, and written to `node_marker_genes.csv`.
+
+Cutting every cluster finely leaves each node few cells and many neighbors that
+resemble it, so fewer genes survive here than when whole clusters are compared.
+
+```{r}
+# mean over every pairwise logFC; summary.logFC under pval.type = "some" comes
+# from whichever comparison supplied the p-value, so it is not a fixed contrast
+marker_effect = function(df) {
+  lf = grep("^logFC\\.", colnames(df), value = TRUE)
+  if (length(lf) == 0) return(rep(NA_real_, nrow(df)))
+  rowMeans(as.matrix(as.data.frame(df[, lf, drop = FALSE])), na.rm = TRUE)
+}
+
+mk_file         = paste0(Robject_out_dir, "/node_markers.Rds")
+mk_sig_file     = paste0(Robject_out_dir, "/node_markers_signature.txt")
+marker_sig      = paste(obj_sig, paste(node_levels, collapse = ","),
+                        paste(as.integer(table(merged$node)), collapse = ","),
+                        sep = "|")
+
+if (file.exists(mk_file) && file.exists(mk_sig_file) &&
+    identical(readLines(mk_sig_file, warn = FALSE)[1], marker_sig)) {
+  sub_markers = readRDS(mk_file)
+} else {
+  sub_markers = findMarkers(combined, combined$node, test.type = "t",
+                            direction = "up", pval.type = "some")
+  saveRDS(sub_markers, file = mk_file)
+  writeLines(marker_sig, mk_sig_file)
+}
+
+sub_marker_tab = purrr::map_dfr(names(sub_markers), function(nd) {
+  df = sub_markers[[nd]]
+  data.frame(node      = nd,
+             Gene      = rownames(df),
+             p.value   = df$p.value,
+             FDR       = df$FDR,
+             meanLogFC = marker_effect(df),
+             stringsAsFactors = FALSE)
+}) %>%
+  dplyr::filter(FDR < 0.01, meanLogFC >= lfc_thresh) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::group_by(node) %>%
+  dplyr::arrange(desc(meanLogFC), FDR, .by_group = TRUE) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(node, Gene, WangGeneID, description, meanLogFC, p.value, FDR)
+
+write.csv(sub_marker_tab, file = paste0(results_dir, "/node_marker_genes.csv"),
+          row.names = FALSE)
+
+marker_counts = data.frame(node = node_levels) %>%
+  dplyr::left_join(sub_marker_tab %>% dplyr::count(node, name = "n_markers"),
+                   by = "node") %>%
+  dplyr::mutate(n_markers = ifelse(is.na(n_markers), 0L, n_markers))
+
+datatable(marker_counts, rownames = FALSE,
+          options = list(pageLength = 15, scrollX = TRUE))
+```
+
+```{r}
+datatable(sub_marker_tab %>%
+            dplyr::mutate(dplyr::across(c(meanLogFC, p.value, FDR),
+                                        ~signif(., 3))),
+          filter = "top", rownames = FALSE,
+          options = list(pageLength = 15, scrollX = TRUE))
+```
+
+## GO enrichment of node markers
+
+GO enrichment of each node's marker genes, against every gene in the data. Terms
+with p < `r go_pval` are shown and written to
+`node_marker_GO_pvalues.csv`.
+
+```{r}
+marker_go = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = sub_marker_tab %>% dplyr::select(Gene, node) %>%
+                       dplyr::distinct(),
+  background_n     = nrow(combined),
+  group2_label     = "node",
+  ngroup2_label    = "nMarkerGenes",
+  overlaps_file    = paste0(results_dir, "/node_marker_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/node_marker_GO_pvalues.csv"),
+  pval_filter      = go_pval)
+
+datatable(marker_go %>% dplyr::mutate(dplyr::across(where(is.numeric),
+                                                    ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+# Trajectory
+
+The distance between two nodes is the Euclidean distance between their
+centroids in the corrected space, which is the TSCAN default (`dist.method =
+"simple"`).
+
+Every node is joined into one tree (`outgroup = FALSE`), so a node that belongs
+nowhere is still grafted on at its nearest neighbor. The edge table below
+reports how each edge compares with the threshold TSCAN's outgroup option would
+have cut at.
+
+```{r}
+pseudo_file     = paste0(Robject_out_dir, "/tscan_pseudo.Rds")
+pseudo_sig_file = paste0(Robject_out_dir, "/tscan_pseudo_signature.txt")
+pseudo_sig      = paste(obj_sig, root, sub_k, min_node_cells, "simple", FALSE,
+                        paste(node_levels, collapse = ","), sep = "|")
+
+if (file.exists(pseudo_file) && file.exists(pseudo_sig_file) &&
+    identical(readLines(pseudo_sig_file, warn = FALSE)[1], pseudo_sig)) {
+  pseudo = readRDS(pseudo_file)
+} else {
+  set.seed(1)
+  pseudo = quickPseudotime(merged,
+                           clusters    = merged$node,
+                           use.dimred  = "corrected",
+                           dist.method = "simple",
+                           outgroup    = FALSE,
+                           start       = root)
+  saveRDS(pseudo, file = pseudo_file)
+  writeLines(pseudo_sig, pseudo_sig_file)
+}
+
+# One column per path, kept so the gene test and the heatmaps can work path by
+# path. The average over a cell's paths is a single number per cell, which the
+# node graph and the technical checks need and the gene test should not use.
+pseudo_mat = pathStat(pseudo$ordering)
+
+merged$pseudotime   = averagePseudotime(pseudo$ordering)
+combined$pseudotime = merged$pseudotime
+n_paths = ncol(pseudo$ordering)
+```
+
+`r paste0(n_paths, " path", if (n_paths == 1) "" else "s", " from the root: ", paste(colnames(pseudo_mat), collapse = ", "), ". ", sum(is.na(merged$pseudotime)), " cells have no pseudotime.")`
+
+```{r, fig.width=12, fig.height=4, dev = "png", dpi = 600}
+pt_df = as.data.frame(colData(merged))
+
+p_box_node = ggplot(pt_df, aes(x = node, y = pseudotime)) +
+  geom_boxplot(outlier.size = .3) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 5)) +
+  xlab("node") + ylab("pseudotime")
+p_box_lib = ggplot(pt_df, aes(x = library, y = pseudotime, fill = library)) +
+  geom_boxplot(outlier.size = .3) +
+  scale_fill_manual(values = lib_cols) +
+  xlab(NULL) + ylab("pseudotime") +
+  theme(legend.position = "none")
+
+p_box_node | p_box_lib
+ggsave(p_box_node | p_box_lib,
+       file = paste0(results_dir, "/pseudotime_by_node.png"),
+       width = 12, height = 4, dpi = 600)
+```
+
+## Edge confidence
+
+An MST always returns a tree. It connects every node whether or not the data
+supports the connection, so the shape on its own says nothing about how much of
+it is real.
+
+Five columns describe each edge from a different direction.
+
+| column | what it is | low | high |
+|---|---|---|---|
+| `length` | distance between the node centroids | nodes sit close together | nodes are far apart |
+| `nn_rank_1`, `nn_rank_2` | each node's place in the other's distance-ordered list | 1 and 1: mutual nearest neighbors | the edge reaches past nearer nodes |
+| `separation` | centroid distance in within-node standard deviations, measured along the line joining them | under 1: one continuous population | two distinguishable groups |
+| `pct_of_cut` | length as a percentage of the outgroup threshold | shorter than the edges around it | over 100: TSCAN's outgroup option would cut it |
+| `frequency` | percentage of subsampled trees holding the edge | another sample would not have drawn it | drawn whatever the sample |
+
+`frequency` comes from drawing `r edge_boot_cells` cells from each node
+`r edge_boot` times, with replacement, recomputing the centroids and rebuilding
+the tree. The count is fixed per node rather than proportional. A node of 5,000
+cells has a centroid so precisely estimated that dropping a fifth of them moves
+it almost not at all, so a proportional subsample returns close to 100 percent
+for every edge including the arbitrary ones. Replacement matters for the small
+nodes: drawn without it, a node holding fewer cells than `edge_boot_cells` is
+taken whole every time and its centroid cannot move. Read it as a stress test
+rather than as a p-value.
+
+A low `separation` is expected between consecutive waypoints on a trajectory.
+It is the reading to question where the two nodes carry annotations for distinct
+cell types. Combined with the ranks it separates cases that look alike on the
+figure.
+
+| `separation` | `nn_rank` | reading |
+|---|---|---|
+| low | 1 and 1 | one continuous population, joined at its closest point |
+| low | high | overlapping nodes, joined the long way round |
+| high | 1 and 1 | two distinct groups with a genuine link between them |
+| high | high | a long edge to a node that sits near nothing |
+
+No column says whether a low `separation` means the annotation is wrong or the
+subclustering was cut too fine. That comes from the marker sets.
+
+```{r}
+edge_key = function(a, b) paste(pmin(a, b), pmax(a, b), sep = " -- ")
+
+edge_tab = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
+  dplyr::rename(node_1 = from, node_2 = to) %>%
+  dplyr::mutate(length = signif(weight, 3),
+                key = edge_key(node_1, node_2))
+
+# The outgroup rule, reported although it is not used. With outgroup = TRUE,
+# createClusterMST puts an artificial node 1.5 times the median edge length away
+# from every real node, and an edge longer than that is beaten by a pair of
+# edges through the outgroup. The median is taken from this tree, which is the
+# reference the package itself uses.
+og_cut = 1.5 * stats::median(edge_tab$length)
+
+# under 100 the edge would survive outgroup splitting, over 100 it would be cut
+edge_tab$pct_of_cut = round(100 * edge_tab$length / og_cut)
+
+# Two reads on each edge that need no threshold, both from the node centroids of
+# the corrected space.
+#
+#   nn_rank_1   where node_2 sits in node_1's list of nodes ordered by distance
+#   nn_rank_2   where node_1 sits in node_2's
+#   separation  centroid distance in standard deviations of the within-node
+#               spread, so 2 means the centroids sit 2 SD apart
+#
+# Both are Euclidean, the distance the tree is built from.
+co_all = reducedDim(merged, "corrected")
+nd_all = as.character(merged$node)
+cnt    = table(nd_all)
+cent   = rowsum(co_all, nd_all)[names(cnt), , drop = FALSE] / as.vector(cnt)
+
+# Within-node spread measured along the line joining the two centroids, which is
+# the only direction the edge is about. Pooling the spread over all dimensions
+# instead inflates this badly in a PC space: variance decays steeply across the
+# dimensions, so an average over all fifty understates the spread along the few
+# that separate the nodes. On simulated PC-like data a true two standard
+# deviation gap reads 11.8 that way and 1.95 this way.
+edge_separation = function(a, b) {
+  ia = which(nd_all == a); ib = which(nd_all == b)
+  if (length(ia) < 2 || length(ib) < 2) return(NA_real_)
+  d = cent[b, ] - cent[a, ]
+  L = sqrt(sum(d^2))
+  if (!is.finite(L) || L == 0) return(NA_real_)
+  u  = d / L
+  va = stats::var(as.vector(co_all[ia, , drop = FALSE] %*% u))
+  vb = stats::var(as.vector(co_all[ib, , drop = FALSE] %*% u))
+  L / sqrt((va + vb) / 2)
+}
+
+node_dist = as.matrix(dist(cent))
+diag(node_dist) = Inf
+node_rank = t(apply(node_dist, 1, rank, ties.method = "min"))
+
+edge_tab$nn_rank_1 = node_rank[cbind(edge_tab$node_1, edge_tab$node_2)]
+edge_tab$nn_rank_2 = node_rank[cbind(edge_tab$node_2, edge_tab$node_1)]
+edge_tab$separation = round(
+  mapply(edge_separation, edge_tab$node_1, edge_tab$node_2), 2)
+
+co_b    = reducedDim(merged, "corrected")
+nd_b    = as.character(merged$node)
+by_node = split(seq_along(nd_b), nd_b)
+
+tally = table(unlist(lapply(seq_len(edge_boot), function(i) {
+  set.seed(1000 + i)
+  # with replacement: a draw without it takes a node of 100 or fewer cells
+  # whole every time, so its centroid never moves and its edges read 100 by
+  # construction. Drawing with replacement gives every node the same centroid
+  # precision whatever its size.
+  keep = unlist(lapply(by_node, function(ix)
+    sample(ix, edge_boot_cells, replace = TRUE)))
+  m = try(TrajectoryUtils::createClusterMST(
+            co_b[keep, , drop = FALSE], clusters = nd_b[keep],
+            dist.method = "simple", outgroup = FALSE),
+          silent = TRUE)
+  if (inherits(m, "try-error")) return(NULL)
+  e = igraph::as_data_frame(m, what = "edges")
+  unique(edge_key(e$from, e$to))
+})))
+
+edge_tab$frequency = round(100 * as.integer(tally[edge_tab$key]) / edge_boot)
+edge_tab$frequency[is.na(edge_tab$frequency)] = 0
+
+# edges the resampling drew that the full-data tree did not
+extra = setdiff(names(tally), edge_tab$key)
+extra_tab = if (length(extra) == 0) NULL else
+  data.frame(edge = extra,
+             frequency = round(100 * as.integer(tally[extra]) / edge_boot),
+             stringsAsFactors = FALSE) %>%
+    dplyr::filter(frequency >= 10) %>%
+    dplyr::arrange(dplyr::desc(frequency))
+
+edge_tab = edge_tab %>%
+  dplyr::select(node_1, node_2, length, nn_rank_1, nn_rank_2, separation,
+                pct_of_cut, frequency) %>%
+  dplyr::arrange(frequency, length)
+
+write.csv(edge_tab, file = paste0(results_dir, "/mst_edges.csv"),
+          row.names = FALSE)
+
+# eight narrow columns: no paging unless the tree is large, numbers right
+# aligned, and horizontal scroll rather than wrapped headers
+datatable(edge_tab, rownames = FALSE, class = "compact stripe hover",
+          options = list(dom = if (nrow(edge_tab) > 25) "tp" else "t",
+                         paging = nrow(edge_tab) > 25, pageLength = 25,
+                         scrollX = TRUE, autoWidth = FALSE,
+                         columnDefs = list(list(className = "dt-right",
+                                                targets = 2:7))))
+```
+
+`r paste0("The least confident edge is ", edge_tab$node_1[1], " to ", edge_tab$node_2[1], ", drawn in ", edge_tab$frequency[1], " percent of ", edge_boot, " trees built from ", edge_boot_cells, " cells per node. ", sum(edge_tab$frequency < 50), " of ", nrow(edge_tab), " edges appear in under half of them, and ", sum(edge_tab$frequency == 100), " in all of them.")`
+
+```{r}
+if (!is.null(extra_tab) && nrow(extra_tab) > 0)
+  datatable(extra_tab, rownames = FALSE,
+            options = list(pageLength = 10, scrollX = TRUE))
+```
+
+`r if (is.null(extra_tab) || nrow(extra_tab) == 0) "" else paste0("**", nrow(extra_tab), " edge(s) appear in at least 10 percent of the subsampled trees without appearing in the tree above.** Where a competing edge is drawn nearly as often as the one that was kept, the two are interchangeable and the tree picked one of them.")`
+
+`r { over = edge_tab %>% dplyr::filter(pct_of_cut > 100) %>% dplyr::arrange(dplyr::desc(pct_of_cut)); paste0("The outgroup threshold for this tree is ", signif(og_cut, 3), ", which is 1.5 times the median edge length. ", if (nrow(over) == 0) "No edge is longer than that." else paste0(nrow(over), " of ", nrow(edge_tab), " edges are longer, the longest being ", over$node_1[1], " to ", over$node_2[1], " at ", over$pct_of_cut[1], " percent.")) }`
+
+`r if (!"separation" %in% names(edge_tab)) "" else { far = edge_tab %>% dplyr::mutate(worst = pmax(nn_rank_1, nn_rank_2)) %>% dplyr::filter(worst > 2) %>% dplyr::arrange(dplyr::desc(worst)); ov = edge_tab %>% dplyr::filter(separation < 1); paste0(sum(edge_tab$nn_rank_1 == 1 & edge_tab$nn_rank_2 == 1), " of ", nrow(edge_tab), " edges join mutual nearest neighbors. ", if (nrow(far) == 0) "None reaches past a node's two nearest neighbors." else paste0(nrow(far), " reach further than either node's second nearest, the furthest being ", far$node_1[1], " to ", far$node_2[1], " at ranks ", far$nn_rank_1[1], " and ", far$nn_rank_2[1], "."), " ", if (nrow(ov) == 0) "Every pair sits at least one standard deviation apart." else paste0(nrow(ov), " pair(s) sit under one standard deviation apart, the closest being ", ov$node_1[which.min(ov$separation)], " to ", ov$node_2[which.min(ov$separation)], " at ", min(ov$separation), "."), " The per-edge values are in mst_edges.csv.") }`
+
+```{r, fig.width=13, fig.height=5, dev = "png", dpi = 600}
+by_node = aggregateAcrossCells(
+  merged, ids = merged$node,
+  use.assay.type = if ("reconstructed" %in% assayNames(merged))
+    "reconstructed" else "logcounts")
+edges_umap = reportEdges(by_node, mst = pseudo$mst, clusters = NULL,
+                         use.dimred = "UMAP")
+
+p_anno_umap = plotUMAP(merged, colour_by = "annotation", point_size = .4) +
+  geom_line(data = edges_umap, aes(x = UMAP1, y = UMAP2, group = edge)) +
+  ggtitle("Annotation, carried per cell")
+p_pt_umap = plotUMAP(merged, colour_by = "pseudotime", point_size = .4) +
+  geom_line(data = edges_umap, aes(x = UMAP1, y = UMAP2, group = edge)) +
+  ggtitle("Pseudotime")
+
+p_anno_umap | p_pt_umap
+ggsave(p_anno_umap | p_pt_umap,
+       file = paste0(results_dir, "/trajectory_umap.png"), width = 13, height = 5)
+```
+
+## Node graph
+
+The tree on its own, laid out by its own structure rather than on the UMAP. With
+many small nodes the shape of the tree is the thing to read, and a UMAP can put
+adjacent nodes far apart. Nodes are sized by cell count, colored by mean
+pseudotime in the first panel and by the annotation holding the most cells in the
+second. Edge color is the edge's length as a percentage of the outgroup
+threshold, blue for short and red for past it. The numbers are omitted with this
+many nodes; they are in `mst_edges.csv` along with the subsampling frequency.
+
+Edge length on this figure is meaningful. The layout is weighted by the real
+distance between nodes, so a long edge means the two nodes are far apart in the
+corrected space. Those distances are the `length` column of `mst_edges.csv`. The
+reproduction is not exact, because a tree in fifty dimensions cannot always be
+drawn faithfully in two, but it is close to a uniform rescale rather than
+arbitrary. If the message about a failed layout appears above, the figure fell
+back to an unweighted layout and edge lengths mean nothing.
+
+```{r, fig.width=11, fig.height=13}
+node_stats = as.data.frame(colData(merged)) %>%
+  dplyr::group_by(node) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   mean_pseudo = mean(pseudotime, na.rm = TRUE),
+                   top_anno = names(sort(table(annotation),
+                                         decreasing = TRUE))[1],
+                   .groups = "drop") %>%
+  dplyr::rename(name = node) %>%
+  dplyr::mutate(name = as.character(name))
+
+e_ig = igraph::as_data_frame(pseudo$mst, what = "edges") %>%
+  dplyr::mutate(key = edge_key(from, to)) %>%
+  dplyr::left_join(edge_tab %>%
+                     dplyr::mutate(key = edge_key(node_1, node_2)) %>%
+                     dplyr::select(key, frequency, pct_of_cut),
+                   by = "key")
+
+gr = as_tbl_graph(pseudo$mst) %>%
+  activate(nodes) %>%
+  left_join(node_stats, by = "name") %>%
+  activate(edges) %>%
+  mutate(conf = as.numeric(e_ig$frequency),
+         cut_pct = as.numeric(e_ig$pct_of_cut))
+
+# Layout by real distance. The stress layout ignores edge weights by default and
+# draws every edge at roughly the same length, so the picture says nothing about
+# how far apart nodes are. graphlayouts treats weights as similarities, not
+# distances, so the reciprocal is what is passed: a long edge then has a weak
+# pull and is drawn long. On test trees this reproduces the true edge lengths to
+# a near-uniform scale factor, correlation 0.999. It also survives a tree split
+# into components, which a distance-matrix layout does not.
+layout_by_distance = function(graph, lengths) {
+  w = as.numeric(lengths)
+  w[!is.finite(w) | w <= 0] = min(w[is.finite(w) & w > 0], na.rm = TRUE) / 1000
+  out = try(create_layout(graph, layout = "stress", weights = 1 / w), silent = TRUE)
+  if (inherits(out, "try-error")) {
+    message("distance-weighted layout failed; falling back to plain stress, ",
+            "so edge lengths on the figure will not be meaningful")
+    out = create_layout(graph, layout = "stress")
+  }
+  out
+}
+
+set.seed(1)
+lay = layout_by_distance(gr, e_ig$weight)
+
+# The coordinates, so another document can draw this same tree rather than
+# computing a layout of its own and showing a different picture of it. The
+# edges are already in mst_edges.csv, so the pair is enough to redraw it.
+write.csv(data.frame(node = as.character(lay$name),
+                     x = lay$x, y = lay$y, stringsAsFactors = FALSE),
+          file = paste0(results_dir, "/node_graph_layout.csv"),
+          row.names = FALSE)
+
+# edge color is the subsampling frequency, so an edge a different sample would
+# not have drawn reads as red
+lay_d = as.matrix(dist(as.matrix(lay[, c("x", "y")])))
+diag(lay_d) = Inf
+lay_span = max(diff(range(lay$x)), diff(range(lay$y)))
+# node sizes scaled to how tightly the distance-faithful layout packs them
+size_hi = max(2.5, min(9, 55 * min(lay_d) / lay_span))
+
+# color alone; width carried no information color was not already carrying
+# Edge colour is the length as a percentage of the outgroup threshold, not the
+# subsampling frequency. Frequency reads 100 for an edge the tree was forced to
+# draw, because a node that belongs nowhere is attached to the same place in
+# every resample. The threshold says how long the edge is, which that cannot
+# hide. Blue is short, red is past the threshold; the numbers are in
+# mst_edges.csv along with the frequency.
+# Edges are drawn as shallow arcs and stopped short of the node glyphs. Drawn
+# straight and to the centers, a long edge passing near an unrelated node looks
+# like it terminates there, and a chain then reads as a cycle the tree cannot
+# contain. The bow costs about one percent in drawn length against the straight
+# chord, far less than the layout already approximates.
+edge_cap = circle(2.2, "mm")
+edge_aes = list(
+  geom_edge_arc(aes(edge_colour = cut_pct), edge_width = .9, strength = 0.12,
+                start_cap = edge_cap, end_cap = edge_cap),
+  scale_edge_colour_gradient2(low = "#2166ac", mid = "#bdbdbd",
+                              high = "#b2182b", midpoint = 100,
+                              name = "% of the outgroup\nthreshold"))
+
+g_pt = ggraph(lay) +
+  edge_aes +
+  geom_node_point(aes(size = n_cells, colour = mean_pseudo)) +
+  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
+  scale_colour_viridis_c() +
+  scale_size_continuous(range = c(max(1, size_hi / 4), size_hi)) +
+  theme_void(base_size = 9) +
+  coord_fixed() + labs(colour = "mean pseudotime", size = "cells")
+
+g_an = ggraph(lay) +
+  edge_aes +
+  geom_node_point(aes(size = n_cells, colour = top_anno)) +
+  geom_node_text(aes(label = name), size = 2.1, repel = TRUE) +
+  scale_size_continuous(range = c(max(1, size_hi / 4), size_hi)) +
+  theme_void(base_size = 9) +
+  coord_fixed() + labs(colour = "most common annotation", size = "cells")
+
+p_node_graph = (g_pt / g_an) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(tag_levels = "A") &
+  theme(legend.position = "right", legend.box = "vertical",
+        legend.key.size = unit(.4, "cm"),
+        legend.title = element_text(size = 8),
+        legend.text  = element_text(size = 7),
+        plot.tag     = element_text(size = 11, face = "bold"))
+
+p_node_graph
+
+ggsave(p_node_graph, file = paste0(results_dir, "/node_graph.png"),
+       width = 11, height = 13, dpi = 300)
+ggsave(p_node_graph, file = paste0(results_dir, "/node_graph.pdf"),
+       width = 11, height = 13)
+```
+
+`r paste0("Panel B labels each node by whichever annotation holds the most of its cells. That is a summary, not a claim about the node: a node can be 51 percent one annotation and still be mixed. The full composition is in the stacked bar above and in node_by_annotation.csv.")`
+
+## Which node reached for which
+
+Each pair is drawn twice, once in each direction. An arrow from A to B is
+colored by where B sits in A's list of nodes ordered by distance, so an edge
+blue in both directions joins mutual nearest neighbors. An arrow that is blue
+one way and red the other is a node reaching for a partner that is not reaching
+back: the tail node had to attach somewhere and this was its best option, while
+the head node has many closer neighbors.
+
+This is the reading the edge frequency cannot give. A forced attachment is drawn
+in every resample, so it scores 100 percent there while showing red here.
+
+```{r, fig.width=13, fig.height=12}
+# Two directed edges per pair, each colored by how the node it points to ranks
+# among the neighbors of the node it leaves. Node positions are taken from the
+# layout above so the two figures can be read against each other.
+dir_edges = dplyr::bind_rows(
+  edge_tab %>% dplyr::transmute(from = node_1, to = node_2, rank = nn_rank_1),
+  edge_tab %>% dplyr::transmute(from = node_2, to = node_1, rank = nn_rank_2))
+
+gr_dir  = tidygraph::tbl_graph(
+  nodes = data.frame(name = lay$name, stringsAsFactors = FALSE),
+  edges = dir_edges, directed = TRUE)
+lay_dir = create_layout(gr_dir, layout = "manual", x = lay$x, y = lay$y)
+
+g_rank = ggraph(lay_dir) +
+  geom_edge_fan(aes(edge_colour = rank),
+                arrow = grid::arrow(length = unit(1.8, "mm"), type = "closed"),
+                start_cap = circle(2, "mm"), end_cap = circle(2.4, "mm"),
+                edge_width = .8) +
+  scale_edge_colour_gradient(low = "#2166ac", high = "#b2182b", trans = "log10",
+                             name = "rank of the node\nthe arrow points to") +
+  geom_node_point(size = max(1.5, size_hi * .5), colour = "grey30") +
+  geom_node_text(aes(label = name), size = 2.6, repel = TRUE,
+                 max.overlaps = Inf, box.padding = .5, point.padding = .25,
+                 min.segment.length = 0, segment.size = .15,
+                 segment.colour = "grey65", seed = 1) +
+  scale_x_continuous(expand = expansion(mult = .08)) +
+  scale_y_continuous(expand = expansion(mult = .08)) +
+  coord_fixed() +
+  theme_void(base_size = 9) +
+  theme(legend.position = "right", legend.key.size = unit(.4, "cm"),
+        legend.title = element_text(size = 8), legend.text = element_text(size = 7))
+
+g_rank
+ggsave(g_rank, file = paste0(results_dir, "/node_graph_ranks.png"),
+       width = 13, height = 12, dpi = 300)
+ggsave(g_rank, file = paste0(results_dir, "/node_graph_ranks.pdf"),
+       width = 13, height = 12)
+```
+
+## Marker sets on the tree
+
+The same tree, once per germ cell marker set. Color is the set's mean log
+expression scaled to its own maximum, so the panels show where each program sits
+rather than how the programs compare with one another. Size is the percentage of
+cells in the node detecting the set.
+
+Each panel title carries the set's absolute maximum. A panel whose maximum is
+near zero is showing noise stretched across the full color range, so read the
+title before the colors. The unscaled values are in `node_marker_set_scores.csv`.
+
+```{r, fig.width=14, fig.height=12}
+stopifnot(all(graph_sets %in% unique(set_scores$set)))
+
+set_panel = function(st) {
+  sc = set_scores %>% dplyr::filter(set == st)
+  mx = suppressWarnings(max(sc$mean_logexpr, na.rm = TRUE))
+  ld = lay
+  ld$rel = if (is.finite(mx) && mx > 0)
+    sc$mean_logexpr[match(ld$name, as.character(sc$node))] / mx else NA_real_
+  ld$pct = sc$pct_detected[match(ld$name, as.character(sc$node))]
+
+  ggraph(ld) +
+    edge_aes +
+    geom_node_point(aes(colour = rel, size = pct)) +
+    geom_node_text(aes(label = name), size = 2.4, repel = TRUE,
+                   max.overlaps = Inf, box.padding = .45,
+                   point.padding = .2, min.segment.length = 0,
+                   segment.size = .15, segment.colour = "grey65",
+                   seed = 1) +
+    # inferno, because viridis is pseudotime everywhere else in this document.
+    # Its top tenth is near white and would vanish on the page, so it stops short.
+    scale_colour_viridis_c(name = "expression, relative\nto the set maximum",
+                           option = "inferno", end = .9, limits = c(0, 1)) +
+    scale_size_continuous(name = "% of cells detecting",
+                          range = c(1, 4.5), limits = c(0, 100)) +
+    scale_x_continuous(expand = expansion(mult = .10)) +
+    scale_y_continuous(expand = expansion(mult = .10)) +
+    coord_fixed() +
+    theme_void(base_size = 8) +
+    ggtitle(sprintf("%s  (max %.2f)", st, mx)) +
+    theme(plot.title = element_text(size = 8, hjust = .5))
+}
+
+p_set_graph = patchwork::wrap_plots(lapply(graph_sets, set_panel), ncol = 2) +
+  patchwork::plot_layout(guides = "collect") &
+  theme(legend.position = "right", legend.box = "vertical",
+        legend.key.size = unit(.35, "cm"),
+        legend.title = element_text(size = 7),
+        legend.text  = element_text(size = 6))
+
+p_set_graph
+ggsave(p_set_graph, file = paste0(results_dir, "/node_graph_marker_sets.png"),
+       width = 14, height = 12, dpi = 300)
+ggsave(p_set_graph, file = paste0(results_dir, "/node_graph_marker_sets.pdf"),
+       width = 14, height = 12)
+```
+
+## Figure 6
+
+```{r}
+# panel letter to set; all three are in germ_sets, so set_scores always has them
+fig6_sets = c(B = "Primordial germ cells", C = "Spermatocytes", D = "Oocyte")
+
+# nodes off every path have no pseudotime and so no place on the y axis
+fig6_nodes = node_stats %>%
+  dplyr::filter(is.finite(mean_pseudo)) %>%
+  dplyr::arrange(mean_pseudo)
+# earliest at the top
+fig6_levels = rev(fig6_nodes$name)
+
+fig6_lib = as.data.frame(colData(merged)) %>%
+  dplyr::mutate(node = as.character(node)) %>%
+  dplyr::filter(node %in% fig6_levels) %>%
+  dplyr::count(node, library, name = "n") %>%
+  dplyr::group_by(node) %>%
+  dplyr::mutate(frac = n / sum(n)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(node = factor(node, levels = fig6_levels))
+
+write.csv(fig6_lib %>%
+            dplyr::left_join(fig6_nodes %>%
+                               dplyr::select(node = name, mean_pseudotime = mean_pseudo),
+                             by = "node") %>%
+            dplyr::arrange(mean_pseudotime, library),
+          file = paste0(results_dir, "/figure6_node_by_library.csv"),
+          row.names = FALSE)
+
+# the gene symbols of each set, for the legend
+fig6_genes = all_sets %>%
+  dplyr::filter(CellTypeMarkerSet %in% fig6_sets,
+                loc_id %in% rownames(combined)) %>%
+  dplyr::distinct(CellTypeMarkerSet, symbol) %>%
+  dplyr::group_by(CellTypeMarkerSet) %>%
+  dplyr::summarise(symbols = paste(sort(symbol), collapse = ", "), .groups = "drop")
+fig6_symbols = setNames(fig6_genes$symbols, fig6_genes$CellTypeMarkerSet)
+```
+
+```{r, fig.width=14, fig.height=13}
+p_fig6_strip = ggplot(fig6_nodes %>%
+                        dplyr::mutate(name = factor(name, levels = fig6_levels)),
+                      aes(x = 1, y = name, fill = mean_pseudo)) +
+  geom_tile() +
+  scale_fill_viridis_c(name = "mean pseudotime") +
+  scale_x_continuous(expand = c(0, 0)) +
+  theme_minimal(base_size = 8) +
+  theme(axis.text.x = element_blank(), axis.ticks = element_blank(),
+        panel.grid = element_blank(),
+        axis.text.y = element_text(size = 6)) +
+  labs(x = NULL, y = NULL)
+
+p_fig6_lib = ggplot(fig6_lib, aes(x = frac, y = node, fill = library)) +
+  geom_col(width = .85) +
+  scale_fill_manual(values = lib_cols) +
+  scale_x_continuous(expand = c(0, 0), labels = scales::percent) +
+  theme_bw(base_size = 8) +
+  theme(axis.text.y = element_blank(), axis.ticks.y = element_blank(),
+        panel.grid.major.y = element_blank()) +
+  labs(x = "cells in the node", y = NULL, fill = "library")
+
+p_fig6_a = (p_fig6_strip | p_fig6_lib) +
+  patchwork::plot_layout(widths = c(.05, 1), guides = "collect")
+
+p_fig6 = patchwork::wrap_plots(p_fig6_a, set_panel(fig6_sets[["B"]]),
+                               set_panel(fig6_sets[["C"]]),
+                               set_panel(fig6_sets[["D"]]), ncol = 2) +
+  patchwork::plot_layout(guides = "collect") +
+  # the strip takes the A, the bars beside it take none
+  patchwork::plot_annotation(tag_levels = list(c("A", "", "B", "C", "D"))) &
+  theme(legend.position = "right", legend.box = "vertical",
+        legend.key.size = unit(.35, "cm"),
+        legend.title = element_text(size = 7),
+        legend.text  = element_text(size = 6),
+        plot.tag     = element_text(size = 11, face = "bold"))
+
+p_fig6
+ggsave(p_fig6, file = paste0(results_dir, "/figure6.png"),
+       width = 14, height = 13, dpi = 300)
+ggsave(p_fig6, file = paste0(results_dir, "/figure6.pdf"),
+       width = 14, height = 13)
+```
+
+`r paste0("**Figure 6. Library composition and germ cell marker sets along the trajectory.** **(A)** Library composition of the ", length(fig6_levels), " trajectory nodes. Nodes are on the y axis, ordered by the mean pseudotime of their cells, with the earliest at the top. Each bar is the percentage of the node's cells from each library. The strip beside the axis is colored by the node's mean pseudotime.", if (nrow(node_stats) > length(fig6_levels)) paste0(" ", nrow(node_stats) - length(fig6_levels), " node(s) lie on no path and have no pseudotime, so they are not shown.") else "", " **(B-D)** The node graph colored by the ", fig6_sets[['B']], " (B; ", fig6_symbols[[fig6_sets[['B']]]], "), ", fig6_sets[['C']], " (C; ", fig6_symbols[[fig6_sets[['C']]]], ") and ", fig6_sets[['D']], " (D; ", fig6_symbols[[fig6_sets[['D']]]], ") marker sets. Node color is the set's mean log expression, scaled to the set's maximum across nodes. That maximum is given in each panel title. Point size is the mean, over the set's genes, of the percentage of the node's cells detecting the gene. Node positions are the distance-weighted layout of the node graph, so edge length approximates the distance between node centroids in the corrected space. Edge color is the edge's length as a percentage of the outgroup threshold.")`
+
+# What the ordering says
+
+This is where the trajectory is interpreted, and it is done from the cells
+rather than from node names. The annotation is the collaborators' expert call
+carried by barcode, so its distribution along pseudotime is the claim.
+
+```{r, fig.width=12, fig.height=5, dev = "png", dpi = 600}
+pt_df = as.data.frame(colData(merged))
+pt_df$barcode = colnames(merged)
+
+p_anno_pt = ggplot(pt_df %>% dplyr::filter(!is.na(pseudotime)),
+                   aes(x = pseudotime, y = reorder(annotation, pseudotime,
+                                                   FUN = median))) +
+  geom_boxplot(outlier.size = .2) +
+  theme_bw() + labs(x = "pseudotime", y = NULL,
+                    title = "Annotation along the ordering")
+p_lib_pt = ggplot(pt_df %>% dplyr::filter(!is.na(pseudotime)),
+                  aes(x = pseudotime, y = library, fill = library)) +
+  geom_boxplot(outlier.size = .2) +
+  scale_fill_manual(values = lib_cols) +
+  theme_bw() + theme(legend.position = "none") +
+  labs(x = "pseudotime", y = NULL, title = "Library")
+
+p_anno_pt | p_lib_pt
+ggsave(p_anno_pt | p_lib_pt,
+       file = paste0(results_dir, "/pseudotime_by_annotation.png"),
+       width = 12, height = 5)
+```
+
+```{r}
+anno_order = pt_df %>%
+  dplyr::filter(!is.na(pseudotime)) %>%
+  dplyr::group_by(annotation) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   median_pseudotime = signif(median(pseudotime), 3),
+                   q1 = signif(quantile(pseudotime, .25), 3),
+                   q3 = signif(quantile(pseudotime, .75), 3),
+                   .groups = "drop") %>%
+  dplyr::arrange(median_pseudotime)
+
+write.csv(anno_order, file = paste0(results_dir, "/annotation_pseudotime.csv"),
+          row.names = FALSE)
+
+datatable(anno_order, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+## How much of the ordering is the library
+
+Cells from four libraries are ordered along one axis, and two of those
+libraries are larvae while two are transformers. An ordering that only
+separated the libraries would reproduce the sample sheet rather than describe
+development. This asks how much of it does that.
+
+Pseudotime is regressed on library, and separately on stage. For a categorical
+predictor the R squared of that regression is the share of the total spread in
+pseudotime that sits between the groups rather than within them. At 1 every
+library would occupy its own band with no overlap, and naming the library would
+tell you a cell's pseudotime. At 0 every library would cover the same range,
+and the whole ordering would be among cells from the same animal. Neither
+number is a p-value. With tens of thousands of cells the between-library
+difference is certain to be nonzero, and the question is how large it is.
+
+The libraries nest inside stage, each being one stage throughout, so the
+library figure can only be the larger of the two. The difference between them
+is what separating four libraries adds over separating two stages, which here
+is batch and sex.
+
+The trajectory is fitted in the corrected space, where fastMNN has already
+pulled the libraries onto each other. A low figure here is a check on that
+correction rather than independent evidence that the ordering is
+developmental: a high one would say the correction had failed and the
+ordering was separating animals. Evidence from outside this dataset is in
+`03_bulk_validation.Rmd`, where genes ordered by this pseudotime are tested
+against a bulk series collected by a different group.
+
+```{r, fig.width=7, fig.height=5}
+pt_var   = pseudotime_variance(pt_df, lib_cols)
+lib_r2   = pt_var$lib_r2
+stage_r2 = pt_var$stage_r2
+
+pt_var$figure
+
+ggsave(pt_var$figure,
+       file = paste0(results_dir, "/pseudotime_variance_by_library.png"),
+       width = 7, height = 5, dpi = 300)
+
+write.csv(pt_var$parts,
+          file = paste0(results_dir, "/pseudotime_variance_by_library.csv"),
+          row.names = FALSE)
+```
+
+`r if (is.na(lib_r2)) "All cells come from one library, so library cannot explain pseudotime." else paste0("Library explains ", round(100 * lib_r2, 1), "% of the variance in pseudotime", if (!is.na(stage_r2)) paste0(", and stage explains ", round(100 * stage_r2, 1), "%") else "", ". ", round(100 * (1 - lib_r2), 1), "% is variation among cells from the same library, which is the part of the ordering the sample sheet does not account for.")`
+
+`r if (is.na(lib_r2) || is.na(stage_r2)) "" else "The upper panel is where the number comes from. A library whose cells cover the full range contributes little to it, and one confined to a narrow band contributes a lot."`
+
+## What else the ordering tracks
+
+Pooled across libraries, a trend can be the libraries sitting at different ends
+of the tree. The within-library figures cannot be that.
+
+```{r}
+# qc is built under Depth and technical content, before any removal, so it is
+# joined by barcode rather than bound by position
+qc = qc %>%
+  dplyr::inner_join(data.frame(barcode = colnames(merged),
+                               pseudotime = merged$pseudotime,
+                               stringsAsFactors = FALSE), by = "barcode") %>%
+  dplyr::filter(!is.na(pseudotime))
+
+conf_measures = c("total", "detected", "pct_mito", "pct_rrna", "pct_ribo")
+conf_stats = function(d, label) {
+  if (nrow(d) < 20) return(NULL)
+  dplyr::bind_rows(lapply(conf_measures, function(v) {
+    ok = is.finite(d[[v]]) & is.finite(d$pseudotime)
+    if (sum(ok) < 20) return(NULL)
+    x = if (v %in% c("total", "detected")) log10(d[[v]][ok]) else d[[v]][ok]
+    if (stats::sd(x) == 0) return(NULL)
+    ct = suppressWarnings(cor.test(x, d$pseudotime[ok], method = "spearman"))
+    data.frame(within = label, measure = v, n_cells = sum(ok),
+               r2 = signif(summary(lm(d$pseudotime[ok] ~ x))$r.squared, 3),
+               spearman_rho = signif(unname(ct$estimate), 3),
+               p = signif(ct$p.value, 3), stringsAsFactors = FALSE)
+  }))
+}
+
+conf_tab = dplyr::bind_rows(
+  conf_stats(qc, "all cells"),
+  dplyr::bind_rows(lapply(sort(unique(qc$library)), function(lb)
+    conf_stats(qc[qc$library == lb, , drop = FALSE], lb))))
+
+write.csv(conf_tab, file = paste0(results_dir, "/pseudotime_vs_technical.csv"),
+          row.names = FALSE)
+
+datatable(conf_tab, rownames = FALSE, options = list(pageLength = 15))
+```
+
+`r if (nrow(conf_tab) == 0) "" else { pooled = conf_tab %>% dplyr::filter(within == "all cells"); top = pooled[which.max(pooled$r2), ]; wit = conf_tab %>% dplyr::filter(within != "all cells", measure == top$measure); paste0("Pooled, the strongest is ", top$measure, " at ", round(100 * top$r2, 1), " percent of the variance in pseudotime. Within libraries the same measure gives ", paste0(wit$within, " ", round(100 * wit$r2, 1), " percent", collapse = ", "), ". A pooled figure much larger than the within-library ones is the libraries at different ends of the tree rather than a gradient along it.") }`
+
+# Pseudotime-associated genes
+
+```{r}
+# Uncorrected log counts. merged is the fastMNN output and carries
+# reconstructed rather than logcounts, so it cannot be tested directly. Passing
+# the path matrix rather than one vector tests each path on its own cells.
+stopifnot(identical(colnames(combined), colnames(merged)))
+pt_res = testPseudotime(combined, pseudotime = pseudo_mat)
+
+pt_tab = dplyr::bind_rows(lapply(seq_along(pt_res), function(i) {
+  as.data.frame(pt_res[[i]]) %>%
+    tibble::rownames_to_column("Gene") %>%
+    dplyr::mutate(Path = names(pt_res)[i])
+})) %>%
+  dplyr::filter(!is.na(FDR), FDR < fdr_cut) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::mutate(Direction = ifelse(logFC > 0, "up", "down")) %>%
+  dplyr::arrange(Path, FDR) %>%
+  dplyr::select(Path, Direction, Gene, WangGeneID, description,
+                logFC, p.value, FDR)
+
+write.csv(pt_tab, file = paste0(results_dir, "/pseudotime_genes.csv"),
+          row.names = FALSE)
+
+datatable(pt_tab %>% dplyr::mutate(dplyr::across(where(is.numeric),
+                                                 ~signif(., 3))),
+          rownames = FALSE, filter = "top", options = list(pageLength = 15))
+```
+
+`r paste0(nrow(pt_tab), " gene-path results at FDR < ", fdr_cut, ", over ", dplyr::n_distinct(pt_tab$Path), " path(s).")`
+
+## Heatmaps
+
+The 25 most significant genes in each direction along each path. Cells are
+restricted to that path and ordered by their position on it, so a cell on two
+paths appears in both panels at the place each path puts it.
+
+```{r, results="asis"}
+for (pth in colnames(pseudo_mat)) {
+  on_path = rownames(pseudo_mat)[!is.na(pseudo_mat[, pth])]
+  if (length(on_path) < 20) next
+
+  # the bar is scaled within the path, so ordering and color both describe this
+  # path rather than the average over all of them
+  pv  = pseudo_mat[on_path, pth]
+  rng = range(pv, na.rm = TRUE)
+  combined$pseudotime_scaled = NA_real_
+  combined$pseudotime_scaled[match(on_path, colnames(combined))] =
+    if (diff(rng) > 0) (pv - rng[1]) / diff(rng) else 0
+
+  for (dir in c("up", "down")) {
+    top = pt_tab %>%
+      dplyr::filter(Path == pth, Direction == dir) %>%
+      dplyr::arrange(FDR, dplyr::desc(abs(logFC))) %>%
+      dplyr::slice_head(n = 25)
+    # hclust on the gene rows needs at least two of them
+    if (nrow(top) < 2) next
+
+    labs_wang = ifelse(is.na(top$WangGeneID), top$Gene, top$WangGeneID)
+    hm = plot_pseudotime_heatmap(combined, top$Gene, labs_wang, on_path,
+                                 pseudotime_column = "pseudotime_scaled")
+    # guides = "collect" is what the function sets; rebuilding to change the
+    # heights would drop it and clip the pseudotime legend title away
+    hp = (hm[[1]] / hm[[2]]) +
+      plot_layout(heights = c(0.03, 1), guides = "collect")
+
+    f = paste0(results_dir, "/pseudotime_heatmap_",
+               gsub("[^A-Za-z0-9]+", "_", pth), "_", dir, ".png")
+    ggsave(hp, file = f, width = 7, height = 5, dpi = 600)
+
+    # the heading starts with a word: pandoc drops everything before the first
+    # letter when it builds anchor ids, so "5.1, up" would become "up"
+    cat("\n\n### Path ", pth, ", ", dir, "\n\n", sep = "")
+    cat("![](", f, ")\n\n", sep = "")
+  }
+}
+```
+
+## GO enrichment of pseudotime-associated genes
+
+GO enrichment for each path and direction, against every gene in the data. Terms
+with p < `r go_pval` are shown and written to
+`pseudotime_GO_pvalues.csv`.
+
+```{r}
+path_go = run_go_enrichment(
+  gaf              = gaf,
+  gene_description = gene_description,
+  go_names         = go_names,
+  test_genes       = pt_tab %>%
+                       dplyr::transmute(Gene, set = paste0(Path, ".", Direction)) %>%
+                       dplyr::distinct(),
+  background_n     = nrow(combined),
+  group2_label     = "Path",
+  ngroup2_label    = "nPathGenes",
+  overlaps_file    = paste0(results_dir, "/pseudotime_GO_overlaps.csv"),
+  pvals_file       = paste0(results_dir, "/pseudotime_GO_pvalues.csv"),
+  pval_filter      = go_pval)
+
+datatable(path_go %>% dplyr::mutate(dplyr::across(where(is.numeric),
+                                                  ~signif(., 3))),
+          filter = "top", rownames = FALSE)
+```
+
+# Export
+
+```{r}
+out = data.frame(barcode    = colnames(merged),
+                 node       = as.character(merged$node),
+                 cluster    = as.character(merged$final_label),
+                 annotation = as.character(merged$annotation),
+                 library    = as.character(merged$library),
+                 stage      = as.character(merged$stage),
+                 pseudotime = merged$pseudotime,
+                 stringsAsFactors = FALSE)
+
+write.csv(out, file = paste0(results_dir, "/pseudotime_per_cell.csv"),
+          row.names = FALSE)
+```
+
+## Everything written by this document
+
+Built by listing the results directory and looking each file up, rather than by
+keeping a list by hand. A file with no description, or a description with no
+file, is reported below instead of passing unnoticed.
+
+```{r}
+file_notes = c(
+  "pseudotime_per_cell.csv" = "One row per cell: node, cluster, annotation carried by barcode, library, stage and pseudotime.",
+  "cluster_by_annotation.csv" = "How the annotation is distributed across the atlas clusters, before subclustering.",
+  "node_composition.csv"      = "Cells per node and the cluster each node came from.",
+  "node_by_annotation.csv"    = "Annotation composition of every node, as counts and fractions. The evidence behind panel B of the node graph.",
+  "node_marker_set_scores.csv" = "Each node scored on the germ cell marker sets. The root rule is applied to this table.",
+  "node_graph_layout.csv"        = "Where each node sits on the node graph figure, so the same tree can be drawn elsewhere.",
+  "mst_edges.csv"             = "Every edge of the tree with four reads on it: its length in the corrected space, where each node ranks in the other's neighbor list, the centroid distance in standard deviations of the within-node spread, its length as a percentage of the outgroup threshold, and the percentage of subsampled trees containing it.",
+  "annotation_pseudotime.csv" = "Median and quartiles of pseudotime for each annotation. The ordering claim in numbers.",
+  "pseudotime_vs_technical.csv"   = "Pseudotime regressed on depth, mitochondrial, rRNA and ribosomal content, pooled and within each library.",
+  "node_depth_and_technical.csv" = "Depth, genes detected, percent mitochondrial, rRNA and ribosomal per node.",
+  "node_depth_tests.csv"      = "Kruskal-Wallis of each measure across the subclusters of a cluster, with the fold range in median depth.",
+  "node_marker_expression.csv" = "The per-gene values behind the node identity bubble plot.",
+  "node_marker_genes.csv"     = "Markers of each node against the other germ cell nodes.",
+  "node_marker_GO_overlaps.csv" = "Which marker genes carry each enriched GO term, per node.",
+  "node_marker_GO_pvalues.csv" = "GO enrichment of each node's marker genes.",
+  "pseudotime_GO_overlaps.csv" = "Which genes carry each enriched GO term, per path and direction.",
+  "pseudotime_GO_pvalues.csv" = "GO enrichment of the pseudotime-associated genes, per path and direction.",
+  "pseudotime_genes.csv"      = "Genes whose expression changes along each path, one row per gene per path with its direction.",
+  "trajectory_umap.png"       = "UMAP colored by annotation and by pseudotime, with the tree drawn over it.",
+  "node_graph.png"            = "The tree laid out by its own structure: nodes sized by cell count, colored by mean pseudotime and by most common annotation.",
+  "node_graph.pdf"            = "The node graph as a vector file, for figure assembly.",
+  "node_by_annotation.png"    = "Annotation composition of each node as stacked bars.",
+  "pseudotime_by_annotation.png" = "Pseudotime distribution per annotation and per library.",
+  "pseudotime_variance_by_library.png" = "Pseudotime within each library, and the share of its variance that sits between libraries rather than within them.",
+  "pseudotime_variance_by_library.csv" = "That share split into stage, what separating the libraries adds over stage, and the remainder within libraries.",
+  "node_identity_scores.csv"  = "Each node against all marker sets, somatic ones included, with a contained_in flag where one set sits inside another.",
+  "pseudotime_by_node.png"    = "Pseudotime distribution per node and per library.",
+  "node_depth_and_technical.png" = "Depth and technical content per node.",
+  "removal_evidence_bubble.png" = "The Dissociation response set per node, with the removed node first on the axis. The evidence behind the removal.",
+  "node_identity_scores.png"  = "Marker expression per node, one dot per gene, every set.",
+  "node_graph_ranks.png" = "The tree with two arrows per pair, each colored by how the node it points to ranks among the neighbors of the node it leaves.",
+  "node_graph_ranks.pdf" = "The rank graph as a vector file.",
+  "node_graph_marker_sets.png" = "The tree once per germ marker set, colored by expression relative to that set's maximum and sized by percent of cells detecting it.",
+  "node_graph_marker_sets.pdf" = "The marker set panels as a vector file.")
+
+in_dir  = sort(setdiff(list.files(results_dir), "Robjects"))
+in_dir  = in_dir[!grepl("^pseudotime_heatmap_", in_dir)]
+
+# The table describes what this document writes. The results directory also
+# holds whatever earlier runs left behind, and those are named below rather
+# than given rows with no description.
+on_disk = intersect(names(file_notes), in_dir)
+unknown = setdiff(in_dir, names(file_notes))
+missing = setdiff(names(file_notes), in_dir)
+
+export_tab = data.frame(
+  file = on_disk,
+  size = sapply(file.path(results_dir, on_disk),
+                function(f) format(structure(file.size(f), class = "object_size"),
+                                   units = "auto")),
+  what = unname(file_notes[on_disk]),
+  stringsAsFactors = FALSE)
+
+datatable(export_tab, rownames = FALSE, escape = FALSE,
+          options = list(pageLength = 30, dom = "tp",
+                         columnDefs = list(list(width = "240px", targets = 0))))
+```
+
+`r n_heat = length(list.files(results_dir, pattern = "^pseudotime_heatmap_")); if (n_heat > 0) paste0("Plus ", n_heat, " heatmap image(s) named pseudotime_heatmap_<path>_<direction>.png.") else ""`
+
+`r if (length(unknown) > 0) paste0(length(unknown), " file(s) in the directory are not written by this document and are left out of the table: ", paste(unknown, collapse = ", "), ". Either an earlier version wrote them, or they are new and need a line in file_notes.") else ""`
+
+`r if (length(missing) > 0) paste0("Described but not written on this run: ", paste(missing, collapse = ", "), ".") else ""`
+
+`r paste0("Written to ", results_dir, ". Cached intermediates are in Robjects and are not listed.")`
+
+# Summary
+
+```{r}
+summary_tbl = data.frame(
+  quantity = c("clusters", "cells", "libraries kept", "nodes",
+               "sub_k", "minimum node size", "root", "paths",
+               paste0("gene-path results at FDR < ", fdr_cut)),
+  value = c(paste(clusters, collapse = ", "),
+            format(ncol(merged), big.mark = ","),
+            paste(objs$kept_batches, collapse = ", "),
+            as.character(nlevels(merged$node)),
+            as.character(sub_k),
+            as.character(min_node_cells),
+            root,
+            as.character(n_paths),
+            format(nrow(pt_tab), big.mark = ",")),
+  stringsAsFactors = FALSE)
+
+datatable(summary_tbl, rownames = FALSE, colnames = c("", ""),
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
+# Settings
+
+The fixed settings this document ran with.
+
+```{r}
+settings = data.frame(
+  setting = c("results_date", "clusters", "min_library_cells", "sub_k",
+              "min_node_cells", "dist.method", "outgroup", "edge_boot",
+              "edge_boot_cells", "root_set", "min_detect_pct", "drop_nodes",
+              "removal_evidence_sets", "graph_sets", "marker_file",
+              "extra_marker_file", "prev_nodes_file", "lfc_thresh", "fdr_cut",
+              "go_pval", "genome_dir"),
+  value   = c(results_date, paste(clusters, collapse = ", "), min_library_cells,
+              sub_k, min_node_cells, "simple", "FALSE", edge_boot,
+              edge_boot_cells, root_set, min_detect_pct,
+              paste(drop_nodes, collapse = ", "),
+              paste(removal_evidence_sets, collapse = ", "),
+              paste(graph_sets, collapse = ", "), marker_file,
+              paste(extra_marker_file, collapse = ", "), prev_nodes_file,
+              lfc_thresh, fdr_cut, go_pval, genome_dir),
+  stringsAsFactors = FALSE)
+
+datatable(settings, rownames = FALSE,
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
+The per-cell annotation carried from the coarse-node trajectory maps its nodes
+to these names.
+
+```{r}
+datatable(data.frame(node = names(node_annotation),
+                     annotation = unname(node_annotation)),
+          rownames = FALSE,
+          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+```
+
+# Session info
+
+```{r}
+sessionInfo()
+```
