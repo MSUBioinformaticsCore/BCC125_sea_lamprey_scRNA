@@ -867,6 +867,16 @@ cached = if (file.exists(perm_file)) readRDS(perm_file) else NULL
 if (!is.null(cached) && identical(cached$signature, perm_sig)) {
   perm_res = cached$perm_res
 } else {
+  # name what changed, so a cache that is passed over says why rather than
+  # silently starting the slow step
+  if (!is.null(cached)) {
+    fields  = union(names(perm_sig), names(cached$signature))
+    changed = fields[!vapply(fields, function(f)
+      identical(cached$signature[[f]], perm_sig[[f]]), logical(1))]
+    warning("The cached permutation null in ", perm_file, " was built on ",
+            "different inputs and is being recomputed. Fields that differ: ",
+            paste(changed, collapse = ", "), call. = FALSE, immediate. = TRUE)
+  }
   perm_res = list(
     "male, endpoint"   = two_group_perm(length(runs_ud), length(runs_mm),
                                         "ours_male", 1),
