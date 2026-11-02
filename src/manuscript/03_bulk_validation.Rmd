@@ -15,18 +15,6 @@ params:
 ---
 
 ```{r setup, include=FALSE}
-# html_document renders inline figures at knitr's 72 dpi doubled by
-# fig.retina, so 144, while every ggsave here writes at 300. Rendering inline
-# at 300 as well puts the figure in the document at the resolution of the file
-# on disk. fig.retina is set to 1 so the two are not multiplied.
-# Figures are vector by default. A raster figure in html_document is rendered
-# at a fixed pixel size and then scaled to the page, so it is only ever as sharp
-# as that size; svg has no resolution to run out of. The chunk that draws one
-# mark per gene sets dev = "png" individually, because an svg of twenty thousand
-# points is tens of megabytes where the png is a couple of hundred kilobytes.
-# dpi applies to those, and fig.retina is 1 so it is not doubled again.
-# svglite if it is installed, otherwise the grDevices svg device, which needs
-# the cairo capability enabled below
 vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
 knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
                       dev = vec_dev, dpi = 300, fig.retina = 1)
@@ -66,8 +54,7 @@ appear there.
 
 **What it does not show.** That the changes are developmental. Yasmin et al series
 has its own collection structure and may carry its own confounds. Agreement
-shows the pattern is not specific to our batch. That is what the reviewer asks
-for. The claim goes no further.
+shows the pattern is not specific to our batch. 
 
 **Bulk is a mixture.** A gene changing in bulk can reflect a shift in which cell
 types are present rather than a change within any cell type. Pseudobulk shares
@@ -79,9 +66,6 @@ series is smaller, the largest being 99 mm. Their 74–99 mm animals are already
 classed as past the point where ovarian differentiation completes. The two series
 draw the larval boundary at different sizes. The transformer endpoints match on
 stage and on size.
-
-The settings below are the ones the manuscript uses. They are fixed here rather
-than passed as knit parameters, so the document reproduces one analysis.
 
 ```{r}
 results_date  = "20260813"
@@ -399,9 +383,7 @@ run_two_group = function(dge, run_a, run_b, label) {
     tibble::rownames_to_column("Gene") %>%
     # The signed test statistic, which the enrichment section ranks on.
     # glmQLFTest reports an F with one numerator degree of freedom, so its root
-    # is the absolute t-like statistic and logFC supplies the sign. It is carried
-    # here rather than recomputed, because a p-value cannot be signed and the
-    # fold change alone ignores how well each gene is measured.
+    # is the absolute t-like statistic and logFC supplies the sign. 
     dplyr::mutate(stat = sign(logFC) * sqrt(.data$F)) %>%
     dplyr::select(Gene, logFC, stat, PValue, FDR) %>%
     dplyr::rename_with(~paste0(label, "_", .x), -Gene)
@@ -413,19 +395,7 @@ run_trend = function(dge, runs, score, label) {
   sub = estimateDisp(sub, des)
   fit = glmQLFit(sub, des)
   res = glmQLFTest(fit, coef = 2)
-  # Two columns, because they answer different questions and one of them is what
-  # edgeR actually returned.
-  #
-  #   slope          edgeR's coefficient, renamed. On a continuous covariate it
-  #                  is a slope, the log2 change for a step of 1 on the score,
-  #                  not the fold change that run_two_group returns as logFC.
-  #                  Kept so a rerun of glmQLFTest matches this file.
-  #   series_log2FC  the same fit read across the span the score covers, which
-  #                  is the log2 change from one end of the series to the other.
-  #                  The model is linear in score, so this is a rescaling and
-  #                  needs no refit. Everything downstream is rank or sign
-  #                  based, so the two give identical statistics; this one is
-  #                  the one that can be read as a size.
+
   span = diff(range(score))
   topTags(res, n = Inf, sort.by = "none")$table %>%
     tibble::rownames_to_column("Gene") %>%
@@ -437,8 +407,7 @@ run_trend = function(dge, runs, score, label) {
     dplyr::rename_with(~paste0(label, "_", .x), -Gene)
 }
 
-# Spearman with a bootstrap CI. cor.test gives a p-value but no interval, and
-# the interval is the quantity worth reporting.
+# Spearman with a bootstrap CI. cor.test gives a p-value but no interval.
 spearman_ci = function(x, y, n_boot = ci_boot, seed = 1) {
   ok = is.finite(x) & is.finite(y)
   x = x[ok]; y = y[ok]
@@ -491,21 +460,7 @@ and why.
 
 
 ```{r}
-# Two endpoints and two trends.
-#
-# The endpoints are larvae against the whole mid group, one per sex, so the two
-# sexes are contrasted the same way and on the largest groups available.
-#
-# The trends order the animals by group and then, inside each group, by the
-# metamorphic stage recorded for that animal in Supplementary Table 1. The
-# within-group offset is scaled to sit inside the gap to the next group, so
-# groups never overlap.
-#
-# The offset uses the finest developmental information the paper reports. It
-# changes nothing in the groups whose animals share a stage: undifferentiated
-# larvae, prospective males and early females are all recorded as larval, so
-# they stay flat. It orders early males (stages 1, 1, 3, 4, 5, 6), mid females
-# (1, 1, 3, 4, 7, 8) and, barely, mid males (7, 7, 8, 8).
+
 stage_offset = function(runs) {
   st = sample_meta$stage_score[match(runs, sample_meta$run)]
   (rank(st, ties.method = "min") - 1) / length(runs)
@@ -648,20 +603,6 @@ ours = data.frame(
   well_measured = apply(pb, 1, max) >= min_pb,
   stringsAsFactors = FALSE)
 
-# The n strongest genes in each direction, and the two together.
-#
-# Selecting the n strongest by absolute effect gives a list whose direction
-# balance is whatever the data happens to carry, and here that is lopsided: the
-# largest magnitudes are overwhelmingly downward on both sides, so a top list
-# picked that way is almost entirely down genes. Two things go wrong with it.
-# Sign agreement then averages the up and down genes, which behave oppositely,
-# and the average can land below chance while both halves sit above it. rho
-# loses the range it depends on, because the list crowds into one tail.
-#
-# Taking n each way fixes the balance by construction and keeps both tails, so
-# rho is computed across the full spread of effects. Restricting to a single
-# direction instead is worse than either: with the range cut to one tail, rho
-# measures magnitude ranking within it and goes to nothing.
 top_dir = function(v, direction, n = top_ns[1]) {
   ok = is.finite(v)
   idx = if (direction == "up") which(ok & v > 0) else which(ok & v < 0)
@@ -730,20 +671,6 @@ cmp = cmp %>%
                    by = "Gene")
 cmp$label = ifelse(is.na(cmp$WangGeneID), cmp$Gene, cmp$WangGeneID)
 
-# genome-wide, then restricted to our strongest stage genes.
-#
-# Relabelled contrasts drawn from the same 28 animals give a genome-wide
-# correlation centered at zero, so the genome-wide value is a result in its own
-# right rather than a baseline. What the two numbers compare is concentration:
-# whether agreement is stronger among the genes we nominate than among genes in
-# general. That is a statement about specificity.
-#
-# Sign agreement is scored genome-wide for the same purpose. Whether agreement
-# exceeds chance is left to the permutation.
-# rank_on picks which dataset selects the genes. "ours" is the original
-# direction. "yasmin" ranks on their side, where the contrast is replicated and
-# thousands of genes reach FDR 0.05, and asks only whether our four libraries
-# follow. keep restricts to the genes that carry enough counts here to rank.
 agreement_for = function(ours_col, yas_col, axis, keep, pool,
                          rank_on = "ours") {
   d    = cmp[keep, , drop = FALSE]
@@ -774,9 +701,6 @@ agreement_for = function(ours_col, yas_col, axis, keep, pool,
   dplyr::bind_rows(rows)
 }
 
-# yas is the effect size, for the scatters and the correlations. stat is the
-# signed test statistic, for the enrichment, which needs a ranking that accounts
-# for how well each gene is measured.
 axis_cols = list(
   "male, endpoint"   = c(ours = "ours_male",   yas = "male_end_logFC",
                          stat = "male_end_stat"),
@@ -787,12 +711,6 @@ axis_cols = list(
   "female, trend"    = c(ours = "ours_female", yas = "fem_trend_series_log2FC",
                          stat = "fem_trend_stat"))
 
-# One pool. Running both and crossing every statistic by it changed nothing
-# worth reading: on this data the two pools agree to three decimal places on
-# rho, agree exactly on most permutation p-values, and never disagree about
-# whether a statistic clears 0.05. The filter still decides which genes the top
-# lists, the GO background and the trend figure are drawn from, which is where
-# it does its work.
 gene_pools = list("well measured" = cmp$well_measured)
 
 grid = expand.grid(axis = names(axis_cols), pool = names(gene_pools),
@@ -865,22 +783,10 @@ fitting a line through the intermediate ones, and in this data the
 endpoint contrasts reach FDR 0.05 for more genes than the trends do on both axes.
 
 ```{r}
-
-# One set of refits serves every summary. The fit does not depend on the gene
-# pool or on which side ranks the genes, so each permutation is scored for all
-# four combinations rather than refitted four times.
-#
-# When Yasmin et al ranks the genes, the null re-selects inside each permutation from
-# the permuted contrast. Reusing the real contrast's gene list would carry the
-# real labels into the null.
 perm_combos = expand.grid(pool = names(gene_pools),
                           rank_on = c("ours", "yasmin"),
                           stringsAsFactors = FALSE)
 
-# The draws are generated here, in one stream, rather than inside the workers,
-# so the result does not depend on how many cores are used. The stream is the
-# same one the earlier serial version consumed — one sample() call per
-# permutation, in order — so a cache written by that version stays valid.
 all_runs = sample_meta$run
 
 draw_runs = function(n_draw, n_perm, seed) {
@@ -905,11 +811,6 @@ score_draw = function(lfc_all, ours_col, top_n) {
   }))
 }
 
-# The fits are independent, so they fan out across cores. mclapply forks, which
-# is why the job script pins the BLAS threads to one: eight R processes each
-# spawning threads would oversubscribe the node.
-# eff_col differs by fit shape: run_two_group names its effect logFC and
-# run_trend names its effect slope, so the caller says which to score.
 perm_null = function(draws, fit_draw, ours_col, top_n, cores = 1,
                      eff_col = "perm_logFC") {
   work = function(d) {
@@ -1044,8 +945,6 @@ datatable(data.frame(
 `r paste0("The smallest p-value reachable with ", n_perm_labels, " permutations is ", signif(1 / (1 + n_perm_labels), 2), ". A statistic at that value is reported as a floor rather than as its true p-value.")`
 
 ```{r, fig.width=15, fig.height=7}
-# the well measured pool only, since the unfiltered ranking is the one under
-# suspicion
 perm_long = dplyr::bind_rows(lapply(names(perm_res), function(ax) {
   nd = perm_res[[ax]][perm_res[[ax]]$pool == "well measured", ]
   data.frame(axis = ax, ranked_on = nd$rank_on, rho_top = nd$rho_top)
@@ -1387,8 +1286,10 @@ src_of = function(x) ifelse(grepl("^pseudotime ", x),
 
 ```{r}
 # One family of gene sets against the four rankings. Called once for the
-# pseudobulk lists and once for the pseudotime paths, so each family carries
-# its own Benjamini-Hochberg correction rather than the two sharing one.
+# pseudobulk lists and once for the pseudotime paths. fgsea runs once per
+# contrast, and its Benjamini-Hochberg adjustment is kept as returned, so an FDR
+# is adjusted across the sets of one family tested against one contrast. The
+# two families never share a correction.
 #
 # cross_sex says whether a set goes against both sexes. The pseudobulk lists
 # go against their own sex only, since our effect is computed per sex and the
@@ -1890,9 +1791,9 @@ libraries. This section names them a second way, from the genes that change
 along the germ cell trajectory, and puts those against the same four Yasmin
 et al rankings.
 
-The two families are fitted separately, so each carries its own
-Benjamini-Hochberg correction and an FDR here is adjusted across the paths
-rather than across the pseudobulk lists as well.
+The two families are fitted separately. An FDR here is adjusted by
+Benjamini-Hochberg across the path gene sets tested against one contrast. It is
+not adjusted across the four contrasts, or across the pseudobulk lists.
 
 ## The gene sets
 
@@ -1947,7 +1848,7 @@ pt_families = unique(src_of(pt_rows$set))
 
 ```{r}
 # the second fit: these sets only, so the FDR below is adjusted across the
-# paths rather than across the pseudobulk lists as well
+# path sets within each contrast, not across the pseudobulk lists as well
 g_pt     = run_gsea(pt_sets, pt_key, cross_sex = TRUE)
 cur_pt   = gsea_curves(g_pt, pt_sets)
 pt_tab   = g_pt$tab
@@ -2548,9 +2449,9 @@ ggsave(p_sex, file = paste0(results_dir, "/germ_signature_sex.png"),
 `r if (length(pt_srcs) == 0) "" else paste0("The scatter beside each node panel sets the size of that node's sex difference against its mean pseudotime. The sign is dropped, so a node whose two scores sit far apart counts the same whichever sex is higher. ", paste0(vapply(pt_srcs, function(sr) sprintf("Panel %s, %s: rho %.2f, p = %.3f, across %d nodes", pt_tag[[sr]], sr, unname(pt_cor[[sr]]$size$estimate), pt_cor[[sr]]$size$p.value, pt_cor[[sr]]$n), character(1)), collapse = ". "), ". Pseudotime is the average over the paths out of the root, so a node on a branch carries a blended value.")`
 
 
-# Summary figures
+# Figures
 
-## Pseudobulk comparisons  
+## Figure 5: Pseudobulk comparisons  
 
 ```{r}
 # Drawn at final size rather than drawn large and reduced, because reduction is
@@ -2565,19 +2466,12 @@ jrnl_base = 8
 ```
 
 ```{r, fig.width=jrnl_w, fig.height=jrnl_h}
-# titles are rewritten for the composite and the per-figure subtitles dropped,
-# since the caption below carries what they said
 panel = function(p, ttl) p + labs(title = ttl, subtitle = NULL) +
   theme(plot.title = element_text(size = jrnl_base, face = "plain"))
 
-# All three stacked rather than the scatters set side by side. Each scatter is
-# two facets wide and carries a three line annotation inside the panel, so half
-# the page width clips that text. Stacking also keeps the enrichment panel from
-# spreading across the whole width, which flattens the curves.
 gsea_j = gsea_figure(cur_pb, base_size = jrnl_base, pt_size = 1.3,
                      txt_size = 2.1, line_w = .5)
-# five gene labels rather than ten; at this panel size ten collide whatever the
-# repel does with them
+
 end_j   = agreement_figure(c("male, endpoint", "female, endpoint"),
                            "Yasmin et al log2FC, larvae to mid group",
                            "Yasmin et al endpoint",
@@ -2591,16 +2485,12 @@ trend_j = agreement_figure(c("male, trend", "female, trend"),
 
 composite =
   panel(gsea_j, "Our top genes in the Yasmin et al ranking") /
-  # the two scatters carry the same legend, so the block collects it into one
   ((panel(end_j,   "Effect sizes, endpoint contrasts") /
     panel(trend_j, "Effect sizes, trend contrasts")) +
      patchwork::plot_layout(guides = "collect") &
      theme(legend.position = "bottom")) +
-  # the enrichment panel is two facet rows, the scatters one each
   patchwork::plot_layout(heights = c(3.5, 5.36)) +
   patchwork::plot_annotation(tag_levels = "A") &
-  # the default margins leave a band of white under each legend, which on a
-  # page is width the panels could have had
   theme(plot.tag = element_text(size = jrnl_base + 2, face = "bold"),
         plot.margin = margin(2, 2, 2, 2),
         legend.margin = margin(0, 0, 0, 0),
@@ -2608,28 +2498,21 @@ composite =
 
 composite
 
-# pdf is the version to submit: vector, no resolution to lose at typesetting
 ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.pdf"),
        width = jrnl_w, height = jrnl_h)
 ggsave(composite, file = paste0(results_dir, "/bulk_validation_summary.png"),
        width = jrnl_w, height = jrnl_h, dpi = 600)
 ```
 
-## Fine node summary
+`r paste0("**Figure 5. Pseudobulk stage effects against the Yasmin et al series.** Our stage effect is a pseudobulk log2 ratio. Raw counts were summed over every cell of each library, normalized with edgeR::calcNormFactors and converted to log2 CPM with a prior count of 1. The mean of the two larval libraries was subtracted from the female and from the male transformer library. Genes are the ", format(nrow(go_pool), big.mark = ","), " measured in both datasets that reach ", min_pb, " pseudobulk counts in at least one of our libraries. The Yasmin et al counts were filtered with edgeR::filterByExpr and tested with edgeR quasi-likelihood F-tests. Each endpoint contrast compares the ", length(runs_ud), " undifferentiated larvae (UD) with the mid males (MM, n = ", length(runs_mm), ") or the mid females (MF, n = ", length(runs_mf), "). Each trend regresses expression on an ordered score across the male series (UD, PM, EM, MM; n = ", length(male_runs), ") or the female series (UD, EF, MF; n = ", length(fem_runs), "). The score is the group's position in the series plus an offset below 1 that orders animals within a group by their recorded life stage. **(A)** Gene set enrichment (fgsea) of our ", top_ns[1], " most up-regulated and ", top_ns[1], " most down-regulated genes per sex in each Yasmin et al contrast of the same sex. Each contrast ranks genes by the signed square root of the F statistic, from most up to most down. Each line is the running enrichment score, the dot marks its peak, and the ticks below mark where the set's genes fall in the ranking. NES and FDR are printed in each panel. FDR is Benjamini-Hochberg across the up and down set tested against that contrast. **(B, C)** Our ", top_ns[1], " most up- and ", top_ns[1], " most down-regulated genes per sex, by our log2 ratio, plotted against the Yasmin et al endpoint log2 fold change (B) and the trend log2 fold change across the series (C). The trend log2 fold change is the fitted slope multiplied by the span of the score. Blue points move in the same direction in both datasets and vermillion points in opposite directions. The five genes with the largest effect in our data are labeled in each panel. Each panel gives the Spearman correlation (rho) over the plotted genes. For our up and down genes separately, it gives the number moving the same way in the Yasmin et al contrast, the share of all genes moving that way in that contrast, and a one-sided hypergeometric p-value against that share.")`
 
-A) Each fine node's signature scores across Yasmin et al.'s eight groups. B) The trajectory, colored by peak group. C) How the genes changing along each fine path sit in the two Yasmin et al. trend rankings. Positive (red) NES means enrichment among the genes increasing along development. Negative (blue) NES means enrichment among the genes decreasing along development. 
+## Figure 7: Fine node summary
 
 ```{r}
-# The tree 02_germ_pseudotime.Rmd drew, read back rather than laid out again
-# here, so the two documents show the same picture of it.
 tree_files = c(layout = paste0(fine_dir, "/node_graph_layout.csv"),
                edges  = paste0(fine_dir, "/mst_edges.csv"))
 stopifnot(all(file.exists(tree_files)))
 
-# The signature heatmap is tall and narrow, the tree and the enrichment grid
-# are short and wide. Stacked in one column the second two waste most of the
-# page, so the heatmap takes the left and the other two share the right, and
-# the height is whichever side needs more.
 fine_h = {
   n_node = dplyr::n_distinct(node_group$group[node_group$source == "fine nodes"])
   n_path = dplyr::n_distinct(gs$row[gs$run == "fine"])
@@ -2639,15 +2522,9 @@ fine_w = 12
 ```
 
 ```{r, fig.width=fine_w, fig.height=fine_h}
-# Heights follow the row counts, each with an allowance for the group names
-# angled under it, since both panels spell out their own x axis.
 n_node = dplyr::n_distinct(node_group$group[node_group$source == "fine nodes"])
 n_path = dplyr::n_distinct(gs$row[gs$run == "fine"])
 
-# The peak group on the tree. A node's peak is an argmax over eight group
-# means, so a node whose top two are nearly tied carries almost no evidence for
-# either. The margin between first and second sets how solid the node is drawn,
-# which keeps a near-tie from reading as a decision.
 tree_panel = function() {
   lay = read.csv(tree_files[["layout"]], stringsAsFactors = FALSE,
                  colClasses = c(node = "character"))
@@ -2685,8 +2562,6 @@ tree_panel = function() {
                              segment.colour = "grey70", max.overlaps = 40,
                              bg.color = "white", bg.r = .12) +
     scale_fill_manual(values = yas_cols, name = NULL, drop = FALSE) +
-    # no legend for the margin: it is the least informative of six keys, and
-    # the caption says what a faint node means
     scale_alpha_continuous(range = c(.35, 1), guide = "none") +
     coord_equal() +
     labs(x = NULL, y = NULL, title = "The trajectory, by peak group") +
@@ -2694,9 +2569,6 @@ tree_panel = function() {
     theme(plot.title = element_text(size = 9, face = "plain", hjust = 0))
 }
 
-# Upright group names here rather than the angled ones the standalone figure
-# uses. Angled, the leftmost label overhangs the panel by more than an inch and
-# runs off the side of a composite that starts at the page edge.
 left   = corr_panel("fine nodes", TRUE) +
            labs(title = "Signature score across the series") +
            theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = .5))
@@ -2719,6 +2591,7 @@ ggsave(p_fine, file = paste0(results_dir, "/fine_node_summary.pdf"),
        width = fine_w, height = fine_h, limitsize = FALSE)
 ```
 
+`r paste0("**Figure 7. The germ cell trajectory against the Yasmin et al series.** **(A)** Each trajectory node's marker signature scored across the Yasmin et al groups. A node's signature is its top ", n_sig, " markers by mean log fold change that are measured in the Yasmin et al series. Markers come from scran::findMarkers between the trajectory nodes, at FDR < 0.01 and a mean log fold change of at least 1. Yasmin et al expression is log2 CPM with a prior count of 1, standardized for each gene across the ", ncol(zmat), " samples. A sample's score is the mean standardized expression of the signature's genes. Fill is the mean score of the animals in each group, on a scale shared with the atlas cluster signatures. The outlined cells are each node's highest group and any group within ", round(100 * tie_frac), "% of that node's range of scores. Rows are ordered by average-linkage hierarchical clustering of their scores across the groups. **(B)** The trajectory tree, drawn with the distance-weighted node graph layout. Each node is colored by the group its signature scores highest in. Nodes without a signature are not drawn. Opacity is the margin between that group's score and the next highest, so pale nodes have a close runner-up. **(C)** Gene set enrichment (fgsea) of the genes that change along each trajectory path in the Yasmin et al male and female trend rankings. Each path contributes its top ", top_ns[1], " up-regulated and top ", top_ns[1], " down-regulated genes, by the slope of a linear fit on pseudotime, from the genes significant at FDR < 0.01 in TSCAN::testPseudotime. Paths ending in nodes ", paste(fine_female_paths, collapse = " and "), " are the female arm, and every other path is the male arm. Rows are paths, labeled with their arm. Columns are the sex of the Yasmin et al trend and the direction of the gene set. Fill is the normalized enrichment score (NES), capped at ", hm_lim, " in either direction. Red is enrichment among genes rising across the series and blue among genes falling. A white disc marks FDR < ", hm_fdr, ", Benjamini-Hochberg across the ", length(pt_sets), " path gene sets tested against each contrast. Grey marks a test fgsea could not score.")`
 
 
 # Full gene table
@@ -2752,13 +2625,13 @@ file_notes = c(
   "bulk_agreement_scatter.png"     = "Our log fold change against that of Yasmin et al for every measurable gene, one panel per axis.",
   "top_gene_GO_pvalues.csv"        = "GO enrichment of the top stage genes from both sides, up and down taken separately, one row per term and gene set.",
   "top_gene_GO_overlaps.csv"       = "The genes behind each enriched term.",
-  "top_gene_enrichment.csv"        = "Each of our top gene lists tested for enrichment in each Yasmin et al contrast's ranking, with the enrichment score, its normalized value, the permutation p-value and FDR, and whether the direction came out as expected. The pseudotime sets are fitted separately and are in pseudotime_enrichment.csv.",
+  "top_gene_enrichment.csv"        = "Each of our top gene lists tested for enrichment in each Yasmin et al contrast's ranking, with the enrichment score, its normalized value, the permutation p-value and FDR, and whether the direction came out as expected. FDR is adjusted across the sets tested against each contrast. The pseudotime sets are fitted separately and are in pseudotime_enrichment.csv.",
   "top_gene_enrichment_leading_edge.csv" = "The genes carrying each enrichment, with our effect size and the Yasmin et al test statistic.",
   "top_gene_enrichment.png"        = "Normalized enrichment score per set and contrast, with the up and down sets colored and significance marked.",
   "top_gene_list_upset.png"        = "Intersections of our top gene lists with Yasmin et al trend lists, largest first, as an UpSet plot.",
   "shared_trend_GO_terms.csv"      = "Terms enriched in our top genes and in Yasmin et al trend genes on the same sex in the same direction, with each side's p-value, FDR and gene count.",
   "shared_trend_GO_terms.png"      = "The strongest of those shared terms, each with a point per dataset, faceted by sex and direction.",
-  "pseudotime_enrichment.csv"      = "Each pseudotime gene set against each Yasmin et al contrast, with its enrichment score, FDR and whether the contrast matched the path's own sex. Adjusted across the pseudotime sets alone.",
+  "pseudotime_enrichment.csv"      = "Each pseudotime gene set against each Yasmin et al contrast, with its enrichment score, FDR and whether the contrast matched the path's own sex. FDR is adjusted across the pseudotime sets tested against each contrast.",
   "pseudotime_enrichment_leading_edge.csv" = "The genes carrying each of those enrichments.",
   "pseudotime_enrichment_grid.png" = "Every pseudotime path and direction against every Yasmin et al contrast, colored by normalized enrichment score, split by contrast shape.",
   "pseudotime_cross_sex.csv"       = "Each pseudotime path and direction with the strongest enrichment it reached on its own sex and on the other, and the contrast each came from.",

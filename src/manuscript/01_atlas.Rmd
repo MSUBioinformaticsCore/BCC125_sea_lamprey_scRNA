@@ -1133,7 +1133,7 @@ cell_key$final_label = as.character(final_label)
 stopifnot(!any(is.na(final_label)),
           length(final_label) == nrow(cell_key))
 
-# Cell type names supplied by the Chung-Davidson lab for this labelling. Their
+# Cell type names supplied by the Chung-Davidson lab for this labeling. Their
 # 12L and 12T are the larval and transformer halves of the split cluster. The
 # row order is the order of the Figure 1 legend.
 anno = tibble::tribble(
@@ -1164,17 +1164,17 @@ anno = tibble::tribble(
 missing_anno = setdiff(levels(final_label), anno$final_label)
 extra_anno   = setdiff(anno$final_label, levels(final_label))
 if (length(missing_anno) > 0 || length(extra_anno) > 0)
-  stop("The annotation does not match this labelling. ",
+  stop("The annotation does not match this labeling. ",
        if (length(missing_anno)) paste0("Unnamed label(s): ",
            paste(missing_anno, collapse = ", "), ". ") else "",
        if (length(extra_anno)) paste0("Named but absent: ",
            paste(extra_anno, collapse = ", "), ". ") else "",
-       "Re-derive the annotation for this clustering before relabelling.")
+       "Re-derive the annotation for this clustering before relabeling.")
 
 cell_key = cell_key %>% left_join(anno, by = "final_label")
 
 # The per-cell assignment, saved. Everything else this document writes is
-# aggregated by label, so without this the split labelling exists only for the
+# aggregated by label, so without this the split labeling exists only for the
 # duration of the knit and nothing downstream can use it.
 cell_labels = cell_key %>%
   dplyr::select(barcode, batch, library, stage,
@@ -1199,7 +1199,7 @@ The cell type names are held back until after the marker sections, so the
 evidence is read before the interpretation. They are applied in **Cell type
 annotation** below.
 
-`r if (length(split_candidates) == 0) "No cluster met the conditions, so the final labelling is the original clustering unchanged." else paste0("Cluster(s) ", paste(split_candidates, collapse = ", "), " were split, giving ", nlevels(final_label), " labels from ", length(all_clusters), " clusters.")`
+`r if (length(split_candidates) == 0) "No cluster met the conditions, so the final labeling is the original clustering unchanged." else paste0("Cluster(s) ", paste(split_candidates, collapse = ", "), " were split, giving ", nlevels(final_label), " labels from ", length(all_clusters), " clusters.")`
 
 The per-cell assignment is written to `cell_cluster_labels.csv`, one row per
 barcode with its library, stage, original cluster and final label, and as
@@ -1211,7 +1211,7 @@ sce$final_label <- labs[colnames(sce)]
 ```
 
 Note that `merged.sce` is saved before the split, so its own `label` column is
-the original clustering. Anything wanting the split labelling has to take it
+the original clustering. Anything wanting the split labeling has to take it
 from one of these two files rather than from the object.
 
 ## Composition of the final labeling
@@ -1657,7 +1657,7 @@ summary_tbl = data.frame(
                "correspond across the stage boundary",
                "fail across the stage boundary",
                "clusters split",
-               "labels in the final labelling"),
+               "labels in the final labeling"),
   value = c(format(ncol(merged.sce), big.mark = ","),
             as.character(n_clusters),
             paste0(n_clusters - n_core, " of ", n_clusters),
@@ -1756,21 +1756,111 @@ ggsave(p_fig1, file = paste0(results_dir, "/Fig1_tsne.png"),
 
 `r paste0("**Figure 1. Clusters of all cells and their library composition.** **(A)** tSNE of the ", format(ncol(merged.sce), big.mark = ","), " cells from four libraries: two undifferentiated larvae and one female and one male transformer. The tSNE is computed on the fastMNN-corrected space of the four libraries. Cells are colored by cell type, and each number marks the median position of its cluster's cells. The legend gives the number of cells of each type. Clusters are Louvain communities of a shared nearest neighbor graph (k = ", snn_k, ") built on the corrected space. Cluster 12 is split into a transformer half (12T) and a larval half (12L). Its larval and transformer cells did not match each other by marker gene overlap in either direction. **(B)** The percentage of each cluster's cells from each library.")`
 
-# Settings
+# Everything written by this document
 
-The fixed settings this document ran with.
+Built by listing the results directory and looking each file up, rather than by
+keeping a list by hand. A file with no description, or a description with no
+file, is reported below instead of passing unnoticed.
 
 ```{r}
-settings = data.frame(
-  setting = c("results_date", "dbr", "dbr_sd", "snn_k", "lfc_thresh",
-              "marker_file", "ieg_marker_file", "genome_dir"),
-  value   = c(results_date, dbr, dbr_sd, snn_k, lfc_thresh,
-              marker_file, ieg_marker_file, genome_dir),
+file_notes = c(
+  "median_stats.csv"              = "Per library after doublet removal: cells, median counts, median genes detected and median percent mitochondrial.",
+  "clustering_stability.png"      = "Mean ARI between subsamples and mean cluster count across k, with the chosen k marked.",
+  "all_cells_tsne.png"            = "tSNE of all cells colored by cluster before splitting.",
+  "tsne_by_library.png"           = "Each library over the full embedding.",
+  "cluster_qc.csv"                = "Per cluster before splitting: cells, median genes detected, median counts and median percent mitochondrial.",
+  "cluster_qc_genes.png"          = "Genes detected per cell by cluster.",
+  "cluster_qc_counts.png"         = "Counts per cell by cluster.",
+  "cluster_qc_mito.png"           = "Percent mitochondrial per cell by cluster.",
+  "cluster_composition.csv"       = "Cells per cluster from each library and stage, as counts and percentages, before splitting.",
+  "cluster_composition_by_library.png" = "Library composition of each cluster before splitting.",
+  "cluster_composition_by_stage.png"   = "Stage composition of each cluster before splitting.",
+  "cells_per_cluster_per_side.csv" = "Cells per cluster on the larval and transformer sides, which decides whether a cluster can be compared.",
+  "SuppTable_reciprocal_matches.csv" = "Every cluster in both comparisons, replicate and stage: list lengths, self similarity, best match each way, reciprocity and margin.",
+  "SuppTable_stage_outcomes.csv"  = "One row per compared cluster: the replicate control, the stage test, which side broke the match, and the outcome.",
+  "cross_boundary_similarity.png" = "Marker list overlap between every pair of clusters, for the replicate and the stage comparison.",
+  "self_match_margin.png"         = "Each cluster's margin over its strongest competitor, replicate against stage.",
+  "cell_cluster_labels.csv"       = "One row per cell: barcode, library, stage, original cluster, final label and cell type.",
+  "cluster_composition_after_split.csv" = "Cells per final label from each library and stage, as counts and percentages.",
+  "cluster_composition_by_library_after_split.png" = "Library composition of each final label.",
+  "cluster_composition_by_stage_after_split.png"   = "Stage composition of each final label.",
+  "cluster_marker_genes_unfiltered.csv" = "Every gene for every final label: p-value, FDR and mean log fold change, with gene descriptions.",
+  "cluster_marker_genes.csv"      = "The working marker list: FDR < 0.01 and mean log fold change of at least lfc_thresh.",
+  "cluster_marker_gene_overlaps.csv"   = "Which genes each cluster's markers share with each curated marker set.",
+  "cluster_marker_overlap_pvalues.csv" = "Hypergeometric test of each cluster's markers against each curated marker set.",
+  "cluster_marker_overlap_heatmap.png" = "Those tests as a heatmap.",
+  "cluster_GO_overlaps.csv"       = "Which marker genes carry each enriched GO term, per cluster.",
+  "cluster_GO_overlap_pvalues.csv" = "GO enrichment of each cluster's marker genes.",
+  "canonical_marker_expression_per_cluster.csv" = "Percent expressing and mean log expression of every curated marker in every final label.",
+  "canonical_marker_bubble_all_clusters.png"    = "Those values as a bubble plot, faceted by marker set.",
+  "dissociation_response_per_cluster.csv" = "The immediate-early genes per final label, gene by gene.",
+  "dissociation_response_by_cluster.csv"  = "The immediate-early set as one score per final label.",
+  "dissociation_response.png"     = "Immediate-early gene expression by final label.",
+  "cell_type_annotation.csv"      = "Each final label with its cell type name and cell count.",
+  "Fig1_tsne.png"                 = "Figure 1: tSNE by cell type and the library composition of each cluster.")
+
+in_dir  = sort(setdiff(list.files(results_dir), "Robjects"))
+
+# The table describes what this document writes. The results directory also
+# holds whatever earlier runs left behind, and those are named below rather
+# than given rows with no description.
+on_disk = intersect(names(file_notes), in_dir)
+unknown = setdiff(in_dir, names(file_notes))
+missing = setdiff(names(file_notes), in_dir)
+
+file_size = function(f)
+  format(structure(file.size(f), class = "object_size"), units = "auto")
+
+export_tab = data.frame(
+  file = on_disk,
+  size = sapply(file.path(results_dir, on_disk), file_size),
+  what = unname(file_notes[on_disk]),
   stringsAsFactors = FALSE)
 
-datatable(settings, rownames = FALSE,
-          options = list(dom = "t", ordering = FALSE, paging = FALSE))
+datatable(export_tab, rownames = FALSE, escape = FALSE,
+          options = list(pageLength = 40, dom = "tp",
+                         columnDefs = list(list(width = "240px", targets = 0))))
 ```
+
+`r if (length(unknown) > 0) paste0(length(unknown), " file(s) in the directory are not written by this document and are left out of the table: ", paste(unknown, collapse = ", "), ". Either an earlier version wrote them, or they are new and need a line in file_notes.") else ""`
+
+`r if (length(missing) > 0) paste0("Described but not written on this run: ", paste(missing, collapse = ", "), ".") else ""`
+
+`r paste0("Written to ", results_dir, ".")`
+
+## Objects read by later documents
+
+These are written to the shared `_no_doublets` directory, or to `Robjects`, and
+are reused rather than rebuilt when they already exist. The modification time
+says which run wrote each one.
+
+```{r}
+object_notes = c(
+  "doublet_removal_stats.csv" = "Cells before and after doublet removal per library.",
+  "doublet_rate_used.txt"     = "The doublet rate the per-library objects were built at.",
+  "all.sce.Rds"               = "The per-library objects after doublet removal, normalized, with PCA.",
+  "mnn.sce.Rds"               = "The fastMNN merge of the four libraries, with tSNE.",
+  "merged.sce.Rds"            = "The merge with its clustering at snn_k.",
+  "clustering_k_used.txt"     = "The k the cached clustering was built at.",
+  "combined.sce.Rds"          = "Uncorrected counts on the same cells, for every quantification.")
+
+object_tab = data.frame(
+  file = c(names(object_notes), "Robjects/final_label.Rds"),
+  path = c(file.path(object_dir, names(object_notes)),
+           file.path(Robject_out_dir, "final_label.Rds")),
+  what = c(unname(object_notes),
+           "The final label of every cell, named by barcode."),
+  stringsAsFactors = FALSE) %>%
+  dplyr::filter(file.exists(path)) %>%
+  dplyr::mutate(size     = sapply(path, file_size),
+                modified = format(file.mtime(path), "%Y-%m-%d %H:%M")) %>%
+  dplyr::select(file, size, modified, what)
+
+datatable(object_tab, rownames = FALSE,
+          options = list(dom = "t", paging = FALSE, ordering = FALSE))
+```
+
+`r paste0("The shared objects are in ", object_dir, ".")`
 
 # Session info
 
