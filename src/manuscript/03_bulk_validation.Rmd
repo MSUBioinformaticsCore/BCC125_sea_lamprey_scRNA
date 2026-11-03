@@ -37,7 +37,7 @@ library(edgeR)
 library(patchwork)
 library(ggrepel)
 library(DT)
-source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+source(paste0(params$project_dir, "/src/manuscript/scRNA_seq_functions_manuscript.R"))
 ```
 
 Independent evidence for the stage-associated patterns. Answers the reviewer's request for

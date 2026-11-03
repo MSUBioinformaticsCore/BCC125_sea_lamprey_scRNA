@@ -39,7 +39,7 @@ library(DT)
 library(batchelor)
 library(BiocSingular)
 library(scDblFinder)
-source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+source(paste0(params$project_dir, "/src/manuscript/scRNA_seq_functions_manuscript.R"))
 ```
 
 ```{r}

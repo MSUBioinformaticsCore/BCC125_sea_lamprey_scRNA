@@ -74,7 +74,7 @@ library(DT)
 library(ggraph)
 library(tidygraph)
 library(ggrepel)
-source(paste0(params$project_dir, "/src/scRNA_seq_functions.R"))
+source(paste0(params$project_dir, "/src/manuscript/scRNA_seq_functions_manuscript.R"))
 ```
 
 TSCAN pseudotime for the germ cells, male and female together, with **every**
