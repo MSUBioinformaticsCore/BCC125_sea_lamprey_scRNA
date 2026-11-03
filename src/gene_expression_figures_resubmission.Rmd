@@ -290,14 +290,16 @@ ggsave(p_piwil1_sycp3, file = paste0(results_dir, "/PIWIL1_SYCP3.png"),
 
 ### PIWIL1 and SYCP3 by library
 
-The same genes with each library drawn on its own. The pooled figure mixes
-libraries, and the male library carries both genes in its somatic clusters,
+The same genes with all cells pooled, as in the figure above, and then each
+library drawn on its own. The pooled panel mixes libraries, and the male library carries both genes in its somatic clusters,
 likely ambient RNA from its spermatocytes. Here a cluster is compared with the
 clusters of its own library, which is how the marker test compares them. A
 cluster with fewer than 10 cells in a library is left out of that panel.
 
-```{r, fig.width=10, fig.height=7, dev = "png", dpi = 600}
-lib_order     = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male")
+```{r, fig.width=12, fig.height=7, dev = "png", dpi = 600}
+# the pooled panel first, then the libraries
+lib_order     = c("All cells", "Undifferentiated.1", "Undifferentiated.2",
+                  "Female", "Male")
 min_lib_cells = 10
 
 cell_lab = read.csv(paste0(atlas_dir, "/cell_cluster_labels.csv"),
@@ -309,10 +311,14 @@ violin_by_library = function(goi) {
   gene_id = gene_descriptions$Gene[match(goi, gene_descriptions$WangGeneID)]
   stopifnot(!is.na(gene_id), gene_id %in% rownames(combined.sce))
 
-  d = data.frame(cluster = cell_lab$final_label[lab_idx],
-                 library = cell_lab$library[lab_idx],
-                 expr    = logcounts(combined.sce)[gene_id, ],
-                 stringsAsFactors = FALSE) %>%
+  per_lib = data.frame(cluster = cell_lab$final_label[lab_idx],
+                       library = cell_lab$library[lab_idx],
+                       expr    = logcounts(combined.sce)[gene_id, ],
+                       stringsAsFactors = FALSE)
+
+  # every cell again under one label, so the pooled panel is the same data
+  d = dplyr::bind_rows(per_lib %>% dplyr::mutate(library = "All cells"),
+                       per_lib) %>%
     dplyr::group_by(library, cluster) %>%
     dplyr::filter(dplyr::n() >= min_lib_cells) %>%
     dplyr::ungroup() %>%
@@ -349,7 +355,7 @@ p_piwil1_sycp3_lib = (violin_by_library("PIWIL1") / violin_by_library("SYCP3")) 
 
 p_piwil1_sycp3_lib
 ggsave(p_piwil1_sycp3_lib, file = paste0(results_dir, "/PIWIL1_SYCP3_by_library.png"),
-       width = 10, height = 7, dpi = 600)
+       width = 12, height = 7, dpi = 600)
 ```
 
 ### S18: pfn2 and mmp19 enriched in immune cells, and zp and alox5 enriched in oogonia and oocytes 
