@@ -1,0 +1,1153 @@
+# The functions from src/scRNA_seq_functions.R that the manuscript code calls,
+# copied unchanged: 01_atlas.Rmd, 02_germ_pseudotime.Rmd, 03_bulk_validation.Rmd,
+# src/run_stable_k.R and src/gene_expression_figures_resubmission.Rmd.
+
+# phyperOverlapSets ------------------------------------------------------------
+#' @name phyperOverlapSets
+#' @description performs pairwise hypergeometric tests between multiple sets 
+#' of genes i.e. cluster marker genes from two different single cell
+#' different single cell data sets
+#' @param table1 a dataframe with two columns, 
+#' ie gene and cluster assignment, from dataset 1      
+#' @param table2 a dataframe with two columns, 
+#' ie gene and cluster assignment, from dataset 2
+#' format example
+#' --------------  
+#' Gene  Cluster
+#' Gene1 cluster1
+#' Gene2 cluster1
+#' Gene3 cluster2
+#' Gene4 cluster3
+#' @param background the number of genes in the gene universe 
+#' ie. all expressed genes
+#' @return a list with two elements: 
+#' [1]intersecting.genes: a tidy table where each row shows two groups 
+#' (one from table1 and one from table2) and an intersecting gene or "none"
+#' [2] pval.scores: a tidy table where each row is a pair of groups 
+#' (one from table1 and one from table2) with the number of genes in each group,
+#' the nunber of intersecting genes, the uncorrected pval, and the enrichment score
+
+phyperOverlapSets <- function(table1, table2, background){
+  require(dplyr)
+  
+  # make table1 into a list divided by group
+  colnames(table1) = c("Gene","Group")
+  tab1_groups = unique(table1$Group)
+  tab1_list = list()
+
+  for(group in tab1_groups){
+    tab1_list[[as.character(group)]] = table1 %>%
+      dplyr::filter(Group == group)
+  }
+
+  # make table2 into a list divided by group
+  colnames(table2) = c("Gene","Group")
+  tab2_groups = unique(table2$Group)
+  tab2_list = list()
+
+  for(group in tab2_groups){
+    tab2_list[[as.character(group)]] = table2 %>%
+      dplyr::filter(Group == group)
+  }
+  
+  # make a list of dfs with the names of genes shared between
+  # every group in table1 and every group in table2
+  INT = list()
+  # make a list of dfs with the number of genes shared between
+  # every group in table1 and every group in table2
+  nINT = list()
+  
+  for(group in tab1_groups){
+    genes = tab1_list[[group]]$Gene
+    INT_list = lapply(tab2_list, 
+                      function(x){
+                        y = intersect(x$Gene, genes);
+                        if(length(y) > 0){
+                          z = data.frame(SharedGene = y)}
+                        else{z = data.frame(SharedGene = "none")};
+                        z
+                      })
+    
+    INT_list = Map(function(df, nm) { df$Group2 <- nm; df }, INT_list, names(INT_list))
+    
+    INT[[group]] = do.call(rbind,INT_list)
+    INT[[group]]$Group1 = group
+    
+    INT[[group]] = INT[[group]] %>%
+      dplyr::select(Group1, Group2, SharedGene)
+    
+    nINT_list = lapply(tab2_list, 
+                       function(x){
+                         y = intersect(x$Gene, genes);
+                         z = length(y);
+                         z
+                       })
+    
+    nINT_vec = unlist(nINT_list)
+    nGroup2 = unlist(lapply(tab2_list, nrow))
+    
+    nINT[[group]] = data.frame(Group1 = group,
+                               nGroup1 = length(genes),
+                               Group2 = names(nINT_vec),
+                               nGroup2  = nGroup2,
+                               nSharedGenes = nINT_vec)
+    
+    
+  }
+  
+  INTdf = do.call(rbind, INT)
+  nINTdf = do.call(rbind, nINT)
+  
+  nINTdf = nINTdf %>%
+    mutate(Pval = phyper(nSharedGenes-1,
+                         nGroup2,
+                         background-nGroup2,
+                         nGroup1,
+                         lower.tail= FALSE)
+    )
+  
+  nINTdf = nINTdf %>%
+    mutate(Enrichment = 
+             log2(
+               (nSharedGenes/nGroup2)/
+                 (nGroup1/background))
+    )
+  
+  return(list(intersecting.genes = INTdf, 
+              pval.scores = nINTdf))
+}
+
+# find_stable_k -----------------------------------------------------------
+
+#' @param prop fraction of cells drawn in each subsample
+#' @details Stability is measured against perturbation of the data, not against
+#'   repetition of the call. `buildSNNGraph` and `igraph::cluster_louvain` are
+#'   both deterministic on fixed input, so re-running them on the same cells
+#'   returns the same partition every time; an earlier version of this function
+#'   did exactly that and reported ARI = 1 and CV = 0 for every k regardless of
+#'   the data. Each iteration now clusters an independent subsample, and a pair
+#'   of iterations is compared only on the cells they have in common.
+#'
+#'   The same subsamples are reused across every k, so a difference between two
+#'   values of k is a difference in k rather than in which cells were drawn.
+
+find_stable_k <- function(sce, k_range = seq(5, 50, by = 5),
+                          n_iterations = 10, use.dimred = "PCA",
+                          prop = 0.8, seed = 42) {
+
+  stopifnot(prop > 0, prop <= 1, n_iterations >= 2)
+  set.seed(seed)
+
+  n_cells   <- ncol(sce)
+  n_draw    <- max(2, round(prop * n_cells))
+  cell_ids  <- if (is.null(colnames(sce))) as.character(seq_len(n_cells)) else colnames(sce)
+  subsets   <- lapply(seq_len(n_iterations), function(i) sort(sample(n_cells, n_draw)))
+
+  results <- list()
+
+  for (k in k_range) {
+    cat("Testing k =", k, "\n")
+
+    assignments <- vector("list", n_iterations)
+    n_clusters  <- numeric(n_iterations)
+
+    for (i in seq_len(n_iterations)) {
+      idx <- subsets[[i]]
+      snn <- buildSNNGraph(sce[, idx], k = k, use.dimred = use.dimred)
+      cl  <- igraph::cluster_louvain(snn)$membership
+      names(cl)      <- cell_ids[idx]
+      assignments[[i]] <- cl
+      n_clusters[i]  <- length(unique(cl))
+    }
+
+    # pairwise ARI, computed only on cells present in both subsamples
+    ari_values <- numeric()
+    n_shared   <- numeric()
+    for (i in 1:(n_iterations - 1)) {
+      for (j in (i + 1):n_iterations) {
+        common <- intersect(names(assignments[[i]]), names(assignments[[j]]))
+        if (length(common) < 50) next
+        ari_values <- c(ari_values,
+                        mclust::adjustedRandIndex(assignments[[i]][common],
+                                                  assignments[[j]][common]))
+        n_shared <- c(n_shared, length(common))
+      }
+    }
+
+    if (length(ari_values) == 0) {
+      warning("k = ", k, ": no pair of subsamples shared enough cells to compare.")
+      ari_values <- NA_real_
+    }
+
+    results[[as.character(k)]] <- list(
+      k               = k,
+      mean_n_clusters = mean(n_clusters),
+      sd_n_clusters   = sd(n_clusters),
+      cv_n_clusters   = sd(n_clusters) / mean(n_clusters),
+      mean_ari        = mean(ari_values),
+      min_ari         = min(ari_values),
+      n_iterations    = n_iterations,
+      prop            = prop,
+      mean_shared     = if (length(n_shared)) mean(n_shared) else NA_real_,
+      assignments     = assignments
+    )
+  }
+
+  return(results)
+}
+
+# plot_stability_metrics --------------------------------------------------
+# Function to visualize stability results
+plot_stability_metrics <- function(results) {
+  
+  # Extract metrics into data frame
+  df <- do.call(rbind, lapply(results, function(x) {
+    data.frame(
+      k = x$k,
+      mean_n_clusters = x$mean_n_clusters,
+      cv_n_clusters = x$cv_n_clusters,
+      mean_ari = x$mean_ari,
+      min_ari = x$min_ari
+    )
+  }))
+  
+  # Create plots
+  p1 <- ggplot(df, aes(x = k, y = mean_n_clusters)) +
+    geom_line(color = "steelblue", linewidth = 1) +
+    geom_point(size = 3) +
+    labs(title = "Number of Clusters vs k",
+         x = "k (number of neighbors)",
+         y = "Mean number of clusters") +
+    theme_minimal()
+  
+  p2 <- ggplot(df, aes(x = k, y = mean_ari)) +
+    geom_line(color = "darkgreen", linewidth = 1) +
+    geom_point(size = 3) +
+    geom_hline(yintercept = 0.9, linetype = "dashed", color = "red") +
+    labs(title = "Clustering Stability (ARI) vs k",
+         x = "k (number of neighbors)",
+         y = "Mean ARI between iterations",
+         subtitle = "Higher ARI = more stable (aim for > 0.9)") +
+    ylim(0, 1) +
+    theme_minimal()
+  
+  p3 <- ggplot(df, aes(x = k, y = cv_n_clusters)) +
+    geom_line(color = "darkorange", linewidth = 1) +
+    geom_point(size = 3) +
+    labs(title = "Coefficient of Variation vs k",
+         x = "k (number of neighbors)",
+         y = "CV of cluster counts",
+         subtitle = "Lower CV = more stable") +
+    theme_minimal()
+  
+  return(list(p1 = p1, p2 = p2, p3 = p3, data = df))
+}
+
+# plot_pseudotime_heatmap -------------------------------------------------
+
+plot_pseudotime_heatmap <- function(
+    sce_object,
+    gene_ids,                # e.g. top50
+    gene_labels,             # e.g. top50_wang
+    cell_subset,             # e.g. on.path8
+    pseudotime_column = "Pseudotime",
+    heatmap_limits = c(-4, 5),
+    title = NULL 
+) {
+  
+  # -------------------------------------------
+  # 1. Expression matrix centered
+  # -------------------------------------------
+  mat <- logcounts(sce_object[gene_ids, cell_subset])
+  rownames(mat) <- gene_labels
+  
+  mat_scaled <- t(scale(t(mat), center = TRUE))
+  
+  # -------------------------------------------
+  # 2. Metadata + ordering by pseudotime
+  # -------------------------------------------
+  meta <- as.data.frame(colData(sce_object[, cell_subset]))
+  
+  # Ensure numeric ordering
+  meta[[pseudotime_column]] <- as.numeric(meta[[pseudotime_column]])
+  
+  meta <- meta %>%
+    dplyr::arrange(.data[[pseudotime_column]])
+  
+  # Reorder expression matrix columns
+  mat_scaled <- mat_scaled[, rownames(meta)]
+  
+  # -------------------------------------------
+  # 3. Cluster genes (rows)
+  # -------------------------------------------
+  gene_dist  <- dist(mat_scaled)
+  gene_clust <- hclust(gene_dist, method = "ward.D2")
+  gene_order <- gene_clust$labels[gene_clust$order]
+  
+  mat_scaled <- mat_scaled[gene_order, , drop = FALSE]
+  
+  # -------------------------------------------
+  # 4. Long format data
+  # -------------------------------------------
+  df_long <- as.data.frame(mat_scaled) %>%
+    tibble::rownames_to_column("Gene") %>%
+    tidyr::pivot_longer(-Gene, names_to = "Cell", values_to = "Expression") %>%
+    dplyr::left_join(
+      meta %>% tibble::rownames_to_column("Cell"),
+      by = "Cell"
+    )
+  
+  df_long$Gene <- factor(df_long$Gene, levels = gene_order)
+  
+  # -------------------------------------------
+  # 5. Annotation bar (pseudotime)
+  # -------------------------------------------
+  meta$Cell <- factor(rownames(meta), levels = rownames(meta))
+  
+  m_anno_bar <- ggplot2::ggplot(
+    meta,
+    ggplot2::aes(
+      x = Cell,
+      y = 1,
+      fill = .data[[pseudotime_column]]
+    )
+  ) +
+    ggplot2::geom_tile() +
+    ggplot2::scale_fill_viridis_c(
+      option = "viridis",
+      na.value = "white",
+      limits = c(0, 1)
+    ) +
+    ggplot2::theme_minimal(base_size = 8) +
+    ggplot2::theme(
+      legend.position = "right",
+      legend.title    = ggplot2::element_text(size = 8),
+      legend.text     = ggplot2::element_text(size = 8),
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      axis.text.y = ggplot2::element_blank(),
+      axis.ticks.y = ggplot2::element_blank(),
+      axis.title = ggplot2::element_blank(),
+      panel.grid = ggplot2::element_blank(),
+      panel.background = ggplot2::element_rect(fill = "white", color = NA),
+      plot.margin = ggplot2::margin(0, 5, 0, 40)
+    ) +
+    ggplot2::labs(fill = "Pseudotime") +
+    labs(title = title)
+  
+  # -------------------------------------------
+  # 6. Heatmap
+  # -------------------------------------------
+  df_long$Cell <- factor(df_long$Cell, levels = levels(meta$Cell))
+  
+  m_heatmap_plot <- ggplot2::ggplot(
+    df_long,
+    ggplot2::aes(x = Cell, y = Gene, fill = Expression)
+  ) +
+    ggplot2::geom_tile() +
+    ggplot2::scale_fill_gradient2(
+      low = "steelblue3",
+      mid = "#FFFFE0",
+      high = "firebrick2",
+      midpoint = 0,
+      na.value = "white",
+      limits = heatmap_limits,
+      # values past the limits take the end colors; without this they become
+      # NA and are drawn white, which reads as mid-range expression
+      oob = scales::squish
+    ) +
+    ggplot2::scale_x_discrete(expand = c(0, 0)) +
+    ggplot2::theme_minimal(base_size = 8) +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_blank(),
+      axis.ticks.x = ggplot2::element_blank(),
+      axis.text.y = ggplot2::element_text(
+        size = 8,
+        color = "black",
+        face = "italic",
+        family = "sans"
+      ),
+      legend.title = ggplot2::element_text(size = 8),
+      legend.text  = ggplot2::element_text(size = 8),
+      panel.grid = ggplot2::element_blank(),
+      axis.title = ggplot2::element_blank(),
+      plot.margin = ggplot2::margin(0, 5, 0, 40)
+    ) +
+    ggplot2::labs(fill = "Scaled\nexpression")
+  
+  # -------------------------------------------
+  # 7. Combine plots
+  # -------------------------------------------
+  combined_plot <- m_anno_bar / m_heatmap_plot +
+    patchwork::plot_layout(
+      heights = c(0.025, 1),
+      guides = "collect"
+    )
+  
+  return(combined_plot)
+}
+
+# run_go_enrichment -------------------------------------------------------
+#' @name run_go_enrichment
+#' @description Runs GO hypergeometric overlap, writes CSVs, returns scores df.
+#' @param gaf filtered gene annotation file (GOID, Gene columns)
+#' @param gene_description gene descriptions df with Gene, WangGeneID, description
+#' @param go_names GO term name table (GOID, GOName)
+#' @param test_genes two-column df: Gene and group (cluster / path)
+#' @param background_n number of genes in the universe
+#' @param group2_label column name for the group2 variable in output (default "Clusters")
+#' @param ngroup2_label column name for nGroup2 in output (default "nClusterEnrichedGenes")
+#' @param overlaps_file path for intersecting genes CSV; NULL to skip
+#' @param pvals_file path for GO scores CSV; NULL to skip
+#' @param pval_filter if not NULL, keep only rows with Pval < pval_filter
+#' @param require_shared if TRUE, keep only rows with nSharedGenes > 0
+
+run_go_enrichment <- function(gaf, gene_description, go_names,
+                               test_genes, background_n,
+                               group2_label   = "Clusters",
+                               ngroup2_label  = "nClusterEnrichedGenes",
+                               overlaps_file  = NULL,
+                               pvals_file     = NULL,
+                               pval_filter    = NULL,
+                               require_shared = FALSE) {
+  require(dplyr)
+
+  go_ol <- phyperOverlapSets(gaf, test_genes, background_n)
+
+  shared_desc <- gene_description %>% dplyr::rename(SharedGene = "Gene")
+  go_ol$intersecting.genes <- go_ol$intersecting.genes %>%
+    left_join(shared_desc, by = "SharedGene")
+
+  if (!is.null(overlaps_file))
+    write.csv(go_ol$intersecting.genes, file = overlaps_file, row.names = FALSE)
+
+  scores <- go_ol$pval.scores %>%
+    dplyr::rename(GOID           = "Group1",
+                  !!group2_label  := "Group2",
+                  nGOTermGenes   = "nGroup1",
+                  !!ngroup2_label := "nGroup2") %>%
+    dplyr::group_by(!!sym(group2_label)) %>%
+    dplyr::mutate(FDR = p.adjust(Pval, "BH")) %>%
+    dplyr::select(-Enrichment)
+
+  scores <- left_join(go_names, scores, by = "GOID") %>%
+    filter(!is.na(nGOTermGenes))
+
+  if (!is.null(pval_filter))
+    scores <- scores %>% filter(Pval < pval_filter)
+  if (require_shared)
+    scores <- scores %>% filter(nSharedGenes > 0)
+
+  if (!is.null(pvals_file))
+    write.csv(scores, file = pvals_file, row.names = FALSE)
+
+  return(scores)
+}
+
+# build_lineage_sce -------------------------------------------------------
+#' @name build_lineage_sce
+#' @description Corrected space and uncorrected counts for one set of cells,
+#'   shared by 17_germ_pseudotime_tscan.Rmd and 18_germ_pseudotime_monocle3.Rmd
+#'   so both methods run on the same cells and the same correction.
+#' @param all.sce named list of per-library SCEs with counts and logcounts
+#' @param cells barcodes to keep
+#' @param min_library_cells libraries contributing fewer cells are dropped
+#' @param n_hvg number of highly variable genes for the correction
+#' @param seed random seed
+#' @return list with $corrected (reducedDims "corrected", "UMAP", "TSNE"),
+#'   $combined (counts and logcounts, same cells and order), $kept_batches,
+#'   $n_by_library
+
+build_lineage_sce <- function(all.sce, cells, min_library_cells = 50,
+                              n_hvg = 5000, seed = 1) {
+  lib_list <- lapply(all.sce, function(x) {
+    keep <- intersect(colnames(x), cells)
+    if (length(keep) == 0) return(NULL)
+    x[, keep]
+  })
+  lib_list <- lib_list[!vapply(lib_list, is.null, logical(1))]
+
+  n_by_library <- vapply(lib_list, ncol, integer(1))
+  kept <- names(n_by_library)[n_by_library >= min_library_cells]
+  if (length(kept) == 0)
+    stop("no library contributes at least ", min_library_cells, " of these cells")
+  lib_list <- lib_list[kept]
+
+  universe <- Reduce(intersect, lapply(lib_list, rownames))
+  lib_list <- lapply(lib_list, function(x) {
+    x <- x[universe, ]
+    SingleCellExperiment::reducedDims(x) <- list()
+    x
+  })
+
+  dec      <- lapply(lib_list, scran::modelGeneVar)
+  comb_dec <- if (length(dec) > 1) do.call(scran::combineVar, dec) else dec[[1]]
+  hvg      <- scran::getTopHVGs(comb_dec, n = n_hvg)
+
+  set.seed(seed)
+  if (length(lib_list) > 1) {
+    normed    <- do.call(batchelor::multiBatchNorm, lib_list)
+    corrected <- do.call(batchelor::fastMNN,
+                         c(normed, list(subset.row = hvg,
+                                        BSPARAM = BiocSingular::RandomParam())))
+  } else {
+    # one library has nothing to correct between; PCA takes the same name
+    corrected <- scater::runPCA(lib_list[[1]], subset_row = hvg, ncomponents = 50,
+                                BSPARAM = BiocSingular::RandomParam())
+    SingleCellExperiment::reducedDim(corrected, "corrected") <-
+      SingleCellExperiment::reducedDim(corrected, "PCA")
+    corrected$batch <- kept[1]
+  }
+
+  set.seed(seed)
+  corrected <- scater::runUMAP(corrected, dimred = "corrected")
+  set.seed(seed)
+  corrected <- scater::runTSNE(corrected, dimred = "corrected")
+
+  combined <- do.call(cbind, lapply(lib_list, function(x) {
+    SingleCellExperiment::SingleCellExperiment(
+      assays = list(counts    = SingleCellExperiment::counts(x),
+                    logcounts = SingleCellExperiment::logcounts(x)))
+  }))
+  combined <- combined[, colnames(corrected)]
+  stopifnot(identical(colnames(combined), colnames(corrected)))
+
+  list(corrected    = corrected,
+       combined     = combined,
+       kept_batches = kept,
+       n_by_library = n_by_library)
+}
+
+# score_marker_sets -------------------------------------------------------
+#' @name score_marker_sets
+#' @description Per-group expression of named marker sets, used to choose and
+#'   report a trajectory root in 17_germ_pseudotime_tscan.Rmd and
+#'   18_germ_pseudotime_monocle3.Rmd.
+#' @param sce SCE with logcounts
+#' @param groups vector aligned to colnames(sce): the node or cluster of each cell
+#' @param marker_sets data frame with columns set and gene (row ids of sce)
+#' @return one row per group and set: n_genes (found in sce), n_cells,
+#'   mean_logexpr (mean over cells of the per-cell mean across the set's genes),
+#'   pct_detected (mean over the set's genes of the percent of cells with
+#'   logcounts > 0)
+
+score_marker_sets <- function(sce, groups, marker_sets) {
+  stopifnot(length(groups) == ncol(sce),
+            all(c("set", "gene") %in% colnames(marker_sets)))
+  groups <- as.character(groups)
+  lc     <- SingleCellExperiment::logcounts(sce)
+
+  dplyr::bind_rows(lapply(unique(marker_sets$set), function(s) {
+    g <- intersect(unique(marker_sets$gene[marker_sets$set == s]), rownames(sce))
+    dplyr::bind_rows(lapply(unique(groups), function(gr) {
+      idx <- which(groups == gr)
+      if (length(g) == 0) {
+        return(data.frame(group = gr, set = s, n_genes = 0L, n_cells = length(idx),
+                          mean_logexpr = NA_real_, pct_detected = NA_real_,
+                          stringsAsFactors = FALSE))
+      }
+      m <- as.matrix(lc[g, idx, drop = FALSE])
+      data.frame(group        = gr,
+                 set          = s,
+                 n_genes      = length(g),
+                 n_cells      = length(idx),
+                 mean_logexpr = mean(colMeans(m)),
+                 pct_detected = 100 * mean(rowMeans(m > 0)),
+                 stringsAsFactors = FALSE)
+    }))
+  }))
+}
+
+# plot_marker_overlap_heatmap ---------------------------------------------
+#' @name plot_marker_overlap_heatmap
+#' @description Hypergeometric overlap between known cell-type markers and
+#'   cluster enriched genes; draws and optionally saves a heatmap.
+#' @param known_markers two-column df: Gene, CellType
+#' @param test_genes two-column df: Gene, cluster (or other group label)
+#' @param background_n number of genes in the universe
+#' @param gene_description gene descriptions df
+#' @param overlaps_file path for intersecting genes CSV; NULL to skip
+#' @param pvals_file path for overlap p-values CSV; NULL to skip
+#' @param plot_file path to save the PNG; NULL to skip
+#' @return ggplot object
+
+plot_marker_overlap_heatmap <- function(known_markers, test_genes,
+                                         background_n, gene_description,
+                                         overlaps_file = NULL,
+                                         pvals_file    = NULL,
+                                         plot_file     = NULL) {
+  require(dplyr)
+  require(ggplot2)
+  require(tidyr)
+
+  cluster_ol <- phyperOverlapSets(known_markers, test_genes, background_n)
+
+  shared_desc <- gene_description %>% dplyr::rename(SharedGene = "Gene")
+  cluster_ol$intersecting.genes <- cluster_ol$intersecting.genes %>%
+    left_join(shared_desc, by = "SharedGene")
+
+  if (!is.null(overlaps_file))
+    write.csv(cluster_ol$intersecting.genes, file = overlaps_file, row.names = FALSE)
+
+  scores <- cluster_ol$pval.scores %>%
+    dplyr::rename(CellTypes = "Group1", Clusters = "Group2") %>%
+    group_by(CellTypes) %>%
+    mutate(FDR = p.adjust(Pval, "BH"))
+
+  if (!is.null(pvals_file))
+    write.csv(scores, file = pvals_file, row.names = FALSE)
+
+  FDR_wide <- scores %>%
+    mutate(logFDR = -log10(FDR)) %>%
+    tidyr::pivot_wider(id_cols = CellTypes, names_from = Clusters, values_from = logFDR)
+
+  CellTypes        <- FDR_wide$CellTypes
+  FDR_wide$CellTypes <- NULL
+  FDR_mat          <- as.matrix(FDR_wide)
+  rownames(FDR_mat) <- CellTypes
+
+  ord_row <- hclust(dist(FDR_mat),    method = "ward.D")$order
+  ord_col <- hclust(dist(t(FDR_mat)), method = "ward.D")$order
+
+  scores$CellTypes <- factor(scores$CellTypes, levels = rownames(FDR_mat)[ord_row])
+  scores$Clusters  <- factor(scores$Clusters,  levels = colnames(FDR_mat)[ord_col])
+
+  p <- ggplot(scores, aes(Clusters, CellTypes)) +
+    geom_tile(aes(fill = -log10(FDR)), color = "light gray") +
+    guides(fill = guide_colorbar(title = "-log10(FDR)",
+                                  barheight = 10, barwidth = 2,
+                                  default.unit = "mm")) +
+    scale_fill_gradientn(
+      colors = c("white", "#fd9668", "#f1605d", "#de4968", "#9e2f7f"),
+      guide  = "colorbar",
+      limits = c(0, ceiling(-log10(min(scores$FDR))))
+    ) +
+    theme(axis.text.x = element_text(angle = 30, hjust = 1, vjust = 1)) +
+    theme(text = element_text(size = 7), axis.text = element_text(size = 7)) +
+    geom_text(aes(label = nSharedGenes), size = 1) +
+    coord_fixed()
+
+  if (!is.null(plot_file))
+    ggsave(p, file = plot_file)
+
+  return(p)
+}
+
+# plot_violin_goi ---------------------------------------------------------
+#' @name plot_violin_goi
+#' @description Stacked violin + boxplot for a set of genes across clusters.
+#'   Cluster labels are remapped from numeric `label` column via the `anno`
+#'   vector. Significance stars are overlaid from a marker table. Genes are
+#'   ordered by hierarchical clustering of mean expression across clusters.
+#' @param sce SingleCellExperiment with logcounts and a numeric `label` colData column
+#' @param markers data frame with columns WangGeneID, cluster (e.g. "cluster_1"), FDR
+#' @param goi character vector of WangGeneIDs to plot
+#' @param gene_description gene descriptions df with Gene and WangGeneID columns
+#' @param anno character vector mapping numeric cluster index to cell type name
+#' @param palette character vector of colors (one per cluster)
+#' @param label_col colData column for x-axis grouping; accepts a column name
+#'   (character) or column number (integer index into colData). Default "label".
+#' @param level_order vector of cluster labels in the same order as anno, either
+#'   numbers (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)) or the labels
+#'   themselves (e.g. c("11", "12_transformer", "12_larva")). Required when anno
+#'   is not indexed directly by cluster number.
+#' @param title optional plot title
+
+plot_violin_goi <- function(sce, markers, goi, gene_description, anno, palette,
+                             label_col = "label", level_order = NULL,
+                             ncol = 1, title = NULL) {
+
+  fdr_to_stars <- function(fdr) {
+    dplyr::case_when(
+      fdr < 0.05 ~ "*",
+      TRUE       ~ ""
+    )
+  }
+
+  # build a named lookup: cluster number → cell type label
+  if (!is.null(level_order)) {
+    anno_lookup <- setNames(anno, as.character(level_order))
+  } else {
+    anno_lookup <- setNames(anno, as.character(seq_along(anno)))
+  }
+
+  if (is.numeric(label_col)) label_col <- names(colData(sce))[label_col]
+
+  # append cell counts to labels
+  count_tab   <- table(as.character(colData(sce)[[label_col]]))
+  anno_lookup <- setNames(
+    paste0(anno_lookup, " (n=", count_tab[names(anno_lookup)], ")"),
+    names(anno_lookup)
+  )
+  anno_n <- unname(anno_lookup[as.character(if (!is.null(level_order)) level_order else seq_along(anno))])
+
+  # "cluster_01" and "1" both resolve to "1"; a label that is not a number,
+  # such as "12_larva", is looked up as it stands
+  .to_celltype <- function(x) {
+    key <- gsub("cluster_", "", as.character(x))
+    num <- suppressWarnings(as.numeric(key))
+    key <- ifelse(is.na(num), key, as.character(num))
+    unname(anno_lookup[key])
+  }
+
+  goi_loc <- gene_description %>%
+    filter(WangGeneID %in% goi) %>%
+    pull(Gene)
+
+  plot_df <- plotExpression(
+    sce,
+    features      = goi,
+    scattermore   = TRUE,
+    point_size    = 0,
+    swap_rownames = "WangGeneID",
+    x             = label_col,
+    ncol          = 1
+  )$data %>%
+    mutate(
+      X = .to_celltype(X),
+      X = factor(X, levels = anno_n)
+    )
+
+  y_max_df <- plot_df %>%
+    group_by(Feature, X) %>%
+    summarise(y_pos = max(Y) * 1.1, .groups = "drop")
+
+  expand_df <- plot_df %>%
+    group_by(Feature) %>%
+    summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
+    mutate(X = anno_n[1])
+
+  sig_df <- markers %>%
+    filter(WangGeneID %in% goi) %>%
+    mutate(
+      stars   = fdr_to_stars(FDR),
+      Feature = WangGeneID,
+      X       = .to_celltype(cluster)
+    ) %>%
+    filter(stars != "") %>%
+    left_join(y_max_df, by = c("Feature", "X"))
+
+  if (length(goi) > 1) {
+    gene_order <- plot_df %>%
+      group_by(Feature, X) %>%
+      summarise(mean_expr = mean(Y), .groups = "drop") %>%
+      tidyr::pivot_wider(names_from = X, values_from = mean_expr, values_fill = 0) %>%
+      tibble::column_to_rownames("Feature") %>%
+      dist() %>%
+      hclust(method = "ward.D2") %>%
+      { .$labels[.$order] }
+
+    plot_df   <- plot_df   %>% mutate(Feature = factor(Feature, levels = gene_order))
+    sig_df    <- sig_df    %>% mutate(Feature = factor(Feature, levels = gene_order))
+    expand_df <- expand_df %>% mutate(Feature = factor(Feature, levels = gene_order))
+  }
+
+  cluster_colors <- setNames(palette[seq_along(anno_n)], anno_n)
+
+  ggplot(plot_df, aes(x = X, y = Y)) +
+    geom_violin(aes(fill = X, color = after_scale(fill)),
+                linewidth = 0.3, scale = "width", trim = TRUE) +
+    geom_boxplot(width = 0.12, fill = "white", color = "grey40",
+                 linewidth = 0.3, outlier.shape = NA) +
+    geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
+    geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
+              inherit.aes = FALSE, size = 2.8, vjust = 0, fontface = "bold",
+              color = "#2e2e2e") +
+    scale_fill_manual(values = cluster_colors, name = "Cell Type") +
+    scale_x_discrete(labels = function(x) sub("^(\\d+[A-Za-z]*)\\..*", "\\1", x)) +
+    coord_cartesian(clip = "off", ylim = c(0, NA)) +
+    facet_wrap(~ Feature, ncol = ncol, scales = "free_y") +
+    labs(x = NULL, y = "Log-normalized expression", title = title) +
+    theme_classic(base_size = 8) +
+    theme(
+      strip.background = element_rect(fill = "#dce8ef", color = NA),
+      strip.text       = element_text(color = "#2e4a5a", face = "bold.italic", size = 8),
+      axis.text.x      = element_text(color = "#3a3a3a", size = 8, angle = 90,
+                                       hjust = 1, vjust = 0.5),
+      axis.ticks.x     = element_blank(),
+      axis.text.y      = element_text(color = "#3a3a3a", size = 8),
+      axis.title       = element_text(color = "#2e2e2e", size = 8),
+      axis.line        = element_line(color = "#aaaaaa", linewidth = 0.4),
+      axis.ticks       = element_line(color = "#aaaaaa", linewidth = 0.4),
+      panel.spacing    = unit(0.8, "lines"),
+      legend.title     = element_text(size = 8),
+      legend.text      = element_text(size = 8),
+      legend.key.size  = unit(0.4, "cm")
+    )
+}
+
+# plot_violin_goi_single --------------------------------------------------
+#' @name plot_violin_goi_single
+#' @description Horizontal (flipped) violin + boxplot for a single gene across
+#'   clusters. Cluster labels are remapped from numeric `label` via `anno`.
+#'   Significance stars from a marker table are overlaid.
+#' @param sce SingleCellExperiment with logcounts and a numeric `label` colData column
+#' @param markers data frame with columns WangGeneID, cluster (e.g. "cluster_1"), FDR
+#' @param goi single WangGeneID string to plot
+#' @param gene_description gene descriptions df with Gene and WangGeneID columns
+#' @param anno character vector mapping numeric cluster index to cell type name
+#' @param palette character vector of colors (one per cluster)
+#' @param level_order vector of cluster labels in the same order as anno, either
+#'   numbers (e.g. c(1:4, 6, 8:15, 7, 5, 17, 16, 18, 19)) or the labels
+#'   themselves (e.g. c("11", "12_transformer", "12_larva")). Required when anno
+#'   is not indexed directly by cluster number.
+#' @param label_col colData column holding the cluster labels. Default "label".
+#' @param title optional plot title
+
+plot_violin_goi_single <- function(sce, markers, goi, gene_description, anno,
+                                    palette, label_col = "label",
+                                    level_order = NULL, title = NULL) {
+
+  fdr_to_stars <- function(fdr) {
+    dplyr::case_when(
+      fdr < 0.05 ~ "*",
+      TRUE       ~ ""
+    )
+  }
+
+  if (!is.null(level_order)) {
+    anno_lookup <- setNames(anno, as.character(level_order))
+  } else {
+    anno_lookup <- setNames(anno, as.character(seq_along(anno)))
+  }
+
+  count_tab   <- table(as.character(colData(sce)[[label_col]]))
+  anno_lookup <- setNames(
+    paste0(anno_lookup, " (n=", count_tab[names(anno_lookup)], ")"),
+    names(anno_lookup)
+  )
+  anno_n <- unname(anno_lookup[as.character(if (!is.null(level_order)) level_order else seq_along(anno))])
+
+  # "cluster_01" and "1" both resolve to "1"; a label that is not a number,
+  # such as "12_larva", is looked up as it stands
+  .to_celltype <- function(x) {
+    key <- gsub("cluster_", "", as.character(x))
+    num <- suppressWarnings(as.numeric(key))
+    key <- ifelse(is.na(num), key, as.character(num))
+    unname(anno_lookup[key])
+  }
+
+  plot_df <- plotExpression(
+    sce,
+    features      = goi,
+    scattermore   = TRUE,
+    point_size    = 0,
+    swap_rownames = "WangGeneID",
+    x             = label_col,
+    ncol          = 1
+  )$data %>%
+    mutate(
+      X = .to_celltype(X),
+      X = factor(X, levels = rev(anno_n))
+    )
+
+  y_max_df <- plot_df %>%
+    group_by(Feature, X) %>%
+    summarise(y_pos = max(Y) * 1.1, .groups = "drop")
+
+  expand_df <- plot_df %>%
+    group_by(Feature) %>%
+    summarise(y_expand = max(Y) * 1.4, .groups = "drop") %>%
+    mutate(X = anno_n[length(anno_n)])
+
+  sig_df <- markers %>%
+    filter(WangGeneID %in% goi) %>%
+    mutate(
+      stars   = fdr_to_stars(FDR),
+      Feature = WangGeneID,
+      X       = factor(.to_celltype(cluster), levels = levels(plot_df$X))
+    ) %>%
+    filter(stars != "") %>%
+    left_join(y_max_df, by = c("Feature", "X"))
+
+  cluster_colors <- setNames(palette[seq_along(anno_n)], anno_n)
+
+  ggplot(plot_df, aes(x = X, y = Y)) +
+    geom_violin(aes(fill = X, color = after_scale(fill)),
+                linewidth = 0.3, scale = "width", trim = TRUE) +
+    geom_boxplot(width = 0.12, fill = "white", color = "grey40",
+                 linewidth = 0.3, outlier.shape = NA) +
+    geom_blank(data = expand_df, aes(x = X, y = y_expand), inherit.aes = FALSE) +
+    geom_text(data = sig_df, aes(x = X, y = y_pos, label = stars),
+              inherit.aes = FALSE, size = 2.8, vjust = 0.5, fontface = "bold",
+              color = "#2e2e2e") +
+    scale_fill_manual(values = cluster_colors, name = "Cell Type") +
+    scale_x_discrete(labels = function(x) sub("^(\\d+[A-Za-z]*)\\..*", "\\1", x)) +
+    coord_flip(clip = "off", ylim = c(0, NA)) +
+    labs(x = NULL, y = "Log-normalized expression", title = title) +
+    theme_classic(base_size = 8) +
+    theme(
+      axis.text.x     = element_text(color = "#3a3a3a", size = 8),
+      axis.ticks.x    = element_blank(),
+      axis.text.y     = element_text(color = "#3a3a3a", size = 8),
+      axis.ticks.y    = element_blank(),
+      axis.title      = element_text(color = "#2e2e2e", size = 8),
+      axis.line       = element_line(color = "#aaaaaa", linewidth = 0.4),
+      axis.ticks      = element_line(color = "#aaaaaa", linewidth = 0.4),
+      legend.title    = element_text(size = 8),
+      legend.text     = element_text(size = 8),
+      legend.key.size = unit(0.4, "cm"),
+      plot.title      = element_text(face = "bold.italic", size = 8)
+    ) +
+    guides(fill = guide_legend(reverse = TRUE))
+}
+
+# plot_tsne ---------------------------------------------------------------
+#' @name plot_tsne
+#' @description ggplot2 scatter plot of TSNE coordinates with optional cluster
+#'   text labels. Mirrors plotTSNE() aesthetics (black background, no axes).
+#' @param df data frame with columns tsne1, tsne2, and any metadata columns
+#' @param color_col column name in df to map to point color
+#' @param label_col column name in df with cell type labels to display at
+#'   cluster medians. If NULL, no text is drawn.
+#' @param palette optional named character vector of colors passed to
+#'   scale_color_manual(). If NULL, ggplot2 default colors are used.
+#' @param point_size point size (default 0.05)
+#' @param text_color color for cluster label text (default "red")
+#' @param text_size size for cluster label text (default 3)
+#' @param bg_color background color for panel, plot, and legend (default "black");
+#'   legend and title text automatically use black or white based on luminance
+#' @param color_levels optional character vector of levels for color_col, controls
+#'   legend order (e.g. anno[level_order])
+#' @param title optional plot title
+
+plot_tsne <- function(df,
+                      color_col,
+                      label_col    = NULL,
+                      palette      = NULL,
+                      point_size   = 0.05,
+                      text_color   = "red",
+                      text_size    = 3,
+                      bg_color     = "black",
+                      color_levels = NULL,
+                      title        = NULL) {
+
+  # pick legible text color based on bg luminance (WCAG relative luminance)
+  .contrast_color <- function(hex) {
+    rgb  <- col2rgb(hex) / 255
+    lin  <- ifelse(rgb <= 0.03928, rgb / 12.92, ((rgb + 0.055) / 1.055)^2.4)
+    lum  <- 0.2126 * lin[1] + 0.7152 * lin[2] + 0.0722 * lin[3]
+    if (lum > 0.179) "black" else "white"
+  }
+  fg_color <- .contrast_color(bg_color)
+
+  # build count-labeled levels for the legend
+  count_tab <- table(df[[color_col]])
+  levels_base <- if (!is.null(color_levels)) color_levels else
+    names(sort(count_tab, decreasing = TRUE))
+  levels_n <- paste0(levels_base, " (n=", count_tab[levels_base], ")")
+  label_map <- setNames(levels_n, levels_base)
+  df[[color_col]] <- factor(label_map[as.character(df[[color_col]])], levels = levels_n)
+
+  p <- ggplot(df, aes(x = TSNE1, y = TSNE2, color = .data[[color_col]])) +
+    geom_point(size = point_size, stroke = 0) +
+    guides(color = guide_legend(override.aes = list(size = 5))) +
+    labs(color = color_col, title = title) +
+    theme_classic(base_size = 8) +
+    theme(
+      panel.background  = element_rect(fill = bg_color, color = NA),
+      plot.background   = element_rect(fill = bg_color, color = NA),
+      axis.title        = element_blank(),
+      axis.text         = element_blank(),
+      axis.ticks        = element_blank(),
+      axis.line         = element_blank(),
+      legend.background = element_rect(fill = bg_color),
+      legend.text       = element_text(color = fg_color, size = 8),
+      legend.title      = element_text(color = fg_color, size = 8),
+      plot.title        = element_text(color = fg_color, size = 8)
+    )
+
+  if (!is.null(palette)) {
+    if (is.null(names(palette)))
+      palette <- setNames(palette[seq_along(levels_n)], levels_n)
+    else
+      names(palette) <- label_map[names(palette)]
+    p <- p + scale_color_manual(values = palette, breaks = levels_n)
+  }
+
+  if (!is.null(label_col)) {
+    label_df <- df %>%
+      group_by(.data[[label_col]]) %>%
+      summarise(TSNE1 = median(TSNE1), TSNE2 = median(TSNE2), .groups = "drop") %>%
+      dplyr::rename(.label = dplyr::all_of(label_col))
+
+    p <- p +
+      geom_point(
+        data        = label_df,
+        aes(x = TSNE1, y = TSNE2),
+        color       = "white",
+        size        = text_size * 2,
+        inherit.aes = FALSE,
+        show.legend = FALSE
+      ) +
+      geom_text(
+        data        = label_df,
+        aes(x = TSNE1, y = TSNE2, label = .label),
+        color       = text_color,
+        size        = text_size,
+        fontface    = "bold",
+        inherit.aes = FALSE
+      )
+  }
+
+  p
+}
+
+#' Mitochondrial and ribosomal gene ids
+#'
+#' @description The genes whose expression tracks cell quality, ambient RNA and
+#'   lysis as much as cell state. Shared by 13 and 17 so both documents exclude
+#'   the same set.
+#'
+#'   The mitochondrial set is named outright rather than matched on description.
+#'   The descriptions of the mitochondrially encoded genes are shared by the
+#'   nuclear assembly factors of the same complexes, and those are ordinary
+#'   genes. The ribosomal rule excludes the S6 kinases and the rRNA processing
+#'   enzymes for the same reason.
+#'
+#'   These genes are not purely technical in a gonad series. Oocytes accumulate
+#'   mitochondria and spermatids shed them, and ribosome biogenesis tracks
+#'   proliferation. Excluding them is a choice to be reported, not a cleanup.
+#'
+#' @param gene_description data frame with Gene, WangGeneID and description
+#' @return list with $mito (mitochondrially encoded), $rrna (cytoplasmic rRNA),
+#'   $ribo (ribosomal proteins) and $all
+technical_gene_ids <- function(gene_description) {
+  stopifnot(all(c("Gene", "WangGeneID", "description") %in%
+                  colnames(gene_description)))
+
+  # The 13 protein-coding genes of the mitochondrial genome, plus its own two
+  # rRNAs, which this annotation names s-rRNA and l-rRNA.
+  mt_genes <- c("COX1", "COX2", "COX3", "CYTB", "ND1", "ND2", "ND3", "ND4",
+                "ND4L", "ND5", "ND6", "ATP6", "ATP8")
+  mt_rrna  <- "^(l|s)-rRNA$|^(16S|12S) ribosomal RNA$"
+
+  # 28S, 18S and 5.8S are cytoplasmic and belong nowhere near the mitochondrial
+  # fraction. They are also among the most abundant transcripts in a library, so
+  # counting them as mitochondrial inflates that percentage severely.
+  cyto_rrna <- "^(28S|18S|5.8S) ribosomal RNA$"
+
+  # Matched on symbol as well as description, because several entries carry a
+  # description of "partial true" and would otherwise be missed. RPLP0 to RPLP2,
+  # RPSA and UBA52 are structural ribosomal proteins whose names do not fit the
+  # RP + number pattern.
+  rp_pat  <- paste0("ribosomal protein (L|S|SA)[0-9]",
+                    "|^(28S|39S|40S|60S) ribosomal protein",
+                    "|ribosomal protein lateral stalk",
+                    "|^ribosomal protein SA$",
+                    "|ribosomal protein fusion product")
+  rp_sym  <- "^(RPL|RPS|MRPL|MRPS)[0-9]|^(RPLP[0-2]|RPSA|UBA52)$"
+  # the S6 kinases are signaling genes; several carry a description of
+  # "partial true", so they can only be excluded by symbol
+  not_sym <- "^RPS6K"
+  not_rp  <- paste0("kinase|methyltransferase|pseudouridine|assembly|biogenesis",
+                    "|processing|recycling|maturation|export|surveillance",
+                    "|production|GTPase|homolog, ribosome")
+
+  mito <- unique(gene_description$Gene[
+    gene_description$WangGeneID %in% mt_genes |
+      grepl(mt_rrna, gene_description$description, ignore.case = TRUE)])
+
+  rrna <- unique(gene_description$Gene[
+    grepl(cyto_rrna, gene_description$description, ignore.case = TRUE)])
+
+  ribo <- unique(gene_description$Gene[
+    (grepl(rp_pat, gene_description$description, ignore.case = TRUE) |
+       grepl(rp_sym, gene_description$WangGeneID)) &
+      !grepl(not_rp, gene_description$description, ignore.case = TRUE) &
+      !grepl(not_sym, gene_description$WangGeneID)])
+
+  list(mito = mito, rrna = rrna, ribo = ribo,
+       all = Reduce(union, list(mito, rrna, ribo)))
+}
+
+# How much of the spread in pseudotime is just which sample a cell came from.
+#
+# R squared from a regression of pseudotime on a categorical predictor is the
+# share of the total spread that sits between the groups rather than within
+# them. Regressing on library asks how much of the ordering is answered by
+# naming the library: at 1 the trajectory would only be separating the
+# libraries, at 0 every library would cover the same range and the ordering
+# would be entirely within-sample. Regressing on stage asks the same of the
+# larva against transformer split alone.
+#
+# The libraries nest inside stage here, each library being one stage
+# throughout, so the library figure can only be the larger of the two. The gap
+# between them is what separating the four libraries adds over separating the
+# two stages, which is batch and sex.
+#
+# Returns the two numbers, the three-way split of the variance, and a figure.
+# lib_cols is the document's own library palette; pass NULL for ggplot's.
+pseudotime_variance <- function(pt_df, lib_cols = NULL,
+                                pseudotime_col = "pseudotime",
+                                library_col = "library",
+                                stage_col = "stage") {
+  d <- pt_df[is.finite(pt_df[[pseudotime_col]]), , drop = FALSE]
+
+  r2_of <- function(f) {
+    if (!f %in% colnames(d)) return(NA_real_)
+    if (dplyr::n_distinct(d[[f]]) < 2) return(NA_real_)
+    summary(stats::lm(stats::reformulate(f, pseudotime_col), data = d))$r.squared
+  }
+  lib_r2   <- r2_of(library_col)
+  stage_r2 <- r2_of(stage_col)
+
+  # the split only reads as nested when it is; if a library spans stages the
+  # two are not ordered and the middle term is meaningless, so it is dropped
+  nested <- !is.na(lib_r2) && !is.na(stage_r2) && lib_r2 >= stage_r2
+  parts <- if (nested)
+    data.frame(part = factor(c("stage", "library beyond stage",
+                               "within library"),
+                             levels = c("stage", "library beyond stage",
+                                        "within library")),
+               share = c(stage_r2, lib_r2 - stage_r2, 1 - lib_r2))
+  else
+    data.frame(part = factor(c("library", "within library"),
+                             levels = c("library", "within library")),
+               share = c(lib_r2, 1 - lib_r2))
+
+  p_dist <- ggplot2::ggplot(
+      d, ggplot2::aes(x = .data[[pseudotime_col]],
+                      y = .data[[library_col]],
+                      fill = .data[[library_col]])) +
+    ggplot2::geom_violin(scale = "width", colour = NA, alpha = .75) +
+    ggplot2::geom_boxplot(width = .16, outlier.shape = NA, fill = "white",
+                          colour = "grey25", linewidth = .35) +
+    ggplot2::labs(x = "pseudotime", y = NULL,
+                  title = "Pseudotime within each library") +
+    ggplot2::theme_bw(base_size = 10) +
+    ggplot2::theme(legend.position = "none",
+                   plot.title = ggplot2::element_text(size = 10,
+                                                      face = "plain"))
+  if (!is.null(lib_cols))
+    p_dist <- p_dist + ggplot2::scale_fill_manual(values = lib_cols)
+
+  share_cols <- c("stage" = "#0072B2", "library beyond stage" = "#56B4E9",
+                  "library" = "#0072B2", "within library" = "grey85")
+  p_var <- ggplot2::ggplot(parts, ggplot2::aes(x = share, y = "",
+                                               fill = part)) +
+    ggplot2::geom_col(width = .5, colour = "white", linewidth = .4,
+                      position = ggplot2::position_stack(reverse = TRUE)) +
+    ggplot2::geom_text(
+      data = parts[parts$share > .06, , drop = FALSE],
+      ggplot2::aes(label = paste0(round(100 * share, 1), "%")),
+      position = ggplot2::position_stack(vjust = .5, reverse = TRUE),
+      size = 3,
+      colour = ifelse(parts$part[parts$share > .06] == "within library",
+                      "grey20", "white")) +
+    ggplot2::scale_fill_manual(values = share_cols, name = NULL) +
+    ggplot2::scale_x_continuous(labels = function(x) paste0(100 * x, "%"),
+                                expand = c(0, 0)) +
+    ggplot2::labs(x = "share of the variance in pseudotime", y = NULL,
+                  title = "Where that spread sits") +
+    ggplot2::theme_bw(base_size = 10) +
+    ggplot2::theme(legend.position = "bottom",
+                   panel.grid.major.y = ggplot2::element_blank(),
+                   plot.title = ggplot2::element_text(size = 10,
+                                                      face = "plain"))
+
+  list(lib_r2 = lib_r2, stage_r2 = stage_r2, nested = nested, parts = parts,
+       figure = patchwork::wrap_plots(p_dist, p_var, ncol = 1,
+                                      heights = c(3, 1)))
+}
+

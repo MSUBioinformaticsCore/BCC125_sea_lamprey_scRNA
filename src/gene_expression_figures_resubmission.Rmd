@@ -247,6 +247,22 @@ plot_violin_goi_single(sce              = combined.sce,
 ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3, dpi = 600)
 ```
 
+### SYCP3
+
+```{r, fig.width=5, fig.height=3, dev = "png", dpi = 600}
+plot_violin_goi_single(sce              = combined.sce,
+                       markers          = cluster_markers,
+                       goi              = "SYCP3",
+                       gene_description = gene_descriptions,
+                       anno             = anno_order,
+                       palette          = publication_palette,
+                       label_col        = "cluster",
+                       title            = "SYCP3",
+                       level_order      = level_order)
+
+ggsave(paste0(results_dir, "/SYCP3.png"), width = 5, height = 3, dpi = 600)
+```
+
 ### S18: pfn2 and mmp19 enriched in immune cells, and zp and alox5 enriched in oogonia and oocytes 
  
 ```{r, fig.width=7.5, fig.height=11, dev = "png", dpi = 600}
