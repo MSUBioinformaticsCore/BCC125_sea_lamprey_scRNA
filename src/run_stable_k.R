@@ -121,7 +121,7 @@ suppressPackageStartupMessages({
   library(ggplot2)
 })
 
-source(file.path(project_dir, "src", "scRNA_seq_functions.R"))
+source(file.path(project_dir, "src", "manuscript", "scRNA_seq_functions_manuscript.R"))
 
 # ---- fail early, before spending the allocation ---------------------------
 
