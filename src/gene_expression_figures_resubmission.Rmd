@@ -61,10 +61,9 @@ results_dir        = paste0(params$project_dir, "/results/20260813_figures")
 if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
 ```
 
-```{r, echo=FALSE}
+```{r, echo=TRUE}
 # load pre-computed objects for rendering
-# markers of the final labels from 13, every gene against every cluster, kept
-# at 13's FDR < 0.01 with no fold change cutoff, so a star on a violin marks a
+# markers of the final labels from 1, every gene against every cluster
 # significant gene whatever its effect size
 cluster_markers      = read.csv(paste0(atlas_dir, "/cluster_marker_genes_unfiltered.csv")) 
 gene_descriptions    = read.csv(paste0(altas_results_dir, "/gene_descritption.csv"))
@@ -261,6 +260,96 @@ plot_violin_goi_single(sce              = combined.sce,
                        level_order      = level_order)
 
 ggsave(paste0(results_dir, "/SYCP3.png"), width = 5, height = 3, dpi = 600)
+```
+
+### PIWIL1 and SYCP3
+
+```{r, fig.width=8, fig.height=3, dev = "png", dpi = 600}
+violin_panel = function(goi)
+  plot_violin_goi_single(sce              = combined.sce,
+                         markers          = cluster_markers,
+                         goi              = goi,
+                         gene_description = gene_descriptions,
+                         anno             = anno_order,
+                         palette          = publication_palette,
+                         label_col        = "cluster",
+                         title            = goi,
+                         level_order      = level_order)
+
+# both panels carry the same cell type legend, so collecting the guides leaves
+# one copy at the right
+p_piwil1_sycp3 = (violin_panel("PIWIL1") | violin_panel("SYCP3")) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 10, face = "bold"))
+
+p_piwil1_sycp3
+ggsave(p_piwil1_sycp3, file = paste0(results_dir, "/PIWIL1_SYCP3.png"),
+       width = 8, height = 3, dpi = 600)
+```
+
+### PIWIL1 and SYCP3 by library
+
+The same genes with each library drawn on its own. The pooled figure mixes
+libraries, and the male library carries both genes in its somatic clusters,
+likely ambient RNA from its spermatocytes. Here a cluster is compared with the
+clusters of its own library, which is how the marker test compares them. A
+cluster with fewer than 10 cells in a library is left out of that panel.
+
+```{r, fig.width=10, fig.height=7, dev = "png", dpi = 600}
+lib_order     = c("Undifferentiated.1", "Undifferentiated.2", "Female", "Male")
+min_lib_cells = 10
+
+cell_lab = read.csv(paste0(atlas_dir, "/cell_cluster_labels.csv"),
+                    stringsAsFactors = FALSE)
+lab_idx  = match(colnames(combined.sce), cell_lab$barcode)
+stopifnot(!anyNA(lab_idx))
+
+violin_by_library = function(goi) {
+  gene_id = gene_descriptions$Gene[match(goi, gene_descriptions$WangGeneID)]
+  stopifnot(!is.na(gene_id), gene_id %in% rownames(combined.sce))
+
+  d = data.frame(cluster = cell_lab$final_label[lab_idx],
+                 library = cell_lab$library[lab_idx],
+                 expr    = logcounts(combined.sce)[gene_id, ],
+                 stringsAsFactors = FALSE) %>%
+    dplyr::group_by(library, cluster) %>%
+    dplyr::filter(dplyr::n() >= min_lib_cells) %>%
+    dplyr::ungroup() %>%
+    # cluster 1 at the top, in the order of the other figures
+    dplyr::mutate(short   = factor(unname(anno_short[cluster]),
+                                   levels = rev(unname(anno_short))),
+                  type    = factor(unname(anno[cluster]), levels = anno_order),
+                  library = factor(library, levels = lib_order))
+
+  ggplot(d, aes(x = expr, y = short, fill = type)) +
+    geom_violin(aes(color = after_scale(fill)), orientation = "y",
+                linewidth = 0.3, scale = "width", trim = TRUE) +
+    geom_boxplot(orientation = "y", width = 0.12, fill = "white",
+                 color = "grey40", linewidth = 0.3, outlier.shape = NA) +
+    scale_fill_manual(values = publication_palette, name = "Cell Type",
+                      drop = FALSE) +
+    scale_y_discrete(drop = FALSE) +
+    facet_grid(. ~ library) +
+    labs(x = "Log-normalized expression", y = NULL, title = goi) +
+    theme_classic(base_size = 8) +
+    theme(axis.text       = element_text(color = "#3a3a3a", size = 7),
+          axis.ticks.y    = element_blank(),
+          axis.line       = element_line(color = "#aaaaaa", linewidth = 0.4),
+          strip.background = element_blank(),
+          strip.text      = element_text(size = 8),
+          legend.key.size = unit(0.4, "cm"),
+          plot.title      = element_text(face = "bold.italic", size = 8))
+}
+
+p_piwil1_sycp3_lib = (violin_by_library("PIWIL1") / violin_by_library("SYCP3")) +
+  patchwork::plot_layout(guides = "collect") +
+  patchwork::plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 10, face = "bold"))
+
+p_piwil1_sycp3_lib
+ggsave(p_piwil1_sycp3_lib, file = paste0(results_dir, "/PIWIL1_SYCP3_by_library.png"),
+       width = 10, height = 7, dpi = 600)
 ```
 
 ### S18: pfn2 and mmp19 enriched in immune cells, and zp and alox5 enriched in oogonia and oocytes 
