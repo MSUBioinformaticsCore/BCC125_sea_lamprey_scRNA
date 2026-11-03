@@ -1,0 +1,336 @@
+---
+title: "00_sample_qc_soupx"
+author: "Stephanie Hickey"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+    toc: true
+    toc_float:
+      toc_collapsed: true
+params:
+    project_dir: /mnt/ufs18/rs-013/bioinformaticsCore/projects/chong_davidson/BCC125_sea_lamprey_scRNA
+    project_name: BCC125_sea_lamprey_scRNA
+    lab: Weiming Li
+    sampleID: TF_C00004337
+    # which contamination estimate is applied: auto (autoEstCont) or
+    # spermatocyte. Both are computed and reported.
+    rho_source: auto
+---
+
+```{r setup, include=FALSE}
+vec_dev = if (requireNamespace("svglite", quietly = TRUE)) "svglite" else "svg"
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      dev = vec_dev, dpi = 300, fig.retina = 1)
+
+# Compute nodes have no X11, and the default png device asks for it. Cairo
+# renders off screen.
+if (isTRUE(capabilities("cairo"))) options(bitmapType = "cairo")
+```
+
+```{r, echo=FALSE, results="asis"}
+cat("\n")
+cat("#### Lab:", params$lab, " \n")
+cat("#### Project:", params$project_name, " \n")
+cat("#### Sample:", params$sampleID, " \n")
+```
+
+Ambient RNA correction with SoupX, for one library. The cells are the ones the
+per-sample QC kept: the emptyDrops calls with high-mitochondrial cells removed,
+read from `<sample>_cds_mito_filter.Rds`. Nothing is filtered here, so the
+corrected library holds the same cells as the uncorrected one and the two
+atlases can be compared cell for cell.
+
+```{r}
+library(tidyverse)
+library(Matrix)
+library(SingleCellExperiment)
+library(monocle3)
+library(scater)
+library(scran)
+library(SoupX)
+library(DT)
+```
+
+```{r}
+sampleID = params$sampleID
+# droplets whose total count falls in this range, endpoints excluded, are taken
+# as empty and give the soup profile (the SoupX default)
+soup_range = c(0, 100)
+# fewer empty droplets than this and the soup profile is too noisy to use
+min_soup_droplets = 1000
+rho_source = match.arg(params$rho_source, c("auto", "spermatocyte"))
+# neighbors per cell in the SNN graph that gives SoupX its clusters
+cluster_k  = 20
+marker_file = "canonical_markers_S1_only_2026-08-14.csv"
+```
+
+```{r}
+data_dir    = paste0(params$project_dir, "/data")
+results_dir = paste0(params$project_dir, "/results/soupx/", sampleID)
+if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
+out_file    = paste0(results_dir, "/", sampleID, "_soupx.Rds")
+
+gene_description = read.csv(paste0(data_dir, "/gene_descritption.csv"),
+                            stringsAsFactors = FALSE) %>%
+  dplyr::distinct(Gene, .keep_all = TRUE)
+```
+
+# Droplets and cells
+
+The table of droplets is every barcode in the raw matrix, including the empty
+ones. The table of counts is the cells.
+
+```{r}
+raw_dir  = paste0(data_dir, "/", sampleID, "/raw_matrix")
+tod      = as(readMM(paste0(raw_dir, "/matrix.mtx.gz")), "CsparseMatrix")
+barcodes = read.delim(paste0(raw_dir, "/barcodes.tsv.gz"), header = FALSE)
+genes    = read.delim(paste0(raw_dir, "/features.tsv.gz"), header = FALSE)
+rownames(tod) = genes$V1
+# the same prefix the per-sample QC gives, so barcodes match the kept cells
+colnames(tod) = paste0(sampleID, "_", barcodes$V1)
+
+cds   = readRDS(paste0(data_dir, "/", sampleID, "/", sampleID,
+                       "_cds_mito_filter.Rds"))
+cells = colnames(cds)
+stopifnot(all(cells %in% colnames(tod)),
+          setequal(rownames(cds), rownames(tod)))
+
+toc = tod[, cells]
+# the kept cells' counts must be the raw counts, or the correction would be
+# applied to something other than what the atlas was built on
+stopifnot(isTRUE(all.equal(unname(Matrix::colSums(toc)),
+                           unname(Matrix::colSums(counts(cds)[rownames(toc), ])))))
+
+drop_umis   = Matrix::colSums(tod)
+n_soup_drop = sum(drop_umis > soup_range[1] & drop_umis < soup_range[2])
+if (n_soup_drop < min_soup_droplets)
+  stop("only ", n_soup_drop, " droplets have between ", soup_range[1], " and ",
+       soup_range[2], " counts. The soup profile needs empty droplets; check ",
+       "that ", raw_dir, " is the unfiltered matrix.")
+```
+
+`r paste0(format(ncol(tod), big.mark = ","), " droplets in the raw matrix, ", format(ncol(toc), big.mark = ","), " of them cells. ", format(n_soup_drop, big.mark = ","), " droplets hold between ", soup_range[1], " and ", soup_range[2], " counts and give the soup profile.")`
+
+# Clusters
+
+SoupX shares information within clusters when it subtracts, because a single
+count in a single cell cannot be told apart from soup. The clusters are a
+quick SNN clustering of this library alone. They only group similar cells for
+the correction and are not the atlas clusters.
+
+```{r}
+sce = SingleCellExperiment(list(counts = toc))
+sce = logNormCounts(sce)
+dec = modelGeneVar(sce)
+set.seed(100)
+sce = runPCA(sce, subset_row = getTopHVGs(dec, prop = 0.1), ncomponents = 30)
+g   = buildSNNGraph(sce, use.dimred = "PCA", k = cluster_k)
+set.seed(100)
+soup_clusters = setNames(as.character(igraph::cluster_louvain(g)$membership),
+                         colnames(sce))
+
+datatable(as.data.frame(table(cluster = soup_clusters)) %>%
+            dplyr::rename(n_cells = Freq),
+          rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+# Soup profile
+
+```{r}
+sc = SoupChannel(tod, toc, calcSoupProfile = FALSE)
+sc = estimateSoup(sc, soupRange = soup_range)
+sc = setClusters(sc, soup_clusters)
+rm(tod); invisible(gc())
+
+soup_top = sc$soupProfile %>%
+  tibble::rownames_to_column("Gene") %>%
+  dplyr::arrange(dplyr::desc(est)) %>%
+  dplyr::slice_head(n = 50) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::transmute(Gene, WangGeneID, description,
+                   pct_of_soup = signif(100 * est, 3))
+
+write.csv(soup_top, file = paste0(results_dir, "/", sampleID, "_soup_profile_top50.csv"),
+          row.names = FALSE)
+
+datatable(soup_top, rownames = FALSE, filter = "top",
+          options = list(pageLength = 15))
+```
+
+The fifty genes contributing most to the soup. A library dominated by one cell
+type has that cell type's transcripts at the top.
+
+# Contamination fraction
+
+Two estimates of the contamination fraction, rho, the share of a cell's
+counts that come from the soup.
+
+* **auto**: SoupX's `autoEstCont`. It finds genes abundant in the soup that are
+  also specific to a few clusters, and estimates rho from the clusters that do
+  not express them.
+* **spermatocyte**: the curated spermatocyte markers, which no somatic cell
+  expresses. This is the direct probe for the male library, whose soup is mostly
+  spermatocyte transcripts.
+
+For the spermatocyte set, `estimateNonExpressingCells` excludes every cluster
+in which any cell shows real expression, and rho is fitted on the clusters left.
+
+```{r}
+curated = read.csv(paste0(data_dir, "/", marker_file), stringsAsFactors = FALSE)
+spermatocyte_genes = curated$loc_id[curated$CellTypeMarkerSet == "Spermatocytes"]
+
+marker_sets = list(spermatocyte = intersect(spermatocyte_genes, rownames(toc)))
+
+# rho from a named gene set; NA where no cluster can be assumed not to
+# express it
+rho_from_set = function(set_name) {
+  gs = marker_sets[set_name]
+  if (length(gs[[1]]) == 0) return(c(rho = NA, low = NA, high = NA, n_cells = 0))
+  ute = estimateNonExpressingCells(sc, gs, clusters = soup_clusters)
+  if (sum(ute) == 0) return(c(rho = NA, low = NA, high = NA, n_cells = 0))
+  fit = calculateContaminationFraction(sc, gs, useToEst = ute,
+                                       verbose = FALSE, forceAccept = TRUE)
+  c(rho = unique(fit$metaData$rho), low = unique(fit$metaData$rhoLow),
+    high = unique(fit$metaData$rhoHigh), n_cells = sum(ute))
+}
+
+auto_fit = tryCatch(autoEstCont(sc, doPlot = FALSE, verbose = FALSE,
+                                forceAccept = TRUE),
+                    error = function(e) { message("autoEstCont failed: ",
+                                                  conditionMessage(e)); NULL })
+
+rho_tab = dplyr::bind_rows(
+  data.frame(estimate = "auto",
+             rho  = if (is.null(auto_fit)) NA else auto_fit$fit$rhoEst,
+             low  = if (is.null(auto_fit)) NA else auto_fit$fit$rhoFWHM[1],
+             high = if (is.null(auto_fit)) NA else auto_fit$fit$rhoFWHM[2],
+             n_genes = if (is.null(auto_fit)) NA else length(auto_fit$fit$markersUsed$gene),
+             n_cells = NA),
+  dplyr::bind_rows(lapply(names(marker_sets), function(s) {
+    r = rho_from_set(s)
+    data.frame(estimate = s, rho = r[["rho"]], low = r[["low"]],
+               high = r[["high"]], n_genes = length(marker_sets[[s]]),
+               n_cells = r[["n_cells"]])
+  }))) %>%
+  dplyr::mutate(applied = estimate == rho_source)
+
+write.csv(rho_tab, file = paste0(results_dir, "/", sampleID, "_rho_estimates.csv"),
+          row.names = FALSE)
+
+datatable(rho_tab %>% dplyr::mutate(dplyr::across(c(rho, low, high), ~ signif(., 3))),
+          rownames = FALSE, options = list(dom = "t", ordering = FALSE))
+
+rho_used = rho_tab$rho[rho_tab$estimate == rho_source]
+if (is.na(rho_used))
+  stop("the ", rho_source, " estimate could not be made for ", sampleID,
+       ". Knit again with the rho_source parameter set to another estimate; ",
+       "the table above shows which ones exist.")
+```
+
+`r paste0("**rho = ", signif(100 * rho_used, 3), " percent is applied, from the ", rho_source, " estimate.** ")``r if (!is.null(auto_fit)) paste0("For auto the interval is the posterior's full width at half maximum, over ", length(auto_fit$fit$markersUsed$gene), " marker genes. ") else "autoEstCont did not return an estimate. "`For spermatocyte it is the 95 percent confidence interval of the Poisson fit, and `n_cells` is the number of cells it was fitted on.
+
+# Correction
+
+```{r}
+sc  = setContaminationFraction(sc, rho_used)
+out = adjustCounts(sc, roundToInt = TRUE, verbose = 0)
+stopifnot(identical(dim(out), dim(toc)), identical(colnames(out), colnames(toc)))
+
+before = Matrix::colSums(toc)
+after  = Matrix::colSums(out)
+
+removed = data.frame(cluster = soup_clusters[colnames(toc)],
+                     before = before, after = after) %>%
+  dplyr::mutate(pct_removed = 100 * (before - after) / before) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   median_counts = round(median(before)),
+                   median_pct_removed = round(median(pct_removed), 2),
+                   .groups = "drop") %>%
+  dplyr::arrange(dplyr::desc(median_pct_removed))
+
+datatable(removed, rownames = FALSE, options = list(dom = "t", paging = FALSE))
+```
+
+`r paste0(signif(100 * (1 - sum(after) / sum(before)), 3), " percent of the library's counts are removed. A fixed amount of soup is a larger share of a shallow cell, so the clusters with the lowest counts lose the most.")`
+
+The genes losing the largest share of their counts. These are the genes whose
+expression outside their own cell type was mostly soup.
+
+```{r}
+gene_change = data.frame(Gene   = rownames(toc),
+                         before = Matrix::rowSums(toc),
+                         after  = Matrix::rowSums(out)) %>%
+  dplyr::filter(before >= 100) %>%
+  dplyr::mutate(pct_removed = round(100 * (before - after) / before, 1)) %>%
+  dplyr::arrange(dplyr::desc(pct_removed)) %>%
+  dplyr::left_join(gene_description, by = "Gene") %>%
+  dplyr::select(Gene, WangGeneID, description, before, after, pct_removed)
+
+write.csv(gene_change, file = paste0(results_dir, "/", sampleID, "_gene_counts_removed.csv"),
+          row.names = FALSE)
+
+datatable(head(gene_change, 50), rownames = FALSE, filter = "top",
+          options = list(pageLength = 15))
+```
+
+# Probe genes before and after
+
+Mean counts per cell of the spermatocyte markers, SYCP3 and PIWIL1,
+by cluster. In a cluster that does not express a gene, the corrected value
+should fall toward zero. In one that does, it should hold.
+
+```{r}
+probe = c(list(SYCP3 = "SYCP3", PIWIL1 = "PIWIL1"), marker_sets)
+probe = probe[vapply(probe, function(g) any(g %in% rownames(toc)), logical(1))]
+
+probe_tab = dplyr::bind_rows(lapply(names(probe), function(p) {
+  g = intersect(probe[[p]], rownames(toc))
+  data.frame(probe   = p,
+             cluster = soup_clusters[colnames(toc)],
+             before  = Matrix::colSums(toc[g, , drop = FALSE]),
+             after   = Matrix::colSums(out[g, , drop = FALSE]))
+})) %>%
+  dplyr::group_by(probe, cluster) %>%
+  dplyr::summarise(n_cells = dplyr::n(),
+                   mean_before = round(mean(before), 3),
+                   mean_after  = round(mean(after), 3),
+                   pct_cells_before = round(100 * mean(before > 0), 1),
+                   pct_cells_after  = round(100 * mean(after > 0), 1),
+                   .groups = "drop") %>%
+  dplyr::arrange(probe, dplyr::desc(mean_before))
+
+write.csv(probe_tab, file = paste0(results_dir, "/", sampleID, "_probe_genes_before_after.csv"),
+          row.names = FALSE)
+
+datatable(probe_tab, rownames = FALSE, filter = "top",
+          options = list(pageLength = 20))
+```
+
+# Export
+
+The corrected counts, with the per-cell QC carried from the uncorrected object,
+so `01_atlas_soupx.Rmd` can read it in place of `<sample>_cds_mito_filter.Rds`.
+
+```{r}
+cd = colData(cds)
+cd$soupx_cluster = soup_clusters[colnames(cds)]
+cd$soupx_rho     = rho_used
+cd$soupx_counts_before = before[colnames(cds)]
+
+corrected = SingleCellExperiment(list(counts = out[rownames(cds), colnames(cds)]),
+                                 colData = cd)
+metadata(corrected)$soupx = list(rho = rho_used, rho_source = rho_source,
+                                 rho_estimates = rho_tab,
+                                 soup_range = soup_range)
+saveRDS(corrected, file = out_file)
+```
+
+`r paste0("Written to ", out_file, ".")`
+
+# Session info
+
+```{r}
+sessionInfo()
+```

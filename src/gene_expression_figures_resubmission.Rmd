@@ -294,7 +294,9 @@ The same genes with all cells pooled, as in the figure above, and then each
 library drawn on its own. The pooled panel mixes libraries, and the male library carries both genes in its somatic clusters,
 likely ambient RNA from its spermatocytes. Here a cluster is compared with the
 clusters of its own library, which is how the marker test compares them. A
-cluster with fewer than 10 cells in a library is left out of that panel.
+cluster with fewer than 10 cells in a library is left out of that panel. Stars
+are drawn on the pooled panel only, at FDR < 0.05 as in the figure above,
+because the marker test gives one FDR per cluster rather than one per library.
 
 ```{r, fig.width=12, fig.height=7, dev = "png", dpi = 600}
 # the pooled panel first, then the libraries
@@ -328,14 +330,31 @@ violin_by_library = function(goi) {
                   type    = factor(unname(anno[cluster]), levels = anno_order),
                   library = factor(library, levels = lib_order))
 
+  # stars as plot_violin_goi_single draws them: FDR < 0.05, just past the
+  # cluster's highest cell, on the pooled panel
+  stars = cluster_markers %>%
+    dplyr::filter(WangGeneID == goi, FDR < 0.05) %>%
+    dplyr::transmute(cluster = as.character(cluster)) %>%
+    dplyr::inner_join(d %>%
+                        dplyr::filter(library == "All cells") %>%
+                        dplyr::group_by(cluster, short) %>%
+                        dplyr::summarise(x_pos = max(expr) * 1.1, .groups = "drop"),
+                      by = "cluster") %>%
+    dplyr::mutate(library = factor("All cells", levels = lib_order))
+
   ggplot(d, aes(x = expr, y = short, fill = type)) +
     geom_violin(aes(color = after_scale(fill)), orientation = "y",
                 linewidth = 0.3, scale = "width", trim = TRUE) +
     geom_boxplot(orientation = "y", width = 0.12, fill = "white",
                  color = "grey40", linewidth = 0.3, outlier.shape = NA) +
+    geom_text(data = stars, aes(x = x_pos, y = short, label = "*"),
+              inherit.aes = FALSE, size = 2.8, vjust = 0.75, fontface = "bold",
+              color = "#2e2e2e") +
     scale_fill_manual(values = publication_palette, name = "Cell Type",
                       drop = FALSE) +
     scale_y_discrete(drop = FALSE) +
+    # room past the highest cell for the stars
+    scale_x_continuous(expand = ggplot2::expansion(mult = c(0.02, 0.12))) +
     facet_grid(. ~ library) +
     labs(x = "Log-normalized expression", y = NULL, title = goi) +
     theme_classic(base_size = 8) +
