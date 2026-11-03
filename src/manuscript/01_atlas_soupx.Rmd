@@ -29,7 +29,7 @@ cat("#### Project:", params$project_name, " \n")
 ```
 
 **This is `01_atlas.Rmd` run on ambient-corrected counts.** Each library's
-counts were corrected with SoupX in `00_sample_qc_soupx.Rmd`, on the same cells
+counts were corrected with SoupX in its `<library>_sample_qc_soupx.Rmd`, on the same cells
 the uncorrected atlas starts from. Everything below is the uncorrected
 analysis, unchanged, except where it has to differ: the counts it reads, the
 directories it writes to, and the cell type names. Louvain renumbers clusters
