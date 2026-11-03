@@ -264,7 +264,7 @@ ggsave(paste0(results_dir, "/SYCP3.png"), width = 5, height = 3, dpi = 600)
 
 ### PIWIL1 and SYCP3
 
-```{r, fig.width=8, fig.height=3, dev = "png", dpi = 600}
+```{r, fig.width=8, fig.height=4.5, dev = "png", dpi = 600}
 violin_panel = function(goi)
   plot_violin_goi_single(sce              = combined.sce,
                          markers          = cluster_markers,
@@ -285,7 +285,7 @@ p_piwil1_sycp3 = (violin_panel("PIWIL1") | violin_panel("SYCP3")) +
 
 p_piwil1_sycp3
 ggsave(p_piwil1_sycp3, file = paste0(results_dir, "/PIWIL1_SYCP3.png"),
-       width = 8, height = 3, dpi = 600)
+       width = 8, height = 4.5, dpi = 600)
 ```
 
 ### PIWIL1 and SYCP3 by library
