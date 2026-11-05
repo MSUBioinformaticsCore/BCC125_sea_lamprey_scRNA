@@ -1,5 +1,4 @@
-# Gonadal PIP-seq reveals genes involved in germ cell development and sexual differentiation in sea lamprey (*Petromyzon marinus*)
-
+# Gonadal PIP-seq reveals genes with enriched expression during germ cell development and sexual differentiation in sea lamprey (*Petromyzon marinus Linnaeus*)
 **Yu-Wen Chung-Davidson**<sup>1\*</sup>, **Stephanie L. Hickey**<sup>2\*</sup>, Matthew P. Bernard<sup>3</sup>, Sreeja Sarasamma<sup>1</sup>, Ciro Amato<sup>4</sup>, Martin Estermann<sup>4</sup>, Jacob Kimmel<sup>1</sup>, Lily Gorman<sup>5</sup>, Tyler Buchinger<sup>1</sup>, Braden A. Idalski<sup>6</sup>, Nicholas S. Johnson<sup>6</sup>, Humphrey Hung-Chang Yao<sup>4</sup>, Weiming Li<sup>1</sup>
 
 <sup>\*</sup> Co-first authors
