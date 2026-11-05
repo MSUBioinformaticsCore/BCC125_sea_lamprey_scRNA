@@ -191,7 +191,7 @@ all_label_colors <- c("#1F77B4", "#AEC7E8", "#FF7F0E", "#FFBB78",
 publication_palette <- setNames(all_label_colors, anno_order)
 ```
 
-### Fig.9 Chr 81 genes 
+### Fig.10 Chr 81 genes 
 
 ```{r, fig.width=7.5, fig.height=8, dev = "png", dpi = 600}
 id_oi = c("LOC116957683",
@@ -226,10 +226,10 @@ plot_violin_goi(sce              = combined.sce,
                 title            = NULL,
                 ncol             = 2)
 
-ggsave(paste0(results_dir, "/Fig9_Chr81_genes.png"), width = 7.5, height = 8, dpi = 600)
+ggsave(paste0(results_dir, "/Fig10_Chr81_genes.png"), width = 7.5, height = 8, dpi = 600)
 ```
 
-### S6: PIWIL1
+### S5: PIWIL1
 
 ```{r, fig.width=5, fig.height=3, dev = "png", dpi = 600}
 plot_violin_goi_single(sce              = combined.sce,
@@ -243,10 +243,10 @@ plot_violin_goi_single(sce              = combined.sce,
                        level_order      = level_order)
 
   
-ggsave(paste0(results_dir, "/S8_PIWIL1.png"), width = 5, height = 3, dpi = 600)
+ggsave(paste0(results_dir, "/S5_PIWIL1.png"), width = 5, height = 3, dpi = 600)
 ```
 
-### SYCP3
+### S6: SYCP3
 
 ```{r, fig.width=5, fig.height=3, dev = "png", dpi = 600}
 plot_violin_goi_single(sce              = combined.sce,
@@ -259,7 +259,7 @@ plot_violin_goi_single(sce              = combined.sce,
                        title            = "SYCP3",
                        level_order      = level_order)
 
-ggsave(paste0(results_dir, "/SYCP3.png"), width = 5, height = 3, dpi = 600)
+ggsave(paste0(results_dir, "/S6_SYCP3.png"), width = 5, height = 3, dpi = 600)
 ```
 
 ### PIWIL1 and SYCP3
