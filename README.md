@@ -20,33 +20,33 @@ Raw and processed data are deposited in GEO: [GSE334273](https://www.ncbi.nlm.ni
 
 ### PIP-seq Preprocessing & QC
 
-- [Female transformer sample QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/TF_sample_qc.html)
-- [Male transformer sample QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/TM_sample_qc.html)
-- [Undetermined larvae sample 1 QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/UND1_sample_qc.html)
-- [Undetermined larvae sample 2 QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/UND2_sample_qc.html)
+- [Female transformer sample QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/manuscript/TF_sample_qc.html)
+- [Male transformer sample QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/manuscript/TM_sample_qc.html)
+- [Undetermined larvae sample 1 QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/manuscript/html/UND1_sample_qc.html)
+- [Undetermined larvae sample 2 QC](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/manuscript/html/UND2_sample_qc.html)
 
 ### PIP-seq Analysis
 
-- [1. Clustering & annotation (all cells)](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/01_atlas.html)
+- [1. Clustering & annotation (all cells)](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/manuscript/01_atlas.html)
   - Figure 1 : `Fig1_tsne.png`
   - Supplementary Table S1 : `median_stats.csv`
   - Supplementary Table S2 : `cluster_marker_genes_unfiltered.csv`
   - Supplementary Table S4 : `cluster_GO_overlap_pvalues.csv`
-- [2. Germ cell trajectory analysis](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/02_germ_pseudotime.html) 
+- [2. Germ cell trajectory analysis](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/manuscript/02_germ_pseudotime.html) 
   - Figure 6 : `figure6.png`
   - Figure 8 : `figure8.png`
   - Figure 9 : `figure9.png`
   - Supplementary Table S6 : `node_marker_genes.csv`
   - Supplementary Table S7 : `pseudotime_genes.csv`
   - Supplementary Table S8 : `pseudotime_GO_pvalues.csv`
-- [3. Comparisons with Yasmin et al](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/03_bulk_validation.html)
+- [3. Comparisons with Yasmin et al](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/manuscript/03_bulk_validation.html)
   - Figure 5 : `bulk_validation_summary.png`
   - Figure 7 : `fine_node_summary.png`
   - Supplementary Table S5 : `bulk_vs_pseudobulk_per_gene.csv`
   
 ### Gene Expression Figures
 
-- [Gene expression figures]()
+- [Gene expression figures](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/manuscript/gene_expression_figures_resubmission.html)
   - Figure 10 : `Fig10_Chr81_genes.png`
   - Supplementary Figure S5 : `S5_PIWIL1.png`
   - Supplementary Figure S6 : `S6_SYCP3.png`
