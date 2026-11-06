@@ -63,6 +63,7 @@ data/*
 !data/gene_descritption.csv
 !data/SRR_Acc_List.txt
 !data/SraRunTable.csv
+!data/sample_sheet.csv 
 results/
 run/
 estimates/
