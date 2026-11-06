@@ -424,6 +424,6 @@ p_s18 = (s18_panel(oocyte_id) / s18_panel(immune_id)) +
   theme(plot.tag = element_text(size = 10, face = "bold"))
 
 p_s18
-ggsave(p_s18, file = paste0(results_dir, "/FigS18_genes.png"),
+ggsave(p_s18, file = paste0(results_dir, "/FigS13_genes.png"),
        width = 7.5, height = 2 + 0.6 * sum(s18_rows), dpi = 600)
 ```
