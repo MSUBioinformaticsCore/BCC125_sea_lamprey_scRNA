@@ -35,13 +35,14 @@ Raw and processed data are deposited in GEO: [GSE334273](https://www.ncbi.nlm.ni
   - Figure 6 : `figure6.png`
   - Figure 8 : `figure8.png`
   - Figure 9 : `figure9.png`
-  - Supplementary Table S6 : `node_marker_genes.csv`
-  - Supplementary Table S7 : `pseudotime_genes.csv`
-  - Supplementary Table S8 : `pseudotime_GO_pvalues.csv`
+  - Supplementary Table S9 : `node_marker_genes.csv`
+  - Supplementary Table S10 : `pseudotime_genes.csv`
+  - Supplementary Table S11 : `pseudotime_GO_pvalues.csv`
 - [3. Comparisons with Yasmin et al](https://msubioinformaticscore.github.io/BCC125_sea_lamprey_scRNA/html/manuscript/03_bulk_validation.html)
   - Figure 5 : `bulk_validation_summary.png`
   - Figure 7 : `fine_node_summary.png`
-  - Supplementary Table S5 : `bulk_vs_pseudobulk_per_gene.csv`
+  - Supplementary Table S8 : `bulk_vs_pseudobulk_per_gene.csv`
+  - Supplementary Table S8 : `trend_scores.csv`
   
 ### Gene Expression Figures
 
@@ -49,6 +50,7 @@ Raw and processed data are deposited in GEO: [GSE334273](https://www.ncbi.nlm.ni
   - Figure 10 : `Fig10_Chr81_genes.png`
   - Supplementary Figure S5 : `S5_PIWIL1.png`
   - Supplementary Figure S6 : `S6_SYCP3.png`
+  - Supplementary Figure S13 : `FigS13_genes.png`
   - Meta data for all cells (deposited on GEO): `cell_metadata.tsv.gz`
 
 ### Yasmin et al reprocessing
