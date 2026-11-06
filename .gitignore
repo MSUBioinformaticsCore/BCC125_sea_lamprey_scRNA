@@ -61,6 +61,8 @@ data/*
 !data/S1*.csv
 !data/yasmin_PRJNA749754_sample_groups.csv
 !data/gene_descritption.csv
+!data/SRR_Acc_List.txt
+!data/SraRunTable.csv
 results/
 run/
 estimates/
