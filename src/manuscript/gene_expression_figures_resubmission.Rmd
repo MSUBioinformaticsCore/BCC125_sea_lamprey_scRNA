@@ -377,35 +377,53 @@ ggsave(p_piwil1_sycp3_lib, file = paste0(results_dir, "/PIWIL1_SYCP3_by_library.
        width = 12, height = 7, dpi = 600)
 ```
 
-### S18: pfn2 and mmp19 enriched in immune cells, and zp and alox5 enriched in oogonia and oocytes 
- 
-```{r, fig.width=7.5, fig.height=11, dev = "png", dpi = 600}
-zp_id = 
+### S18: zp, alox5 and nxph1 enriched in oogonia and oocytes, and pfn2 and mmp19 enriched in immune cells
+
+```{r, fig.width=7.5, fig.height=13, dev = "png", dpi = 600}
+zp_id =
   gene_descriptions %>%
   filter(grepl("ZP", WangGeneID),
          WangGeneID != "ZPR1") %>%
   pull(Gene)
 
-id_oi = c("LOC116952631",
-          "LOC116938704",
-          "ALOX5",
-          zp_id)
+# A: oogonia and oocytes. Both NXPH1 loci, LOC116940857 (NXPH1) and
+# LOC116949363 (NXPH1.1).
+oocyte_id = c("ALOX5",
+              "LOC116940857",
+              "LOC116949363",
+              zp_id)
+# B: immune cells, PFN2 and MMP19
+immune_id = c("LOC116952631",
+              "LOC116938704")
 
-goi = 
+goi_of = function(ids)
   gene_descriptions %>%
-  filter(Gene %in% id_oi) %>%
+  filter(Gene %in% ids) %>%
   pull(WangGeneID)
 
-plot_violin_goi(sce              = combined.sce,
-                markers          = cluster_markers,
-                goi              = goi,
-                gene_description = gene_descriptions,
-                anno             = anno_order,
-                palette          = publication_palette,
-                label_col        = "cluster",
-                level_order      = level_order,
-                title            = NULL,
-                ncol             = 2)
+s18_panel = function(ids)
+  plot_violin_goi(sce              = combined.sce,
+                  markers          = cluster_markers,
+                  goi              = goi_of(ids),
+                  gene_description = gene_descriptions,
+                  anno             = anno_order,
+                  palette          = publication_palette,
+                  label_col        = "cluster",
+                  level_order      = level_order,
+                  title            = NULL,
+                  ncol             = 2)
 
-ggsave(paste0(results_dir, "/FigS18_genes.png"), width = 7.5, height = 11)
+# each panel's height follows its number of rows of genes, so the violins are
+# the same size in both
+s18_rows = c(ceiling(length(goi_of(oocyte_id)) / 2),
+             ceiling(length(goi_of(immune_id)) / 2))
+
+p_s18 = (s18_panel(oocyte_id) / s18_panel(immune_id)) +
+  patchwork::plot_layout(heights = s18_rows, guides = "collect") +
+  patchwork::plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 10, face = "bold"))
+
+p_s18
+ggsave(p_s18, file = paste0(results_dir, "/FigS18_genes.png"),
+       width = 7.5, height = 2 + 0.6 * sum(s18_rows), dpi = 600)
 ```
