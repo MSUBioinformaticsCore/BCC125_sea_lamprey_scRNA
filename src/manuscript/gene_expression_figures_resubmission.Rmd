@@ -377,7 +377,7 @@ ggsave(p_piwil1_sycp3_lib, file = paste0(results_dir, "/PIWIL1_SYCP3_by_library.
        width = 12, height = 7, dpi = 600)
 ```
 
-### S18: zp, alox5 and nxph1 enriched in oogonia and oocytes, and pfn2 and mmp19 enriched in immune cells
+### S13: zp, alox5 and nxph1 enriched in oogonia and oocytes, and pfn2 and mmp19 enriched in immune cells
 
 ```{r, fig.width=7.5, fig.height=13, dev = "png", dpi = 600}
 zp_id =
