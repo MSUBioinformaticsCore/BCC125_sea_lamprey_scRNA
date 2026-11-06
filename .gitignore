@@ -66,6 +66,7 @@ data/*
 results/
 run/
 estimates/
+manuscript/
 # only the manuscript folders of src and html are tracked
 src/*
 !src/manuscript/
