@@ -42,7 +42,7 @@ Raw and processed data are deposited in GEO: [GSE334273](https://www.ncbi.nlm.ni
   - Figure 5 : `bulk_validation_summary.png`
   - Figure 7 : `fine_node_summary.png`
   - Supplementary Table S8 : `bulk_vs_pseudobulk_per_gene.csv`
-  - Supplementary Table S8 : `trend_scores.csv`
+  - Supplementary Table S14 : `trend_scores.csv`
   
 ### Gene Expression Figures
 
