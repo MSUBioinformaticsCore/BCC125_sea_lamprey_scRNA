@@ -511,6 +511,13 @@ library_meta = data.frame(
   stage   = c("larva", "larva", "transformer", "transformer"),
   stringsAsFactors = FALSE)
 
+# The library colors, the same in 02 and every figure. Paul Tol's "bright" scheme, distinguishable under all three kinds of color
+# blindness. The two undifferentiated libraries share a hue, as a pair.
+lib_cols = c("Undifferentiated.1" = "#4477AA",
+             "Undifferentiated.2" = "#66CCEE",
+             "Female"             = "#EE6677",
+             "Male"               = "#CCBB44")
+
 observed   = sort(unique(as.character(colData(merged.sce)$batch)))
 unexpected = setdiff(observed, library_meta$batch)
 if (length(unexpected) > 0)
@@ -570,7 +577,7 @@ comp_bar = function(tbl, title) {
     mutate(library = factor(library, levels = library_meta$library)) %>%
     ggplot(aes(x = n, y = label, fill = library)) +
     geom_col(position = "fill") +
-    scale_fill_brewer(palette = "Set2") +
+    scale_fill_manual(values = lib_cols) +
     xlab("proportion of cells") + ylab("cluster") + ggtitle(title)
 }
 
@@ -1685,11 +1692,16 @@ fig1_short = setNames(sub("_transformer$", "T", sub("_larva$", "L", anno$final_l
                       anno$final_label)
 fig1_types = setNames(paste0(fig1_short, ". ", anno$cell_type), anno$final_label)
 
-fig1_colors = c("#1F77B4", "#AEC7E8", "#FF7F0E", "#FFBB78",
-                "#2CA02C", "#98DF8A", "#D62728", "#FF9896",
-                "#9467BD", "#C5B0D5", "#8C564B", "#C49C94",
-                "#E377C2", "#F7B6D2", "#7F7F7F", "#C7C7C7",
-                "#BCBD22", "#DBDB8D", "#17BECF")
+# Picked to stay apart under normal vision and simulated deuteranopia,
+# protanopia and tritanopia (every pair at least 8.9 CIEDE2000 units apart under
+# all four), and to stand out against both the black tSNE panel and the white
+# legend. Nineteen colors cannot all be told apart at a glance by everyone, so
+# the cluster numbers are drawn on the tSNE as well.
+fig1_colors = c("#6A7C31", "#F999FE", "#90427A", "#96EB41",
+                "#45A290", "#9B5BE5", "#9EA966", "#136B50",
+                "#8788B2", "#CE5171", "#7C3BBF", "#DE870E",
+                "#81B793", "#D276EF", "#F4C38E", "#068371",
+                "#A7354A", "#67689E", "#C39FCB")
 stopifnot(length(fig1_colors) == length(fig1_types))
 fig1_palette = setNames(fig1_colors, fig1_types)
 
@@ -1714,12 +1726,6 @@ p_fig1_tsne = plot_tsne(df           = fig1_cells,
                         text_size    = 2) +
   theme(panel.background = element_rect(fill = "black", color = NA),
         legend.key       = element_rect(fill = "white", color = NA))
-
-# the library colors used in 02, so a library is the same color in every figure
-lib_cols = c("Female"             = "#FF6DB6",
-             "Male"               = "#006ddb",
-             "Undifferentiated.1" = "#009292",
-             "Undifferentiated.2" = "#b66ddf")
 
 fig1_comp = comp_post %>%
   dplyr::mutate(label = as.character(label)) %>%

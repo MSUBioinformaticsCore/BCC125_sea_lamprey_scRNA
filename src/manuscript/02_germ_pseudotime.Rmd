@@ -133,8 +133,12 @@ gene_description = read.csv(paste0(object_dir, "/gene_descritption.csv"),
                             stringsAsFactors = FALSE) %>%
   dplyr::distinct(Gene, .keep_all = TRUE)
 
-lib_cols = c("Female" = "#FF6DB6", "Male" = "#006ddb",
-             "Undifferentiated.1" = "#009292", "Undifferentiated.2" = "#b66ddf")
+# The library colors, the same as in 01. Paul Tol's "bright" scheme, distinguishable under all three kinds of color
+# blindness. The two undifferentiated libraries share a hue, as a pair.
+lib_cols = c("Undifferentiated.1" = "#4477AA",
+             "Undifferentiated.2" = "#66CCEE",
+             "Female"             = "#EE6677",
+             "Male"               = "#CCBB44")
 
 ```
 
